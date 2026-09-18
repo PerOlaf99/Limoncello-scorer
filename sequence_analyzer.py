@@ -46,6 +46,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 
 from analyzer_core import (
     AnalysisSettings,
@@ -71,6 +72,7 @@ LIMON_BAR = "#D9F24A"       # fluorescent lime-yellow top strip
 LIMON_DRK = "#22350E"       # dark green-lemon for text on the bar
 LIMON_ACCENT = "#BEE027"    # accent green-yellow
 DOC_CACHE_MAX = 300         # keep memory bounded on huge run collections
+SCAN_RATE_HZ = 1.75         # instrument scan rate (~0.571 s per scan)
 WELL_RE = re.compile(r"([A-Ha-h]\d{1,2})")
 
 TRACE_THEMES = {
@@ -184,6 +186,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.show_qnum = tk.BooleanVar(value=False)
         self.show_qcurve = tk.BooleanVar(value=True)
         self.show_current = tk.BooleanVar(value=True)
+        self.x_time = tk.BooleanVar(value=False)  # x axis: scans (off) vs time (on)
         self.theme = tk.StringVar(value="Classic")
         self.wrap_rows = tk.IntVar(value=5)
 
@@ -537,6 +540,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._cur_btn.pack(side=tk.LEFT, padx=(8, 2))
         self._sync_current_btn()
         ttk.Label(chan_bar, text="   Signal: Volts").pack(side=tk.LEFT, padx=4)
+        self._time_btn = tk.Checkbutton(
+            chan_bar, text="  Time (s)  ", variable=self.x_time,
+            bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
+            command=self.redraw)
+        self._time_btn.pack(side=tk.LEFT, padx=(8, 2))
         ttk.Button(chan_bar, text="⟲ Reset view",
                    command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
 
@@ -1221,13 +1229,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                             transform=ax.transAxes, ha="left", va="top",
                             fontsize=6, color="#333", zorder=6)
-                ax.tick_params(labelsize=6, labelbottom=(r == rows - 1))
+                ax.tick_params(labelsize=6)
+                self._style_x_axis(ax, r == rows - 1,
+                                   label=(r == rows - 1 and k == len(shows) - 1))
                 self._draw_letters(ax, doc, sel[0], sel[-1] + 1, colors, force=True)
         for ax in axes:
             ax.grid(True, alpha=0.15)
-        axes[-1].set_xlabel("Scan")
-        if total and axes[-1]:
-            pass
         self.fig.suptitle(f"Wrap view — {len(shows)} well(s) × {rows} rows", fontsize=9)
         if gy0 is not None and gx1 > 0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -1405,6 +1412,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.ybar.set(fy0, fy1)
         self.canvas.draw_idle()
 
+    def _fmt_time(self, scan, _pos=None):
+        """Scan number -> time label (seconds, or m:ss past a minute)."""
+        secs = float(scan) / SCAN_RATE_HZ
+        if secs >= 60:
+            m = int(secs // 60)
+            return f"{m}:{secs - 60 * m:04.1f}"
+        return f"{secs:.1f}"
+
+    def _style_x_axis(self, ax, is_bottom, label=True):
+        """Show x tick labels on the bottom pane only; label scans or time."""
+        ax.tick_params(axis="x", labelbottom=bool(is_bottom))
+        if not is_bottom:
+            return
+        if self.x_time.get():
+            ax.xaxis.set_major_formatter(FuncFormatter(self._fmt_time))
+        if label:
+            ax.set_xlabel("Time (s)" if self.x_time.get() else "Scan")
+
     def redraw(self):
         self.fig.clear()
         self._plot_axes = []
@@ -1489,8 +1514,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                     transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#333", zorder=6)
-            if i == len(paths) - 1:
-                ax.set_xlabel("Scan")
+            self._style_x_axis(ax, i == len(paths) - 1)
 
             if doc.sequence and settings.view_mode == "called" and doc.peak_positions:
                 self._draw_letters(ax, doc, s0, s1, colors, force=False)
@@ -1668,6 +1692,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "  • Remove selected samples with  – Remove file(s)  or the Delete key.\n\n"
             "4. MOVING AROUND THE PLOT\n"
             "  • Bottom bar = X (scan) axis, right bar = Y (signal) axis.\n"
+            "  • X tick numbers appear only under the bottom pane, so stacked\n"
+            "    plots keep their height. Tick  Time (s)  to read the X axis in\n"
+            "    seconds instead of scan numbers (1.75 scans/s, ~0.57 s/scan).\n"
             "  • Grab a bar's thumb and slide to pan that axis.\n"
             "  • Roll the mouse wheel over the X bar to zoom X; over the Y bar to\n"
             "    zoom Y. Double-click a bar to reset that axis.\n"

@@ -15,6 +15,7 @@ wired to the plate-validated **best basecaller** configs.
 | Advanced params (knobs) | Analysis → ⚙ Basecall settings… (dialog) |
 | Wrap rows, tour interval | View menu |
 | Per-graph label (folder/file) | Yes — drawn in each plot's top-left |
+| X axis | Tick numbers only on the bottom pane; **Time (s)** toggle (1.75 Hz) |
 | Pan/zoom | Axis bars: drag to pan, wheel to zoom; right-click/Home resets |
 | Random background pictures | Yes — `Background*.jpg` / `BG*.jpg` beside the app |
 | Export FASTA / CSV / trace text | Yes |
