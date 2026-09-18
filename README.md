@@ -26,35 +26,41 @@ wired to the plate-validated **best basecaller** configs.
 ## Requirements
 
 ```bash
-pip install numpy scipy matplotlib
+pip install numpy scipy matplotlib pillow   # pillow only for backgrounds
 # tkinter: included on Windows/macOS Python installers
 # Ubuntu/Debian: sudo apt install python3-tk
 ```
 
 Place this folder **next to** `BEST_BASECALLER_RELEASE` (or keep the
-`cimarron_basecaller` package on `PYTHONPATH`).
+`cimarron_basecaller` package on `PYTHONPATH`). `.rsd`/`.scf` files need it;
+`.ab1` and text traces open without it.
 
 ```
 artifacts/
   BEST_BASECALLER_RELEASE/
-  Background.jpg            # optional empty-view pictures
-  BG2.jpg, BG3.jpg, BG4.jpg # (any Background*/BG* image in this dir)
-  Limoncell scorer/
+  Limoncello scorer/
     sequence_analyzer.py
     analyzer_core.py
     README.md
     requirements.txt
+    Background.jpg            # empty-view pictures (bundled)
+    BG2.jpg, BG3.jpg, BG4.jpg
+    example_data/M13/         # 8 M13 wells (A01–A08.rsd)
 ```
 
 ## Run
 
 ```bash
-cd "Limoncell scorer"
-python sequence_analyzer.py
+cd "Limoncello scorer"
+python3 sequence_analyzer.py
 
 # Or open with a folder already loaded
-python sequence_analyzer.py --folder /path/to/plate96/rsd
+python3 sequence_analyzer.py --folder "/path/to/Limoncello scorer/example_data/M13"
 ```
+
+To try it immediately: **File → Add data folder** →
+`example_data/M13`. These are `.rsd` files, so the basecaller package is
+required to view them (place `BEST_BASECALLER_RELEASE` beside this folder).
 
 ## Typical workflow
 
@@ -68,12 +74,15 @@ python sequence_analyzer.py --folder /path/to/plate96/rsd
 
 - The bottom bar is the **X (scan)** axis, the right bar is the **Y (signal)** axis.
   Grab a bar's thumb and slide to pan that axis.
+- X tick numbers appear only under the **bottom pane**, so stacked plots keep
+  their height. Tick **Time (s)** to read the axis as minutes:seconds instead
+  of scans (1.75 scans/s, ~0.57 s/scan).
 - Roll the mouse wheel over a bar to zoom that axis; **double-click** a bar to
   reset it. Both bars drive every visible plot together.
 - Lost in the zoom? **Right-click** the plot or a bar, press **Home**, or use the
   **⟲ Reset view** button.
 - With no well selected, the empty plot area shows a randomly chosen picture
-  from `Background*.jpg` / `BG*.jpg` in the parent folder (a new one each redraw).
+  from `Background*.jpg` / `BG*.jpg` in this folder (a new one each redraw).
 - **File → Save graph image…** writes the current plot area to PNG/PDF/SVG.
   The old matplotlib toolbar was removed in favour of these controls.
 

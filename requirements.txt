@@ -1,5 +1,6 @@
 numpy>=1.20
 scipy>=1.7
 matplotlib>=3.5
+pillow>=9  # optional: empty-view background pictures
 # GUI: use system Python with tkinter (usually included on Windows/macOS)
 # On Linux: sudo apt install python3-tk

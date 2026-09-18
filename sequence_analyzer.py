@@ -1413,12 +1413,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.canvas.draw_idle()
 
     def _fmt_time(self, scan, _pos=None):
-        """Scan number -> time label (seconds, or m:ss past a minute)."""
-        secs = float(scan) / SCAN_RATE_HZ
-        if secs >= 60:
-            m = int(secs // 60)
-            return f"{m}:{secs - 60 * m:04.1f}"
-        return f"{secs:.1f}"
+        """Scan number -> minutes:seconds label (whole seconds)."""
+        total = int(round(float(scan) / SCAN_RATE_HZ))
+        return f"{total // 60}:{total % 60:02d}"
 
     def _style_x_axis(self, ax, is_bottom, label=True):
         """Show x tick labels on the bottom pane only; label scans or time."""
@@ -1463,7 +1460,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         if wrap:
             self._draw_wrap(paths, settings, colors)
-            self.fig.tight_layout()
+            self.fig.tight_layout(h_pad=0.3, w_pad=0.2, pad=0.4)
             self._apply_zoom()
             self.canvas.draw_idle()
             self._show_sequence()
@@ -1538,7 +1535,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pad = 0.02 * (gy1 - gy0) or 1.0
             self._full_xlim = (float(gx0), float(gx1))
             self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
-        self.fig.tight_layout()
+        self.fig.tight_layout(h_pad=0.25, pad=0.3)
         self._apply_zoom()
         self.canvas.draw_idle()
         self._show_sequence()
