@@ -15,7 +15,7 @@ wired to the plate-validated **best basecaller** configs.
 | Advanced params (knobs) | Analysis → ⚙ Basecall settings… (dialog) |
 | Wrap rows, tour interval | View menu |
 | Per-graph label (folder/file) | Yes — drawn in each plot's top-left |
-| X axis | Tick numbers only on the bottom pane; **Time (s)** toggle (1.75 Hz) |
+| X axis | Tick numbers only on the bottom pane; **Time (min)** toggle (1.75 Hz) |
 | Pan/zoom | Axis bars: drag to pan, wheel to zoom; right-click/Home resets |
 | Random background pictures | Yes — `Background*.jpg` / `BG*.jpg` beside the app |
 | Export FASTA / CSV / trace text | Yes |
@@ -75,7 +75,7 @@ required to view them (place `BEST_BASECALLER_RELEASE` beside this folder).
 - The bottom bar is the **X (scan)** axis, the right bar is the **Y (signal)** axis.
   Grab a bar's thumb and slide to pan that axis.
 - X tick numbers appear only under the **bottom pane**, so stacked plots keep
-  their height. Tick **Time (s)** to read the axis as minutes:seconds instead
+  their height. Tick **Time (min)** to read the axis as minutes:seconds instead
   of scans (1.75 scans/s, ~0.57 s/scan).
 - Roll the mouse wheel over a bar to zoom that axis; **double-click** a bar to
   reset it. Both bars drive every visible plot together.

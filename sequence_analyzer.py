@@ -541,7 +541,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_current_btn()
         ttk.Label(chan_bar, text="   Signal: Volts").pack(side=tk.LEFT, padx=4)
         self._time_btn = tk.Checkbutton(
-            chan_bar, text="  Time (s)  ", variable=self.x_time,
+            chan_bar, text="  Time (min)  ", variable=self.x_time,
             bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
             command=self.redraw)
         self._time_btn.pack(side=tk.LEFT, padx=(8, 2))
@@ -1425,7 +1425,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if self.x_time.get():
             ax.xaxis.set_major_formatter(FuncFormatter(self._fmt_time))
         if label:
-            ax.set_xlabel("Time (s)" if self.x_time.get() else "Scan")
+            ax.set_xlabel("Time (min)" if self.x_time.get() else "Scan")
+
+    def _add_volt_label(self):
+        """One shared Y-axis label, centred on the whole stack with some air."""
+        self.fig.supylabel("Volt", fontsize=8, x=0.014, color="#333")
 
     def redraw(self):
         self.fig.clear()
@@ -1460,7 +1464,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         if wrap:
             self._draw_wrap(paths, settings, colors)
-            self.fig.tight_layout(h_pad=0.3, w_pad=0.2, pad=0.4)
+            self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.3, w_pad=0.2, pad=0.4)
+            self._add_volt_label()
             self._apply_zoom()
             self.canvas.draw_idle()
             self._show_sequence()
@@ -1506,7 +1511,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 axc.set_ylabel("µA", color=CURRENT_COLOR, fontsize=6)
                 axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
 
-            ax.set_ylabel("[Signal, V]" if i == 0 else "", fontsize=8)
             ax.tick_params(labelsize=7)
             ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                     transform=ax.transAxes, ha="left", va="top",
@@ -1535,7 +1539,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pad = 0.02 * (gy1 - gy0) or 1.0
             self._full_xlim = (float(gx0), float(gx1))
             self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
-        self.fig.tight_layout(h_pad=0.25, pad=0.3)
+        self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
+        self._add_volt_label()
         self._apply_zoom()
         self.canvas.draw_idle()
         self._show_sequence()
@@ -1690,8 +1695,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "4. MOVING AROUND THE PLOT\n"
             "  • Bottom bar = X (scan) axis, right bar = Y (signal) axis.\n"
             "  • X tick numbers appear only under the bottom pane, so stacked\n"
-            "    plots keep their height. Tick  Time (s)  to read the X axis in\n"
-            "    seconds instead of scan numbers (1.75 scans/s, ~0.57 s/scan).\n"
+            "    plots keep their height. Tick  Time (min)  to read the X axis as\n"
+            "    minutes:seconds instead of scan numbers (1.75 scans/s,\n"
+            "    ~0.57 s/scan).\n"
             "  • Grab a bar's thumb and slide to pan that axis.\n"
             "  • Roll the mouse wheel over the X bar to zoom X; over the Y bar to\n"
             "    zoom Y. Double-click a bar to reset that axis.\n"
