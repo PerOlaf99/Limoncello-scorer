@@ -31,21 +31,22 @@ pip install numpy scipy matplotlib pillow   # pillow only for backgrounds
 # Ubuntu/Debian: sudo apt install python3-tk
 ```
 
-Place this folder **next to** `BEST_BASECALLER_RELEASE` (or keep the
-`cimarron_basecaller` package on `PYTHONPATH`). `.rsd`/`.scf` files need it;
-`.ab1` and text traces open without it.
+The basecaller package is **bundled** in the zip (see the folder tree below),
+so `.rsd`/`.scf` files work on any machine out of the box. `.ab1` and text
+traces don't need it at all.
 
 ```
-artifacts/
-  BEST_BASECALLER_RELEASE/
-  Limoncello scorer/
-    sequence_analyzer.py
-    analyzer_core.py
-    README.md
-    requirements.txt
-    Background.jpg            # empty-view pictures (bundled)
-    BG2.jpg, BG3.jpg, BG4.jpg
-    example_data/M13/         # 8 M13 wells (A01–A08.rsd)
+Limoncello scorer.zip
+├── Limoncello scorer/
+│   ├── sequence_analyzer.py
+│   ├── analyzer_core.py
+│   ├── README.md
+│   ├── requirements.txt
+│   ├── Background.jpg            # empty-view pictures (bundled)
+│   ├── BG2.jpg, BG3.jpg, BG4.jpg
+│   └── example_data/M13/         # 8 M13 wells (A01–A08.rsd)
+└── BEST_BASECALLER_RELEASE/
+    └── cimarron_basecaller/      # base caller (imported by the app)
 ```
 
 ## Run
