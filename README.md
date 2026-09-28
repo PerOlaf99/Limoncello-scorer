@@ -22,6 +22,8 @@ wired to the plate-validated **best basecaller** configs.
 | Export FASTA / CSV / trace text | Yes |
 | Save graph image (PNG/PDF/SVG) | Yes — File → Save graph image… |
 | Save/load settings JSON | Yes |
+| Run comments (per-file, Stored beside the data) | Yes — Comments menu |
+| Run info panel | Yes — Comments menu |
 | Genotyping | Planned — next to base calling, later release |
 
 ## Requirements
@@ -150,6 +152,19 @@ Genotyping dye sets are fixed **per channel** (no base colors):
 
 Changing the scheme recolors the traces only; it does not change the base
 labels or the basecalling dye order.
+
+## Comments & run info
+
+The **Comments** menu sits between *Analysis* and *Help*:
+
+- **Run comments…** writes a note for the selected run (main-curve style). It is
+  stored beside the data file as `<file>.comment.txt`, so it travels with the
+  run without ever touching the binary `.rsd`/`.scf` header. A saved comment is
+  shown in the sequence pane under the `>` header line.
+- **Run info…** gives a read-only rundown of the selected well: source, scan
+  count and run time, base order, basecaller preset, sequence statistics
+  (length, Qmean/Qmin, N, peak spacing), per-channel signal maxima and the
+  instrument current.
 
 ## Note on environment
 

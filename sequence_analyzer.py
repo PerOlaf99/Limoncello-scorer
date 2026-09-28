@@ -191,6 +191,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.folders: List[Path] = list(initial_folders or [])
         self.files: List[Path] = []
         self.docs: dict[str, TraceDocument] = {}
+        self._comment_cache: dict[str, str] = {}
         self.selected: List[Path] = []
         self.excluded: set[str] = set()   # individual files hidden by the user
         self._bg_checked = False
@@ -389,8 +390,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         help_m.add_command(label="User manual…", command=self.show_help)
         help_m.add_command(label="About", command=self.show_about)
 
+        comments_m = tk.Menu(self, tearoff=0)
+        comments_m.add_command(label="Run comments…", command=self.edit_comments)
+        comments_m.add_command(label="Run info…", command=self.show_run_info)
+
         self._menus = {"File": file_m, "View": view_m,
-                       "Analysis": analysis_m, "Help": help_m}
+                       "Analysis": analysis_m, "Comments": comments_m, "Help": help_m}
     def _build_layout(self):
         # Yellow title bar — the window is undecorated ('splash'), so this is
         # the top of the app and carries the name (centred) + window buttons.
@@ -1174,13 +1179,145 @@ class LimoncelloAnalyzerApp(tk.Tk):
             doc = self.docs.get(key)
             if not doc:
                 continue
+            if key not in self._comment_cache:
+                self._comment_cache[key] = self._read_comment(path)
+            comment = self._comment_cache.get(key, "")
             if not doc.sequence:
-                self.seq_text.insert(
-                    tk.END, f">{doc.well} ({doc.source}) — use ▶ Call to base-call\n\n")
+                head = f">{doc.well} ({doc.source}) — use ▶ Call to base-call"
+                if comment:
+                    head += f"\n; {comment}"
+                self.seq_text.insert(tk.END, head + "\n\n")
                 continue
+            head = f">{doc.well} {self._well_stats(doc)}  [{doc.source}]"
+            if comment:
+                head += f"\n; {comment}"
             self.seq_text.insert(
-                tk.END,
-                f">{doc.well} {self._well_stats(doc)}  [{doc.source}]\n{doc.sequence}\n\n")
+                tk.END, f"{head}\n{doc.sequence}\n\n")
+
+    # ------------------------------------------------------- comments / info
+    def _comment_file(self, path: Path) -> Path:
+        """Comments are kept next to the data as '<file>.comment.txt' — they
+        travel with the run and never touch the binary .rsd/.scf file."""
+        return Path(str(path) + ".comment.txt")
+
+    def _read_comment(self, path: Path) -> str:
+        cf = self._comment_file(path)
+        try:
+            if cf.exists():
+                return cf.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            pass
+        return ""
+
+    def edit_comments(self):
+        """View / write the run comment for the currently selected file."""
+        if not self.selected:
+            messagebox.showinfo("Run comments", "Select a well/file first.")
+            return
+        path = self.selected[0]
+        key = str(path.resolve())
+        if key not in self._comment_cache:
+            self._comment_cache[key] = self._read_comment(path)
+        comment = self._comment_cache.get(key, "")
+
+        win = tk.Toplevel(self)
+        win.title("Run comments")
+        win.geometry("520x300")
+        win.transient(self)
+        win.grab_set()
+        tk.Label(win, text=f"{path.name}: comment for this run", anchor=tk.W).pack(
+            fill=tk.X, padx=10, pady=(8, 2))
+        box = tk.Text(win, wrap=tk.WORD, undo=True)
+        box.insert("1.0", comment)
+        box.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        note = (
+            "Stored beside the data file:\n"
+            f"{self._comment_file(path).name}\n"
+            "You can delete the file to remove the comment.")
+        tk.Label(win, text=note, fg="#555", justify=tk.LEFT, anchor=tk.W).pack(
+            fill=tk.X, padx=10, pady=(0, 2))
+        bar = ttk.Frame(win)
+        bar.pack(fill=tk.X, padx=10, pady=6)
+
+        def save():
+            text = box.get("1.0", "end-1c").strip()
+            self._comment_cache[key] = text
+            try:
+                if text:
+                    self._comment_file(path).write_text(text, encoding="utf-8")
+                else:
+                    try:
+                        self._comment_file(path).unlink()
+                    except OSError:
+                        pass
+                self.status_var.set(f"Comment saved for {path.name}")
+            except OSError as e:
+                messagebox.showerror("Run comments", f"Could not write comment:\n{e}")
+            win.destroy()
+            self._show_sequence()
+
+        ttk.Button(bar, text="Save", command=save).pack(side=tk.LEFT)
+        ttk.Button(bar, text="Discard", command=win.destroy).pack(side=tk.LEFT, padx=6)
+
+    def show_run_info(self):
+        """Read-only rundown of the selected well's run parameters."""
+        if not self.selected:
+            messagebox.showinfo("Run info", "Select a well/file first.")
+            return
+        path = self.selected[0]
+        key = str(path.resolve())
+        try:
+            doc = self._ensure_doc(path)
+        except Exception as e:
+            messagebox.showerror("Run info", f"{path.name}:\n{e}")
+            return
+        comment = self._comment_cache.get(key) or self._read_comment(path)
+
+        add = lambda k, v: chunks.append(f"{k:<20} {v}")
+        chunks = ["Run info", "   " + str(path), ""]
+        add("Well", doc.well)
+        add("Source", f"{doc.source} — {doc.meta}")
+        add("Scans", f"{doc.n_scans}  ({doc.n_scans / SCAN_RATE_HZ / 60:.1f} min "
+                     f"at {SCAN_RATE_HZ:.2f} Hz)")
+        add("Base order", doc.base_order)
+        add("Basecaller", self.basecaller.get())
+        if doc.sequence:
+            n = len(doc.sequence)
+            qa = np.asarray(doc.qualities[:n], dtype=float)
+            sp = np.median(np.diff(np.asarray(doc.peak_positions[:n], float)))
+            add("Sequence length", str(n))
+            add("Quality mean", f"{qa.mean():.1f}" if qa.size else "-")
+            add("Quality min", f"{qa.min():.0f}" if qa.size else "-")
+            add("N count", str(doc.sequence.count("N")))
+            add("Peak spacing", f"{sp:.2f} scans" if np.isfinite(sp) else "-")
+        else:
+            add("Sequence", "not base-called yet")
+        tr = doc.acgt
+        if tr.size:
+            order = (doc.base_order or "TGCA").upper()
+            per = ", ".join(
+                f"Ch{c + 1} {b}={float(np.nanmax(tr[:, c])):.3f} V"
+                for c, b in enumerate(order[:4]))
+            add("Signal max (V)", per)
+        cu = doc.current_ua
+        if cu is not None and cu.size:
+            add("Current (µA)", f"mean {np.nanmean(cu):.2f}, max {np.nanmax(cu):.2f}")
+        if comment:
+            chunks.append("")
+            chunks.append("Comment:")
+            chunks.append(comment)
+
+        win = tk.Toplevel(self)
+        win.title("Run info")
+        win.geometry("680x420")
+        win.transient(self)
+        win.grab_set()
+        txt = scrolledtext.ScrolledText(
+            win, wrap=tk.WORD, font=("DejaVu Sans Mono", 9))
+        txt.insert("1.0", "\n".join(chunks))
+        txt.config(state=tk.DISABLED)
+        txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        ttk.Button(win, text="Close", command=win.destroy).pack(anchor=tk.E, padx=10, pady=6)
 
     # ------------------------------------------------------------------ plot
     def _theme_colors(self) -> dict:
@@ -1823,6 +1960,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "  • Export trace text (V + µA)… raw values.\n"
             "  • Save graph image…          the plot area as PNG/PDF/SVG.\n"
             "  • Save / Load settings JSON…  remembers your caller setup.\n\n"
+            "7b. COMMENTS & RUN INFO  (Comments menu, between Analysis and Help)\n"
+            "  • Run comments…  — write a note for the selected run; it is stored\n"
+            "    beside the data file as '<file>.comment.txt' (the .rsd header is\n"
+            "    left untouched) and shown under the sequence once saved.\n"
+            "  • Run info…  — read-only rundown of the selected run: well, source,\n"
+            "    scan count & run time, base order, basecaller preset, sequence\n"
+            "    statistics, per-channel signal maxima and the instrument current.\n\n"
             "8. KEYBOARD SHORTCUTS\n"
             "  ↑ / ↓ / PgUp / PgDn   page through wells\n"
             "  Space                 start / stop auto-tour\n"
