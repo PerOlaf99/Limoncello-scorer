@@ -129,18 +129,26 @@ Dye order default **TGCA** (ET plate).
 
 The palette combo box (top of the plot area, near the **Channels:** toggles)
 and **View → Trace colors** control the trace colors. Traces are drawn in the
-run's **physical channel order** (Ch1..Ch4), each labelled by the base it
-carries — that base order is the chemistry under
-**⚙ Basecall settings → Dye/channel → Base order** (default **TGCA**).
+run's **physical channel order** (Ch1..Ch4) — the first tick is always the
+first channel — each labelled by the base it carries (that base order is the
+chemistry under **⚙ Basecall settings → Dye/channel → Base order**, default
+**TGCA**).
 
-**Sequencing colors are fixed per base**, exactly as the MegaBACE sequence
-analyser shows them: A green, C blue, T red, G black. The base order only
-decides which base sits on which channel, so the same traces keep the same
-colors whatever the kit — only the channels shift:
+**Classic (default)** keeps its colors **fixed per channel**, the classic
+primer look:
 
 | Option | Ch1 | Ch2 | Ch3 | Ch4 |
 |--------|-----|-----|-----|-----|
-| **Seq DYEnamic (T·G·C·A)** *(default)* | T red | G black | C blue | A green |
+| **Classic** *(default)* | Green | Blue | Red | Black |
+
+Sequencing dye sets are fixed per **base**, as the MegaBACE sequence analyser
+shows them (A green, C blue, T red, G black) — the base order only decides
+which base sits on which channel, so the same traces keep the same colors
+whatever the kit:
+
+| Option | Ch1 | Ch2 | Ch3 | Ch4 |
+|--------|-----|-----|-----|-----|
+| **Seq DYEnamic (T·G·C·A)** | T red | G black | C blue | A green |
 | **Seq ET primer (A·C·T·G)** | A green | C blue | T red | G black |
 
 Genotyping dye sets are fixed **per channel** (no base colors):
