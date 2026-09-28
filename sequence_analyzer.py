@@ -9,7 +9,7 @@ A desktop viewer and base caller for capillary-electrophoresis traces:
   • 1–8 electropherogram panes, plus a Wrap view (one well in N rows)
   • Raw / processed / wrapped / base-called views
   • Quality profile (0–100, teal=good / brown=poor) + base letters
-  • Basecaller versions (pos_bonus07, pos_profile, hz_soften, raw_peaks)
+  • Basecaller versions (mb1000/mb4000 × accuracy/length, legacy aliases)
   • Auto-tour (slideshow) through the loaded wells
   • Sort wells by well / name / folder, jump-to-well filter
   • Export: FASTA, peak CSV, trace text (channels V + current µA)
@@ -80,6 +80,17 @@ TRACE_THEMES = {
     "Chromas": {"A": "#00AA00", "C": "#1E90FF", "G": "#444444", "T": "#FF0000"},
     "High-contrast": {"A": "#2E8B57", "C": "#1F4FC0", "G": "#000000", "T": "#E03030"},
     "Monochrome": {"A": "#777777", "C": "#555555", "G": "#333333", "T": "#888888"},
+    # MegaBACE genotyping dye sets 1 & 2: Channel 1 Red (ET-ROX), Channel 2
+    # Blue (FAM), Channel 3 Black (HEX/NED), Channel 4 Green (TET/HEX).
+    # Channels here are A/C/G/T = Ch1/Ch2/Ch3/Ch4.
+    "Genotyping (R·B·Blk·G)": {"A": "#E03030", "C": "#2557E8", "G": "#111111", "T": "#00B052"},
+    # Same traces in the Red=Ch3 / Black=Ch4 order many users are used to.
+    "Genotyping (G·B·R·Blk)": {"A": "#00B052", "C": "#2557E8", "G": "#E03030", "T": "#111111"},
+    # Sequencing dye sets (blue laser 488 nm), coloured by the standard dye
+    # colour per base (A green, C blue, G black, T red) rotated to each kit's
+    # base-in-channel order. Bases in channels: DYEnamic T·G·C·A, ET primer A·C·T·G.
+    "Seq DYEnamic (T·G·C·A)": {"A": "#DD0000", "C": "#111111", "G": "#0000DD", "T": "#00AA00"},
+    "Seq ET primer (A·C·T·G)": {"A": "#00AA00", "C": "#0000DD", "G": "#DD0000", "T": "#111111"},
 }
 
 SRC_FG = {
@@ -177,7 +188,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.settings = AnalysisSettings()
         self.n_graphs = tk.IntVar(value=1)
         self.view_mode = tk.StringVar(value="processed")
-        self.basecaller = tk.StringVar(value="pos_bonus07")
+        self.basecaller = tk.StringVar(value="mb1000_accuracy")
         self.status_var = tk.StringVar(value="Ready — add a data folder to begin")
 
         # Visualization state
@@ -545,6 +556,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
             bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
             command=self.redraw)
         self._time_btn.pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Label(chan_bar, text="Trace colors:").pack(side=tk.RIGHT, pady=4)
+        self.theme_cb = ttk.Combobox(
+            chan_bar, textvariable=self.theme, width=24, state="readonly",
+            values=list(TRACE_THEMES))
+        self.theme_cb.pack(side=tk.RIGHT, padx=(4, 8))
+        self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
         ttk.Button(chan_bar, text="⟲ Reset view",
                    command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
 
@@ -1657,7 +1674,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         for k, v in data.items():
             if hasattr(self.settings, k):
                 setattr(self.settings, k, v)
-        self.basecaller.set(data.get("basecaller", "pos_bonus07"))
+        self.basecaller.set(data.get("basecaller", "mb1000_accuracy"))
         self.base_order_var.set(data.get("base_order", "TGCA"))
         self.bonus.set(data.get("channel_peak_bonus", 0.7))
         self.pullback.set(data.get("pullback_weight", 0.008))
@@ -1712,14 +1729,33 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "  • Wrap                  — one well split over N rows; set\n"
             "                            View ▸ Wrap rows (2-8).\n"
             "  • Channels submenu toggles A/C/G/T; Trace colors picks a palette.\n"
+             "      MegaBACE genotyping dye sets are built in:\n"
+             "      'Genotyping (R·B·Blk·G)'  = Ch1 Red (ET-ROX), Ch2 Blue (FAM),\n"
+             "                                 Ch3 Black (HEX/NED), Ch4 Green (TET/HEX)\n"
+             "      'Genotyping (G·B·R·Blk)'  = Green/Blue/Red/Black on Ch1-4\n"
+             "                                 (the order Fragment-readers are used to).\n"
+             "      Sequencing dye sets (blue laser):\n"
+             "      'Seq DYEnamic (T·G·C·A)'   = T red, G black, C blue, A green (Ch1-4)\n"
+             "      'Seq ET primer (A·C·T·G)'  = A green, C blue, T red, G black (Ch1-4)\n"
             "  • Page forward / Page backward step through wells; auto-tour plays\n"
             "    them automatically (Space starts/stops it).\n\n"
-            "6. BASECALLING  (Analysis menu)\n"
-            "  • Basecall selected — calls the wells currently plotted.\n"
-            "  • Basecall all in list — calls everything listed (asks first if big).\n"
-            "  • ⚙ Basecall settings… — advanced caller parameters.\n"
-            "  • Called sequence(s) appear in the box below the plot.\n"
-            "  • Genotyping is planned for a later release.\n\n"
+"6. BASECALLING  (Analysis menu)\n"
+             "  • Basecall selected — calls the wells currently plotted.\n"
+             "  • Basecall all in list — calls everything listed (asks first if big).\n"
+             "  • ⚙ Basecall settings… — pick a basecaller + advanced parameters.\n"
+             "  • Basecaller presets (instrument × mode):\n"
+             "      mb1000_accuracy  MB1000 · longest error-free run, high %ID\n"
+             "      mb1000_length    MB1000 · longest read at ID ≥95%\n"
+             "      mb4000_accuracy  MB4000 · error-free mode + 4000 CHM\n"
+             "      mb4000_length    MB4000 · length mode + 4000 CHM\n"
+             "      pos_bonus07      legacy alias for mb1000_accuracy\n"
+             "      pos_profile      legacy alias for mb1000_length\n"
+             "      hz_soften        accuracy base + mild mid hard-zone\n"
+             "      raw_peaks        minimal envelope-peak call (debug)\n"
+             "  • Use mb4000_* only on MegaBACE 4000 data; on 1000 traces the\n"
+             "    4000 spectral matrix is the wrong chemistry and reads collapse.\n"
+             "  • Called sequence(s) appear in the box below the plot.\n"
+             "  • Genotyping is planned for a later release.\n\n"
             "7. EXPORT  (File menu)\n"
             "  • Export sequence (FASTA)…   called bases per well.\n"
             "  • Export peak table (CSV)…   well, base, scan position, quality.\n"
@@ -1761,7 +1797,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "Serves all instruments that produce CE traces:\n"
             "Formats: .rsd, .scf, ABI .ab1, text/CSV traces\n"
             "Current trace: µA (RSD raw ÷10); fluorescence in Volts.\n"
-            "Basecallers: pos_bonus07, pos_profile, hz_soften, raw_peaks\n"
+            "Basecallers: mb1000/mb4000 × accuracy/length (pos_bonus07 and\n"
+             "            pos_profile are legacy aliases of those; hz_soften,\n"
+             "            raw_peaks remain), see the Basecall settings dialog.\n"
             "Multi-folder load, multi-graph, auto-tour, well sort/filter.\n"
             "Genotyping is planned for a later release.\n\n"
             "Uses our own tuned spacing tracker.",

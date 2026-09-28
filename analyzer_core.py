@@ -53,8 +53,8 @@ except ImportError:
 class AnalysisSettings:
     """Mirrors typical CE Sequence Analyzer / basecall settings."""
 
-    # Basecaller version
-    basecaller: str = "pos_bonus07"  # pos_bonus07 | pos_profile | hz_soften | raw_peaks
+# Basecaller version (see BASECALLER_VERSIONS)
+    basecaller: str = "mb1000_accuracy"
 
     # Channel / dye
     base_order: str = "TGCA"  # instrument dye order → ACGT columns
@@ -100,9 +100,55 @@ class AnalysisSettings:
     # View
     view_mode: str = "processed"  # raw | baseline | processed | called
 
+    # AnalysisSettings fields that map 1:1 onto track_bases kwargs.
+    _KNOB_MAP = {
+        "use_gaussian_reconstruction": "use_gaussian_reconstruction",
+        "gaussian_recon_segment_size": "gaussian_recon_segment_size",
+        "gaussian_recon_noise_reg": "gaussian_recon_noise_reg",
+        "use_multipass_wiener": "use_multipass_wiener",
+        "use_combined_channel_score": "use_combined_channel_score",
+        "channel_peak_bonus": "channel_peak_bonus",
+        "pullback_weight": "pullback_weight",
+        "ema_alpha": "ema_alpha",
+        "local_norm_window": "local_norm_window",
+        "baseline_window": "baseline_window",
+    }
+
     def to_track_kwargs(self) -> Dict[str, Any]:
-        """Map settings → track_bases kwargs (best_basecaller)."""
-        kw: Dict[str, Any] = dict(
+        """Map settings → track_bases kwargs (best_basecaller).
+
+        For a named basecaller preset the preset's config (instrument × mode)
+        is authoritative; only knobs the user has actually changed from their
+        defaults override it. This is what lets e.g. mb4000_* keep its global
+        matrix / mb*_length keep its mid hard-zone deconv.
+        """
+        defaults = AnalysisSettings()
+        if self.basecaller in BB_CONFIGS:
+            kw: Dict[str, Any] = dict(BB_CONFIGS[self.basecaller])
+            kw.pop("base_order", None)  # app passes base_order explicitly
+            for field, tkw in self._KNOB_MAP.items():
+                if getattr(self, field) != getattr(defaults, field):
+                    kw[tkw] = getattr(self, field)
+            if (self.window_frac_lo, self.window_frac_hi) != (defaults.window_frac_lo, defaults.window_frac_hi):
+                kw["window_frac"] = (self.window_frac_lo, self.window_frac_hi)
+            if (self.pullback_frac, self.pullback_start, self.pullback_end) != (
+                    defaults.pullback_frac, defaults.pullback_start, defaults.pullback_end
+            ):
+                if self.pullback_profile_enable:
+                    kw["pullback_profile"] = (self.pullback_frac, self.pullback_start, self.pullback_end)
+                else:
+                    kw.pop("pullback_profile", None)
+            elif not self.pullback_profile_enable:
+                kw.pop("pullback_profile", None)
+            # user explicitly turned the position-adaptive toggle off
+            if self.position_adaptive_spectral != defaults.position_adaptive_spectral:
+                kw["position_adaptive_spectral"] = self.position_adaptive_spectral
+            kw.setdefault("local_hardzone_deconv", False)
+            kw.setdefault("use_multipass_wiener", self.use_multipass_wiener)
+            return kw
+
+        # No preset (e.g. a custom name): pass every knob through.
+        kw = dict(
             use_gaussian_reconstruction=self.use_gaussian_reconstruction,
             gaussian_recon_segment_size=self.gaussian_recon_segment_size,
             gaussian_recon_noise_reg=self.gaussian_recon_noise_reg,
@@ -118,27 +164,19 @@ class AnalysisSettings:
             local_hardzone_deconv=False,
         )
         if self.pullback_profile_enable:
-            kw["pullback_profile"] = (
-                self.pullback_frac,
-                self.pullback_start,
-                self.pullback_end,
-            )
-        # Merge named config defaults if present
-        if self.basecaller in BB_CONFIGS:
-            base = dict(BB_CONFIGS[self.basecaller])
-            base.update({k: v for k, v in kw.items() if v is not None})
-            # ensure flags
-            base.setdefault("local_hardzone_deconv", False)
-            base.setdefault("use_multipass_wiener", self.use_multipass_wiener)
-            return base
+            kw["pullback_profile"] = (self.pullback_frac, self.pullback_start, self.pullback_end)
         return kw
 
 
 BASECALLER_VERSIONS = {
-    "pos_bonus07": "Best dual-aware (recommended)",
-    "pos_profile": "Max matched_bp (longer tail)",
+    "pos_bonus07": "Best dual-aware (recommended; = mb1000 accuracy)",
+    "pos_profile": "Max matched_bp (longer tail; = mb1000 length)",
     "hz_soften": "Mild mid-zone less deconv",
     "raw_peaks": "Minimal processing + envelope peaks",
+    "mb1000_accuracy": "MB1000 · longest error-free run, high %ID (deep Q-trim)",
+    "mb1000_length": "MB1000 · longest read at ID ≥95% (mid hard-zone)",
+    "mb4000_accuracy": "MB4000 · error-free mode + MB4000 spectral CHM",
+    "mb4000_length": "MB4000 · length mode + MB4000 spectral CHM",
 }
 
 
