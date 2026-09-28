@@ -76,21 +76,31 @@ SCAN_RATE_HZ = 1.75         # instrument scan rate (~0.571 s per scan)
 WELL_RE = re.compile(r"([A-Ha-h]\d{1,2})")
 
 TRACE_THEMES = {
+    # Sequencing (MegaBACE SA) colours are FIXED per base, exactly as the SA
+    # software shows them: A green, C blue, T red, G black.  The base order
+    # changes per chemistry (it only decides which base sits on which physical
+    # channel), so the traces keep these colours at all times.  The dye-kit
+    # names below therefore match the equivalent of these colours on MegaBACE.
+    "Seq DYEnamic (T·G·C·A)": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
+    "Seq ET primer (A·C·T·G)": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
     "Classic": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
     "Chromas": {"A": "#00AA00", "C": "#1E90FF", "G": "#444444", "T": "#FF0000"},
     "High-contrast": {"A": "#2E8B57", "C": "#1F4FC0", "G": "#000000", "T": "#E03030"},
     "Monochrome": {"A": "#777777", "C": "#555555", "G": "#333333", "T": "#888888"},
-    # MegaBACE genotyping dye sets 1 & 2: Channel 1 Red (ET-ROX), Channel 2
-    # Blue (FAM), Channel 3 Black (HEX/NED), Channel 4 Green (TET/HEX).
-    # Channels here are A/C/G/T = Ch1/Ch2/Ch3/Ch4.
+    # MegaBACE genotyping dye sets are FIXED per CHANNEL (no base colours),
+    # applied physically: Channel1,2,3,4.  Dye set 1 = Ch1 Red (ET-ROX),
+    # Ch2 Blue (FAM), Ch3 Black (HEX/NED), Ch4 Green (TET/HEX).  Many users
+    # are used to Red=Ch3 / Black=Ch4, hence the second variant.
     "Genotyping (R·B·Blk·G)": {"A": "#E03030", "C": "#2557E8", "G": "#111111", "T": "#00B052"},
-    # Same traces in the Red=Ch3 / Black=Ch4 order many users are used to.
     "Genotyping (G·B·R·Blk)": {"A": "#00B052", "C": "#2557E8", "G": "#E03030", "T": "#111111"},
-    # Sequencing dye sets (blue laser 488 nm), coloured by the standard dye
-    # colour per base (A green, C blue, G black, T red) rotated to each kit's
-    # base-in-channel order. Bases in channels: DYEnamic T·G·C·A, ET primer A·C·T·G.
-    "Seq DYEnamic (T·G·C·A)": {"A": "#DD0000", "C": "#111111", "G": "#0000DD", "T": "#00AA00"},
-    "Seq ET primer (A·C·T·G)": {"A": "#00AA00", "C": "#0000DD", "G": "#DD0000", "T": "#111111"},
+}
+
+# "channel" themes paint each trace by position (Channel1..4), ignoring which
+# base letter the channel carries (genotyping has no fixed base colours).
+# "base" themes paint every trace by the colour of its base letter (sequencing).
+TRACE_THEME_MODE = {
+    "Genotyping (R·B·Blk·G)": "channel",
+    "Genotyping (G·B·R·Blk)": "channel",
 }
 
 SRC_FG = {
@@ -186,6 +196,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._bg_checked = False
         self._bg_imgs: List[np.ndarray] = []
         self.settings = AnalysisSettings()
+        self.base_order_var = tk.StringVar(value=self.settings.base_order)
         self.n_graphs = tk.IntVar(value=1)
         self.view_mode = tk.StringVar(value="processed")
         self.basecaller = tk.StringVar(value="mb1000_accuracy")
@@ -198,7 +209,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.show_qcurve = tk.BooleanVar(value=True)
         self.show_current = tk.BooleanVar(value=True)
         self.x_time = tk.BooleanVar(value=False)  # x axis: scans (off) vs time (on)
-        self.theme = tk.StringVar(value="Classic")
+        self.theme = tk.StringVar(value="Seq DYEnamic (T·G·C·A)")
         self.wrap_rows = tk.IntVar(value=5)
 
         # Shared X/Y view, stored as [first, last] fractions of the full data
@@ -536,13 +547,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
         chan_bar = ttk.Frame(center)
         chan_bar.pack(fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(chan_bar, text="Channels:").pack(side=tk.LEFT)
-        for i, base in enumerate(CHANNEL_ORDER):
+        self._chan_cbs = []
+        for i in range(len(CHANNEL_ORDER)):
             cb = tk.Checkbutton(
-                chan_bar, text=f"  {base}  ", variable=self.chan_show[i],
+                chan_bar, text=f"  {CHANNEL_ORDER[i]}  ", variable=self.chan_show[i],
                 command=self.redraw, bg="#F2F4F7",
-                fg=TRACE_THEMES["Classic"][base], activebackground="#F2F4F7",
+                fg="#000000", activebackground="#F2F4F7",
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
+            self._chan_cbs.append(cb)
+        self._refresh_channel_buttons()
         self._cur_btn = tk.Checkbutton(
             chan_bar, text="  µA  ", variable=self.show_current,
             bg="#DFF6DC", activebackground="#DFF6DC", fg="#14532D",
@@ -1074,6 +1088,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def apply_knobs_redraw(self):
         self.settings = self._settings_from_ui()
         # re-load docs so the dye order / base_order takes effect on fresh loads
+        self._refresh_channel_buttons()
         self.redraw()
 
     def _ensure_doc(self, path: Path) -> TraceDocument:
@@ -1171,6 +1186,44 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _theme_colors(self) -> dict:
         return dict(TRACE_THEMES.get(self.theme.get(), "Classic"))
 
+    def _theme_mode(self) -> str:
+        """'base' themes paint each trace by the colour of its base letter
+        (MegaBACE SA sequencing colours are fixed per base); 'channel' themes
+        paint Channel1..4 by position (genotyping dye sets)."""
+        return TRACE_THEME_MODE.get(self.theme.get(), "base")
+
+    def _channel_lines(self, settings):
+        """Physical channel order Ch1..Ch4 -> (channel_idx, base letter,
+        acgt column, colour), so traces render exactly as MegaBACE SA shows
+        them: channels in run order, each coloured by the base it carries."""
+        order = (settings.base_order or "TGCA").upper()
+        colors = self._theme_colors()
+        mode = self._theme_mode()
+        lines = []
+        for ci, base in enumerate(order[:4]):
+            try:
+                col = CHANNEL_ORDER.index(base)
+            except ValueError:
+                continue
+            color = colors[CHANNEL_ORDER[ci]] if mode == "channel" else colors.get(base, "#000000")
+            lines.append((ci, base, col, color))
+        return lines
+
+    def _refresh_channel_buttons(self):
+        """Label/colour the Channel checkbuttons in the run's physical channel
+        order, using the colour of the base each channel carries."""
+        cbs = getattr(self, "_chan_cbs", None)
+        if not cbs:
+            return
+        order = (self.base_order_var.get() or "TGCA").upper()
+        colors = self._theme_colors()
+        mode = self._theme_mode()
+        for ci, base in enumerate(order[:4]):
+            if ci >= len(cbs):
+                break
+            color = colors[CHANNEL_ORDER[ci]] if mode == "channel" else colors.get(base, "#000000")
+            cbs[ci].config(text=f"  {base}  ", fg=color)
+
     def _well_stats(self, doc) -> str:
         import textwrap
         seq, q = doc.sequence, doc.qualities
@@ -1225,10 +1278,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             for r in range(rows):
                 ax = axes[k * rows + r]
                 sel = segs[r]
-                for ci, base in enumerate(CHANNEL_ORDER):
+                for ci, base, col, color in self._channel_lines(settings):
                     if self.chan_show[ci].get():
-                        y = tr[sel, ci]
-                        ax.plot(sel, y, color=colors[base], lw=0.6, label=base if r == 0 else None)
+                        y = tr[sel, col]
+                        ax.plot(sel, y, color=color, lw=0.6, label=base if r == 0 else None)
                         if y.size:
                             m0 = float(np.nanmin(y)); m1 = float(np.nanmax(y))
                             gy0 = m0 if gy0 is None else min(gy0, m0)
@@ -1502,11 +1555,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
             s1 = min(tr.shape[0], s1)
             x = np.arange(s0, s1)
             plotted = False
-            for ci, base in enumerate(CHANNEL_ORDER):
+            for ci, base, col, color in self._channel_lines(settings):
                 if not self.chan_show[ci].get():
                     continue
-                seg = tr[s0:s1, ci]
-                ax.plot(x, seg, color=colors[base], lw=0.7, label=base)
+                seg = tr[s0:s1, col]
+                ax.plot(x, seg, color=color, lw=0.7, label=base)
                 if seg.size:
                     m0 = float(np.nanmin(seg)); m1 = float(np.nanmax(seg))
                     gy0 = m0 if gy0 is None else min(gy0, m0)
@@ -1678,6 +1731,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.base_order_var.set(data.get("base_order", "TGCA"))
         self.bonus.set(data.get("channel_peak_bonus", 0.7))
         self.pullback.set(data.get("pullback_weight", 0.008))
+        self._refresh_channel_buttons()
         self.status_var.set(f"Loaded settings from {path}")
 
     def show_help(self):
@@ -1728,15 +1782,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "  • Base-called           — peaks with base letters and quality.\n"
             "  • Wrap                  — one well split over N rows; set\n"
             "                            View ▸ Wrap rows (2-8).\n"
-            "  • Channels submenu toggles A/C/G/T; Trace colors picks a palette.\n"
-             "      MegaBACE genotyping dye sets are built in:\n"
-             "      'Genotyping (R·B·Blk·G)'  = Ch1 Red (ET-ROX), Ch2 Blue (FAM),\n"
-             "                                 Ch3 Black (HEX/NED), Ch4 Green (TET/HEX)\n"
-             "      'Genotyping (G·B·R·Blk)'  = Green/Blue/Red/Black on Ch1-4\n"
-             "                                 (the order Fragment-readers are used to).\n"
-             "      Sequencing dye sets (blue laser):\n"
-             "      'Seq DYEnamic (T·G·C·A)'   = T red, G black, C blue, A green (Ch1-4)\n"
-             "      'Seq ET primer (A·C·T·G)'  = A green, C blue, T red, G black (Ch1-4)\n"
+            "  • Channels submenu toggles the four channels; Trace colors picks a\n"
+            "    colour scheme.  Traces are drawn in the run's physical channel\n"
+            "    order (Ch1..Ch4), each labelled by the base it carries — set the\n"
+            "    chemistry under ⚙ Basecall settings ▸ Dye/channel ▸ Base order.\n"
+            "      Sequencing colours are FIXED per base, like the MegaBACE SA:\n"
+            "      A green, C blue, T red, G black — the same traces therefore keep\n"
+            "      the same colours whatever the kit, only the channels shift.\n"
+            "        'Seq DYEnamic (T·G·C·A)'  = fixed colours with DYEnamic kit\n"
+            "                                   (Ch1=T · Ch2=G · Ch3=C · Ch4=A).\n"
+            "        'Seq ET primer (A·C·T·G)' = fixed colours with ET primer kit\n"
+            "                                   (Ch1=A · Ch2=C · Ch3=T · Ch4=G).\n"
+            "      Genotyping dye sets are FIXED per channel (no base colours):\n"
+            "        'Genotyping (R·B·Blk·G)'  = Ch1 Red (ET-ROX), Ch2 Blue (FAM),\n"
+            "                                   Ch3 Black (HEX/NED), Ch4 Green (TET/HEX)\n"
+            "        'Genotyping (G·B·R·Blk)'  = Green/Blue/Red/Black on Ch1-4\n"
+            "                                   (the order Fragment-readers are used to).\n"
             "  • Page forward / Page backward step through wells; auto-tour plays\n"
             "    them automatically (Space starts/stops it).\n\n"
 "6. BASECALLING  (Analysis menu)\n"

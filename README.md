@@ -126,27 +126,30 @@ Dye order default **TGCA** (ET plate).
 ## Trace colors / MegaBACE dye sets
 
 The palette combo box (top of the plot area, near the **Channels:** toggles)
-and **View → Trace colors** control the trace colors. Channel labels are the
-app-wide `A / C / G / T` for Ch1 / Ch2 / Ch3 / Ch4. Built-in options include
-the MegaBACE **genotyping** dye sets — dye set 1 (ET-ROX, FAM, HEX, TET) and
-dye set 2 (ET-ROX, FAM, NED, HEX) share the same color order:
+and **View → Trace colors** control the trace colors. Traces are drawn in the
+run's **physical channel order** (Ch1..Ch4), each labelled by the base it
+carries — that base order is the chemistry under
+**⚙ Basecall settings → Dye/channel → Base order** (default **TGCA**).
+
+**Sequencing colors are fixed per base**, exactly as the MegaBACE sequence
+analyser shows them: A green, C blue, T red, G black. The base order only
+decides which base sits on which channel, so the same traces keep the same
+colors whatever the kit — only the channels shift:
 
 | Option | Ch1 | Ch2 | Ch3 | Ch4 |
 |--------|-----|-----|-----|-----|
-| Classic (default) | Green | Blue | Black | Red |
-| **Genotyping (R·B·Blk·G)** | Red | Blue | Black | Green |
-| **Genotyping (G·B·R·Blk)** | Green | Blue | Red | Black |
-| **Seq DYEnamic (T·G·C·A)** | Red | Black | Blue | Green |
-| **Seq ET primer (A·C·T·G)** | Green | Blue | Red | Black |
+| **Seq DYEnamic (T·G·C·A)** *(default)* | T red | G black | C blue | A green |
+| **Seq ET primer (A·C·T·G)** | A green | C blue | T red | G black |
 
-`Seq DYEnamic` and `Seq ET primer` are the two sequencing dye sets — bases per
-channel DYEnamic T·G·C·A, ET primer A·C·T·G — recoloured by the standard dye
-colour of each base (A green, C blue, G black, T red; blue laser 488 nm).
-`Seq ET primer (A·C·T·G)` is therefore the same Green/Blue/Red/Black order
-fragment readers are used to.
+Genotyping dye sets are fixed **per channel** (no base colors):
 
-Pick the order you are used to — recolors the traces only; it does not change
-the base labels or the basecalling dye order.
+| Option | Ch1 | Ch2 | Ch3 | Ch4 |
+|--------|-----|-----|-----|-----|
+| **Genotyping (R·B·Blk·G)** — dye set 1 (ET-ROX, FAM, HEX/NED, TET) | Red | Blue | Black | Green |
+| **Genotyping (G·B·R·Blk)** — Green/Blue/Red/Black order Fragment-readers are used to | Green | Blue | Red | Black |
+
+Changing the scheme recolors the traces only; it does not change the base
+labels or the basecalling dye order.
 
 ## Note on environment
 
