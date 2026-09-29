@@ -229,6 +229,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._gen_pickers: dict = {}
         self._gen_active_path: Optional[Path] = None
         self._pick_cid = None
+        self._gen_motion_cid = None
+        self._gen_cursors: list = []
         self.pick_table = None
         self.pick_tree = None
         self._gen_sh = tk.BooleanVar(value=True)
@@ -420,7 +422,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                  command=self.toggle_genotyping_picking)
         genotyping_m.add_separator()
         genotyping_m.add_checkbutton(
-            label="Add stutter & +A (A-addition)",
+            label="Add +A (A-addition) peak",
             variable=self._gen_sh, command=self._sync_gen_opts)
         genotyping_m.add_checkbutton(
             label="Mark start/end from the 2nd derivative",
@@ -609,6 +611,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         chan_bar.pack(fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(chan_bar, text="Channels:").pack(side=tk.LEFT)
         self._chan_cbs = []
+        self._chan_cb_cols = []
         for i in range(len(CHANNEL_ORDER)):
             cb = tk.Checkbutton(
                 chan_bar, text=f"  Ch{i + 1} {CHANNEL_ORDER[i]}  ", variable=self.chan_show[i],
@@ -617,6 +620,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
             self._chan_cbs.append(cb)
+            self._chan_cb_cols.append(i)
+        # the bar starts out indexed A,C,G,T; relabel to the run's dye order
+        self._refresh_channel_labels()
+        self.base_order_var.trace_add("write", self._on_base_order_changed)
         self._refresh_channel_buttons()
         self._cur_btn = tk.Checkbutton(
             chan_bar, text="  µA  ", variable=self.show_current,
@@ -731,7 +738,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ttk.Label(f, text=f"  {desc}", foreground="#555").pack(anchor=tk.W)
 
         f = section("Dye / channel")
-        self.base_order_var = tk.StringVar(value=self.settings.base_order)
+        if not hasattr(self, "base_order_var"):        # keep the one traced
+            self.base_order_var = tk.StringVar(value=self.settings.base_order)
         ttk.Label(f, text="Base order (instrument)").pack(anchor=tk.W)
         ttk.Combobox(f, textvariable=self.base_order_var,
                      values=["ACTG", "TGCA", "GATC", "CTAG"], width=12).pack(anchor=tk.W)
@@ -1277,6 +1285,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._build_pick_table()
         self._pick_cid = self.canvas.mpl_connect("button_press_event",
                                                  self._on_gen_pick)
+        self._gen_motion_cid = self.canvas.mpl_connect(
+            "motion_notify_event", self._on_gen_motion)
         self.genotyping_active = True
         self.status_var.set("Manual genotyping — zoom in, click each peak you "
                             "want; page the batch (Genotyping · Next/Previous "
@@ -1292,6 +1302,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             except Exception:
                 pass
             self._pick_cid = None
+        if self._gen_motion_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._gen_motion_cid)
+            except Exception:
+                pass
+            self._gen_motion_cid = None
+        self._gen_cursors = []
         if self.pick_table is not None:
             try:
                 self.pick_table.destroy()
@@ -1334,14 +1351,64 @@ class LimoncelloAnalyzerApp(tk.Tk):
         pk = self._gen_pickers.get(key)
         if pk is None:
             doc = self._ensure_doc(path)
+            # the picker is handed acgt columns, the checkboxes are indexed by
+            # physical channel -- translate, or a non-ACTG run hides one trace
+            # and picks from another
+            col2chan = self._col_to_chan()
             pk = PeakPicker(doc, path, colors=self._theme_colors(),
                             base_order=self.base_order_var.get(),
                             theme_mode=self._theme_mode(),
-                            show=lambda i: self.chan_show[i].get(),
+                            show=lambda c: self.chan_show[
+                                col2chan.get(c, c)].get(),
                             include_sh=self._gen_sh.get(),
                             show_d2=self._gen_d2.get())
             self._gen_pickers[key] = pk
         return pk
+
+    def _gen_axes_hit(self, event):
+        """Resolve a mouse event to (index, trace axes, scan, volts).
+
+        matplotlib reports ``event.inaxes`` as the last axes sharing the hit
+        point, which is the uA twin when the current overlay is on -- so the
+        event's own ``ydata`` would be microamps, not volts.  When display
+        coords are available, match against the stacked trace axes and invert
+        that axes' own transform instead.  Synthetic events (tests) without
+        display coords fall back to the ``inaxes`` identity."""
+        ex = getattr(event, "x", None)
+        ey = getattr(event, "y", None)
+        x = getattr(event, "xdata", None)
+        y = getattr(event, "ydata", None)
+        ax = None
+        if ex is not None and ey is not None:
+            for i, candidate in enumerate(self._plot_axes):
+                try:
+                    inside = candidate.get_window_extent().contains(ex, ey)
+                except Exception:
+                    inside = False
+                if inside:
+                    ax = candidate
+                    i = i
+                    try:
+                        x, y = ax.transData.inverted().transform((ex, ey))
+                    except Exception:
+                        return None
+                    break
+            if ax is None:
+                return None
+        else:
+            try:
+                i = self._plot_axes.index(event.inaxes)
+            except (ValueError, AttributeError):
+                return None
+            ax = self._plot_axes[i]
+        if x is None or y is None:
+            return None
+        try:
+            if not (np.isfinite(x) and np.isfinite(y)):
+                return None
+        except TypeError:
+            return None
+        return i, ax, x, y
 
     def _on_gen_pick(self, event):
         if not self.genotyping_active:
@@ -1350,10 +1417,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         if getattr(event, "button", 1) != 1:
             return
-        try:
-            i = self._plot_axes.index(event.inaxes)
-        except ValueError:
+        hit = self._gen_axes_hit(event)
+        if hit is None:
             return
+        i, _ax, xs, vs = hit
         paths = self._gen_paths()
         if not (0 <= i < len(paths)):
             return
@@ -1363,7 +1430,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except Exception as e:
             self.status_var.set(f"Could not load {path.name}: {e}")
             return
-        rec = pk.pick(event.xdata, vol=event.ydata)
+        rec = pk.pick(xs, vol=vs)
         if rec is None:
             if getattr(pk, "_reject", None) == "area":
                 self.status_var.set(f"That area is already picked on {path.name} "
@@ -1379,12 +1446,101 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
+    def _make_gen_cursor(self, ax):
+        """Readout + crosshair for one stacked subplot: shows the scan under the
+        pointer, its voltage, and the nearest real peak (picked or not) so the
+        user can tell which hump they are aiming at before clicking."""
+        ann = ax.annotate(
+            "", xy=(0.996, 0.985), xycoords="axes fraction", ha="right",
+            va="top", fontsize=7, color="#111", zorder=25, visible=False,
+            bbox=dict(boxstyle="round,pad=0.3", fc="#FFF9C4", ec="#999",
+                      lw=0.6, alpha=0.9))
+        vline = ax.axvline(0, color="#B00020", lw=0.7, ls="--", alpha=0.65,
+                           zorder=24, visible=False)
+        hline = ax.axhline(0, color="#B00020", lw=0.7, ls=":", alpha=0.55,
+                           zorder=24, visible=False)
+        return (ax, ann, vline, hline)
+
+    def _hide_gen_cursor(self):
+        for (_ax, ann, vline, hline) in self._gen_cursors:
+            ann.set_visible(False)
+            vline.set_visible(False)
+            hline.set_visible(False)
+
+    def _gen_nearest_peak(self, pk, scan, vol):
+        """The dominant local max within one base on any visible channel, as a
+        short label.  Ranked by height (what the user is aiming at), not by
+        scan distance, so a flat-channel wobble cannot win over the real peak.
+        """
+        if vol is None or scan is None:
+            return None
+        best = None
+        rad = max(6, int(round(pk._spacing())))
+        col2chan = self._col_to_chan(pk.base_order)
+        for col in sorted(pk.col_color):
+            try:
+                if not self.chan_show[col2chan.get(col, col)].get():
+                    continue
+            except Exception:
+                pass
+            for (s, y) in pk._window_peaks(col, scan - rad, scan + rad):
+                key = (-y, abs(s - scan))
+                if best is None or key < best[0]:
+                    best = (key, col, s, y)
+        if best is None:
+            return None
+        (_k, col, s, y) = best
+        picked = any(r["col"] == col and abs(r["scan"] - s) <= 2
+                     for r in pk.records)
+        return (f"peak  Ch{col2chan.get(col, col) + 1} "
+                f"{CHANNEL_ORDER[col]}  scan {s} · {y:.0f} V"
+                + ("  [picked]" if picked else ""))
+
+    def _on_gen_motion(self, event):
+        if not self.genotyping_active or not self._gen_cursors:
+            return
+        hit = self._gen_axes_hit(event)
+        if hit is None:
+            if any(ann.get_visible() for (_a, ann, _v, _h) in self._gen_cursors):
+                self._hide_gen_cursor()
+                self.canvas.draw_idle()
+            return
+        i, ax, xs, vs = hit
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            return
+        try:
+            pk = self._ensure_picker(paths[i])
+        except Exception:
+            self._hide_gen_cursor()
+            return
+        scan = int(round(xs))
+        vol = float(vs)
+        text = f"cursor  scan {scan} · {vol:.0f} V"
+        near = self._gen_nearest_peak(pk, scan, vol)
+        if near:
+            text += "\n" + near
+        for (cax, ann, vline, hline) in self._gen_cursors:
+            if cax is ax:
+                ann.set_text(text)
+                ann.set_visible(True)
+                vline.set_xdata([scan, scan])
+                vline.set_visible(True)
+                hline.set_ydata([vol, vol])
+                hline.set_visible(True)
+            else:
+                ann.set_visible(False)
+                vline.set_visible(False)
+                hline.set_visible(False)
+        self.canvas.draw_idle()
+
     def _redraw_genotyping(self):
         """Stack the current batch and draw each well's raw channels plus the
         picked-peak overlays, so zoom / µA / Reset view keep working while the
         user picks peaks on the main window"""
         self.fig.clear()
         self._plot_axes = []
+        self._gen_cursors = []
         self._full_xlim = None
         self._full_ylim = None
         paths = self._gen_paths()
@@ -1405,12 +1561,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
             n = doc.acgt.shape[0]
             x = np.arange(n)
             plotted = False
-            for col, color in pk.col_color.items():
-                if not self.chan_show[col].get():
+            # draw by PHYSICAL channel (run dye order) so pick mode shows the
+            # same legend, colours, stacking and show/hide as the viewer
+            for ci, base, col, color in self._channel_lines(
+                    self._settings_from_ui()):
+                if not self.chan_show[ci].get():
                     continue
                 seg = doc.acgt[:, col]
                 ax.plot(x, seg, color=color, lw=0.7,
-                        label=f"Ch{col + 1} {CHANNEL_ORDER[col]}")
+                        label=f"Ch{ci + 1} {base}")
                 m0 = float(np.nanmin(seg))
                 m1 = float(np.nanmax(seg))
                 gy0 = m0 if gy0 is None else min(gy0, m0)
@@ -1435,6 +1594,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                     transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#333", zorder=6)
+            self._gen_cursors.append(self._make_gen_cursor(ax))
             self._style_x_axis(ax, i == len(paths) - 1)
         if gx1 is not None and gy0 is not None and gx1 > gx0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -1454,7 +1614,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pk = self._gen_pickers.get(str(path.resolve()))
             if pk is None:
                 continue
-            for r in pk.records:
+            for r in sorted(pk.records,
+                            key=lambda r: (int(r["scan"]), int(r["col"]),
+                                           int(r.get("gid", 0)))):
                 fr = pk.clust_frac(r) if r["kind"] == "main" else None
                 self.pick_tree.insert("", tk.END, values=(
                     pk.doc.well, r["scan"], pk.duplex_of(r), r["base"],
@@ -1566,6 +1728,58 @@ class LimoncelloAnalyzerApp(tk.Tk):
         wells = sorted({r["well"] for r in rows})
         self.status_var.set(f"Saved {len(rows)} peak rows ({len(wells)} well"
                             f"{'s' if len(wells) != 1 else ''}) to {path}")
+
+    def _col_to_chan(self, order=None):
+        """acgt matrix column -> physical channel index of that trace.
+
+        The matrix is always stored A,C,G,T, but the *instrument* channel a
+        dye sits on follows the run's base order, so physical Ch1 is not
+        necessarily the A column.  Everything that keys off a channel number
+        (the show/hide checkboxes, the labels) must go through this map."""
+        order = (order or self.base_order_var.get() or "ACTG").upper()
+        out: dict = {}
+        for ci, base in enumerate(order[:4]):
+            if base in CHANNEL_ORDER:
+                out[CHANNEL_ORDER.index(base)] = ci
+        return out
+
+    def _on_base_order_changed(self, *_args):
+        """Dye order changed: the channel bar, the legends and the peak colours
+        all follow it.  Pickers and traces baked in the old order, so drop them
+        -- but never silently throw away peaks the user has already picked."""
+        self._refresh_channel_labels()
+        if any(pk.records for pk in self._gen_pickers.values()):
+            self.status_var.set(
+                f"Dye order is now {self.base_order_var.get()} — the already "
+                "picked peaks keep the colours they were picked with. Clear "
+                "picks to rebuild them in the new order.")
+            return
+        self._gen_pickers = {}
+        self.redraw()
+
+    def _refresh_channel_labels(self):
+        """Relabel the channel checkboxes to the run's dye order and re-pack
+        them in physical order, so the bar reads Ch1..Ch4 left to right and
+        agrees with the legend (Ch1 = the first dye in base order, not A)."""
+        col2chan = self._col_to_chan()
+        items = list(zip(getattr(self, "_chan_cbs", []),
+                         getattr(self, "_chan_cb_cols", [])))
+        placed = []
+        for cb, col in items:
+            ci = col2chan.get(col)
+            if ci is None:
+                continue
+            try:
+                cb.config(text=f"  Ch{ci + 1} {CHANNEL_ORDER[col]}  ")
+                placed.append((ci, cb))
+            except Exception:
+                pass
+        for _ci, cb in sorted(placed, key=lambda t: t[0]):
+            try:
+                cb.pack_forget()
+                cb.pack(side=tk.LEFT, padx=2)
+            except Exception:
+                pass
 
     def _chan_changed(self):
         """Channel on/off toggles refresh the viewer (and the picked-peak
@@ -2460,17 +2674,35 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    locates it, shades the peak area and logs scan, channel/base,\n"
                "    height and area.  The recognition method is selectable\n"
                "    (Best prominence, Simple maxima, Gaussian fit).\n"
+               "  •  Area is measured between the peak's OWN two valleys (capped\n"
+               "    at 0.95 x the run's peak spacing), so a tight allele pair no\n"
+               "    longer borrows each other's area: the small allele of a het\n"
+               "    pair used to report a near-equal area and a fake ~50/50\n"
+               "    fraction.  Fractions are small/(small+large) of those areas.\n"
+               "  •  Hovering a subplot shows a crosshair plus a live readout in\n"
+               "    that subplot's corner: the scan under the pointer, its\n"
+               "    voltage, and the dominant peak within one base on any visible\n"
+               "    channel, marked [picked] once you have it.\n"
+               "  •  The picked-peaks table is sorted by scan (then channel) per\n"
+               "    well, whatever order you clicked in; Undo last pick still\n"
+               "    removes the most recent click.\n"
+               "  •  Channel identity follows the run's dye order everywhere:\n"
+               "    the checkboxes, both legends and the exported Ch column use\n"
+               "    the same mapping, so hiding Ch1 hides the same trace in the\n"
+               "    viewer and while picking.\n"
                "  •  Mark start/end from the 2nd derivative  (on by default)\n"
                "    places square ticks where each picked peak lifts off its\n"
                "    baseline: the 2nd derivative of the (smoothed) trace crosses\n"
                "    the noise floor from flat to concave-up at the true start,\n"
                "    and concave-up again on the return at the end.  Uncheck it\n"
                "    for a clean look.\n"
-              "  •  Add stutter & +A  (on by default) also tags the strongest\n"
-              "    satellite either side of the main peak: the stutter peak\n"
-              "    (~1 repeat shorter) and the Taq A-addition (the +A shoulder a\n"
-              "    few scans later).  Turn it off when clicking allele peaks so\n"
-              "    the second allele is not swallowed by the +A tag.\n"
+              "  •  Add +A  (on by default) tags the strongest satellite TRAILING\n"
+              "    the main peak: the Taq A-addition a few scans later.  Nothing is\n"
+              "    tagged in front of the main peak -- for a single-base-extension\n"
+              "    product that leading shoulder is another A-addition on the\n"
+              "    GC-clamp side, not stutter.  Turn the option off when clicking\n"
+              "    allele peaks so the second allele is not swallowed by the +A\n"
+              "    tag.\n"
 "  • Internal standard — the four standard peaks are all ONE\n"
                "    fragment (the same number of base pairs); cycling-temperature CE\n"
                "    separates them by sequence into two homoduplexes (peaks 1-2,\n"
@@ -2485,7 +2717,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    so no bp ladder is involved.\n"
                 "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
                 "    8 scans (classic heterozygote): small/(small+large).\n"
-"  • Undo last pick removes the most recent pick (with its stutter/+A\n"
+"  • Undo last pick removes the most recent pick (with its +A\n"
                  "    tags); Clear picks empties the whole table.  An area that is\n"
                  "    already picked cannot be picked again: the click is refused and\n"
                  "    the status bar says so — undo it first if you meant a re-pick\n"
@@ -2493,7 +2725,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                  "    stay pickable).\n"
                 "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
                 "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
-                "    (main/stutter/+A), height (V), area (V·scan), duplex label\n"
+                "    (main/+A), height (V), area (V·scan), duplex label\n"
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  That table is\n"
                 "    your labelled training library for ML — peak picking works with\n"
                 "    or without an internal standard.\n"
@@ -2551,7 +2783,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "            raw_peaks remain), see the Basecall settings dialog.\n"
             "Multi-folder load, multi-graph, auto-tour, well sort/filter.\n"
             "ESD-style processed view under Base calling; manual peak picking\n"
-            "genotyping (click peaks, stutter/+A, sizes via internal standard,\n"
+            "genotyping (click peaks, +A tagging, sizes via internal standard,\n"
             "Excel/CSV/JSON export) under Genotyping.\n"
             "Uses our own tuned spacing tracker.",
         )

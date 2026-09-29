@@ -2,8 +2,10 @@
 
 Click on a peak (or just next to it) and the best available peak-recognition
 method locates the peak and shades its area.  The recognition algorithm is
-selectable; a polymerase-A-addition (+A) and stutter peaks that trail/lead the
-main peak by one repeat can be tagged automatically.
+selectable; a polymerase-A-addition (+A) peak trailing the main peak by about
+one repeat can be tagged automatically.  Nothing is tagged in front of the
+main peak: for a single-base-extension product that leading shoulder is
+another A-addition on the GC-clamp side, not stutter.
 
 The four internal-standard peaks are captured through the CTC-CE duplex
 pattern: peaks 1-2 are the two homoduplexes (they differ by the single SNP
@@ -40,8 +42,10 @@ from analyzer_core import load_trace
 CHANNEL_ORDER = "ACGT"
 CLICK_RADIUS = 30          # scans searched around a click
 HET_WINDOW = 8             # scans in which two mains count as heterozygote
-STUTTER_FRAC = 0.05        # min height of a stutter/+A peak vs the main peak
+SATELLITE_FRAC = 0.05      # min height of a +A satellite vs the main peak
 MIN_PEAK_FRAC = 0.05       # peak candidates must stand off the segment floor
+VALLEY_CAP = 0.95          # valley search is capped at +-VALLEY_CAP x spacing
+                           # around the apex so a peak keeps its OWN valleys
 
 PEAK_FINDERS = [
     ("best", "Best (prominence + area)"),
@@ -101,7 +105,7 @@ class PeakPicker:
         A peak whose area is already picked on the same channel is never
         picked again — undo it first if you need to (neighbouring peaks, e.g.
         the two alleles of a heterozygote, stay pickable).  Returns the new
-        record (plus any stutter/+A records appended) or None; on a refused
+        record (plus any +A record appended) or None; on a refused
         re-pick, ``_reject`` is set to ``"area"`` for the UI message."""
         self._reject = None
         radius = max(CLICK_RADIUS, int(self._spacing() * 2.0))
@@ -246,9 +250,15 @@ class PeakPicker:
         order = np.lexsort((seg[on], dist))
         best = int(on[order[0]])
         apex = int(w[best])
-        left = int(w[:best + 1][np.argmin(seg[:best + 1])])
-        tail = seg[best:]
-        right = int(w[best + np.argmin(tail)])
+        # own valleys, capped at +-VALLEY_CAP x spacing so a dense pair keeps
+        # each peak's baseline between ITS two nearest valleys (the wide click
+        # window otherwise swallows a neighbouring allele and inflates area)
+        sp = self._spacing()
+        cap = max(2, int(round(sp * VALLEY_CAP)))
+        lo = max(int(w[0]), apex - cap)
+        hi = min(int(w[-1]), apex + cap)
+        left = lo + int(np.argmin(y[lo:apex + 1]))
+        right = apex + int(np.argmin(y[apex:hi + 1]))
         if right <= left:
             right = min(y.size - 1, left + 2)
         xs = np.arange(left, right + 1)
@@ -285,45 +295,47 @@ class PeakPicker:
                 "height": float(a)}
 
     def _shoulders(self, main, radius):
-        """Tag the strongest satellite on each side of the main peak: the
-        upstream one (stutter) and the downstream one (+A A-addition), found
-        within ~±(0.4–1.6) × one repeat (≈ one base) of the main apex."""
+        """Tag the strongest TRAILING satellite: the +A polymerase A-addition
+        product, found within ~(0.4–1.6) x one repeat (~one base) after the
+        main apex.
+
+        Nothing is tagged in front of the main peak.  The leading shoulder of a
+        single-base-extension product is a polymerase A-addition too (it sits
+        on the GC-clamp side and barely shifts migration), so it is a second
+        +A view of the same fragment rather than stutter -- leaving it
+        unmarked beats mislabelling it."""
         sp = self._spacing()
         y = np.asarray(self.doc.acgt[:, main["col"]], dtype=float)
         n = y.size
         out = []
-        for k, kind in ((+1, "+A"), (-1, "stutter")):
-            a, b = (main["apex"] + k * sp * 0.4,
-                    main["apex"] + k * sp * 1.6)
-            lo, hi = (int(min(a, b)), int(max(a, b)))
-            cands = self._window_peaks(main["col"], lo, hi)
-            cands = [(x, h) for x, h in cands
-                     if STUTTER_FRAC * main["height"] <= h
-                     <= 0.9 * main["height"]]
-            if not cands:
-                continue
-            x, h = max(cands, key=lambda c: c[1])
-            if k == +1 and x <= main["apex"] + 2:      # must trail the main
-                continue
-            if k == -1 and x >= main["apex"] - 2:      # must lead the main
-                continue
-            r = max(2, int(round(sp * 0.20)))
-            left = int(np.argmin(y[max(0, x - r): x + 1])) + max(0, x - r)
-            right = int(np.argmin(y[x: min(n, x + r + 1)])) + x
-            if right <= left:
-                right = min(n - 1, left + 2)
-            xs = np.arange(left, right + 1)
-            bl = np.linspace(y[left], y[right], right - left + 1)
-            area = float(np.sum(np.clip(y[xs] - bl, 0.0, None)))
-            hgt = float(y[x] - max(y[left], y[right]))
-            if hgt <= 0 or area <= 0:
-                continue
-            onset, end = self._onset_end(main["col"], x, left, right)
-            out.append({"apex": x, "left": left, "right": right,
-                        "onset": onset, "end": end,
-                        "area": area, "height": hgt,
-                        "col": main["col"], "color": main["color"],
-                        "kind": kind})
+        a, b = (main["apex"] + sp * 0.4, main["apex"] + sp * 1.6)
+        lo, hi = (int(min(a, b)), int(max(a, b)))
+        cands = self._window_peaks(main["col"], lo, hi)
+        cands = [(x, h) for x, h in cands
+                 if SATELLITE_FRAC * main["height"] <= h
+                 <= 0.9 * main["height"]]
+        if not cands:
+            return out
+        x, h = max(cands, key=lambda c: c[1])
+        if x <= main["apex"] + 2:                  # must trail the main
+            return out
+        r = max(2, int(round(sp * 0.20)))
+        left = int(np.argmin(y[max(0, x - r): x + 1])) + max(0, x - r)
+        right = int(np.argmin(y[x: min(n, x + r + 1)])) + x
+        if right <= left:
+            right = min(n - 1, left + 2)
+        xs = np.arange(left, right + 1)
+        bl = np.linspace(y[left], y[right], right - left + 1)
+        area = float(np.sum(np.clip(y[xs] - bl, 0.0, None)))
+        hgt = float(y[x] - max(y[left], y[right]))
+        if hgt <= 0 or area <= 0:
+            return out
+        onset, end = self._onset_end(main["col"], x, left, right)
+        out.append({"apex": x, "left": left, "right": right,
+                    "onset": onset, "end": end,
+                    "area": area, "height": hgt,
+                    "col": main["col"], "color": main["color"],
+                    "kind": "+A"})
         return out
 
     def _window_peaks(self, col, lo, hi):
@@ -435,7 +447,7 @@ class PeakPicker:
 
     # ---------------------------------------------------------------- mutate
     def undo_last(self):
-        """Remove the most recently picked peak (plus its stutter/+A tags)."""
+        """Remove the most recently picked peak (plus its +A tag)."""
         if not self.records:
             return False
         gid = max(r["gid"] for r in self.records)
@@ -610,7 +622,7 @@ class GenotypingEditor(ttk.Frame):
         ttk.Combobox(det, textvariable=self.finder, state="readonly",
                      values=[v for _, v in PEAK_FINDERS], width=30).pack(anchor=tk.W)
         self.include_sh = tk.BooleanVar(value=True)
-        ttk.Checkbutton(det, text="Add stutter & +A (A-addition) peaks",
+        ttk.Checkbutton(det, text="Add +A (A-addition) peak",
                         variable=self.include_sh,
                         command=self._sync_opts).pack(anchor=tk.W)
         self.show_d2 = tk.BooleanVar(value=True)
