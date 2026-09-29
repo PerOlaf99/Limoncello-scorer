@@ -44,8 +44,17 @@ CLICK_RADIUS = 30          # scans searched around a click
 HET_WINDOW = 8             # scans in which two mains count as heterozygote
 SATELLITE_FRAC = 0.05      # min height of a +A satellite vs the main peak
 MIN_PEAK_FRAC = 0.05       # peak candidates must stand off the segment floor
-VALLEY_CAP = 0.95          # valley search is capped at +-VALLEY_CAP x spacing
-                           # around the apex so a peak keeps its OWN valleys
+VALLEY_CAP = 1.5           # hard bound on how far a peak's area may reach, in x
+                           # spacings, and the same reach as the heterozygote
+                           # window: a peak can never measure into where a
+                           # neighbouring allele could start.  The peak's own
+                           # valley normally ends the search well before this
+VALLEY_FLOOR = 0.2          # a valley counts only once the trace is down to
+                           # this much of the peak's height above the baseline
+                           # between peaks, so a step up the shoulder of a
+                           # sharp peak is not mistaken for the valley beside it
+VALLEY_FLAT = 0.01          # ...and a trace that has changed by less than this
+                           # over a few scans has settled at the valley floor
 
 PEAK_FINDERS = [
     ("best", "Best (prominence + area)"),
@@ -250,15 +259,16 @@ class PeakPicker:
         order = np.lexsort((seg[on], dist))
         best = int(on[order[0]])
         apex = int(w[best])
-        # own valleys, capped at +-VALLEY_CAP x spacing so a dense pair keeps
-        # each peak's baseline between ITS two nearest valleys (the wide click
-        # window otherwise swallows a neighbouring allele and inflates area)
+        # A peak's own two valleys bound its area: the area is integrated out to
+        # the valley on each side, so a variant fraction uses the peak's whole
+        # hump rather than a fixed slice of it.  VALLEY_CAP is only a bound for
+        # the two cases the valley itself cannot settle: a peak with no valley
+        # beside it (a low minor allele sitting on a main's tail has no dip of
+        # its own) must not measure into where its neighbour could start.
         sp = self._spacing()
-        cap = max(2, int(round(sp * VALLEY_CAP)))
-        lo = max(int(w[0]), apex - cap)
-        hi = min(int(w[-1]), apex + cap)
-        left = lo + int(np.argmin(y[lo:apex + 1]))
-        right = apex + int(np.argmin(y[apex:hi + 1]))
+        win_base = float(np.mean((y[w[0]], y[w[-1]])))
+        left = self._own_valley(y, apex, -1, sp, win_base)
+        right = self._own_valley(y, apex, +1, sp, win_base)
         if right <= left:
             right = min(y.size - 1, left + 2)
         xs = np.arange(left, right + 1)
@@ -293,6 +303,76 @@ class PeakPicker:
         return {"apex": int(round(mu)),
                 "area": float(a * abs(s) * np.sqrt(2.0 * np.pi)),
                 "height": float(a)}
+
+    def _own_valley(self, y, apex, step, sp, base):
+        """The scan where this peak's own trace turns back up (step -1 = left).
+
+        A peak's area runs between its two valleys, so the peak has to keep every
+        tail scan that is really its own -- a variant fraction is only as good as
+        the two areas it is built from.  The dip that closes a peak is a broad
+        valley, while the ripples riding its shoulder are a scan or two wide, so
+        the search walks a slightly smoothed copy of the trace (the area itself
+        is always integrated from the raw samples) and stops at the first real
+        turn of that trace.  This keeps a peak's whole hump yet still ends at the
+        dip between two dense alleles instead of running on into the next peak.
+
+        A turn only counts once the trace is down near the baseline: one step up
+        a scan or two from the top of a sharp peak is this same peak's shoulder,
+        not a valley beside it.  A trace that has merely levelled off at that
+        baseline counts as the valley floor too, which is what stops a peak from
+        stretching back to a neighbour 40 scans away.  VALLEY_CAP bounds the
+        search for a peak that has no valley of its own at all.
+        """
+        n = y.size
+        w = max(3, int(round(sp / 3.0)) | 1)
+        pad = w // 2
+        ys = np.convolve(np.pad(y, pad, mode="edge"),
+                         np.ones(w) / float(w), mode="valid")
+        # start at the top of the hump, not one scan off it: a single-scan
+        # spike puts the raw apex next to a higher sample, and a walk that
+        # starts there reads that step up as the turn and stops at once
+        a0 = max(0, apex - pad)
+        b0 = min(n - 1, apex + pad)
+        ap = a0 + int(np.argmax(ys[a0:b0 + 1]))
+        top = float(ys[ap])
+        span = max(top - base, 1e-9)
+        floor = base + (1.0 - VALLEY_FLOOR) * span
+        k = max(3, pad)
+        cap = max(2, int(round(sp * VALLEY_CAP)))
+        lo = max(0, ap + step)               # first sample outside the hump
+        hi = min(n - 1, ap + step * cap)     # never reach a neighbour
+        if (step > 0 and hi <= lo) or (step < 0 and hi >= lo):
+            return max(0, min(n - 1, ap + step * 2))
+        imin = lo
+        vmin = float(ys[lo])
+        armed = vmin <= floor
+        i = lo + step
+        while True:
+            v = float(ys[i])
+            if not armed and v <= floor:
+                armed = True
+            elif armed:
+                back = i - k * step
+                if 0 <= back < n and abs(float(ys[back]) - v) <= VALLEY_FLAT * span:
+                    break                      # the trace settled at the floor
+                inner = float(ys[i - step])          # toward the hump
+                outer = float(ys[i + step]) if 0 <= i + step < n else v
+                if v <= inner and v <= outer:        # the trace turns here
+                    imin = i
+                    j = i + step                     # ride the dip to its floor
+                    while 0 <= j < n and float(ys[j]) <= v:
+                        imin = j
+                        j += step
+                    break
+            if v < vmin:
+                vmin = v
+                imin = i
+            if i == hi:
+                break
+            i += step
+        a = max(0, imin - pad)
+        b = min(n, imin + pad + 1)
+        return a + int(np.argmin(y[a:b]))    # snap onto the raw samples
 
     def _shoulders(self, main, radius):
         """Tag the strongest TRAILING satellite: the +A polymerase A-addition
