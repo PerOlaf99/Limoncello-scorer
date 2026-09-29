@@ -27,6 +27,14 @@ Run:
 """
 from __future__ import annotations
 
+import sys
+
+# ``--check`` must work even where tkinter/matplotlib are not installed, so
+# answer it before the GUI imports below are executed.
+if __name__ == "__main__" and "--check" in sys.argv[1:]:
+    from analyzer_core import environment_report
+    sys.exit(environment_report())
+
 import argparse
 import json
 import random
@@ -764,11 +772,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         f = section("Band filter (deconv)")
         self.gauss_en = tk.BooleanVar(value=True)
-        self.mp_wiener = tk.BooleanVar(value=False)
         self.gauss_seg = tk.IntVar(value=384)
         self.gauss_reg = tk.DoubleVar(value=0.05)
         check(f, "Gaussian reconstruction", self.gauss_en)
-        check(f, "Multi-pass Wiener (2048/1900)", self.mp_wiener)
         ttk.Label(f, text="Segment size").pack(anchor=tk.W)
         scale(f, self.gauss_seg, 128, 1024, 1)
         ttk.Label(f, text="Noise reg").pack(anchor=tk.W)
@@ -1143,7 +1149,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
             position_adaptive_spectral=self.spec_adapt.get(),
             mobility_enable=self.mob_en.get(),
             use_gaussian_reconstruction=self.gauss_en.get(),
-            use_multipass_wiener=self.mp_wiener.get(),
             gaussian_recon_segment_size=int(self.gauss_seg.get()),
             gaussian_recon_noise_reg=float(self.gauss_reg.get()),
             channel_peak_bonus=float(self.bonus.get()),
@@ -2798,7 +2803,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
 def main():
     ap = argparse.ArgumentParser(description="Limoncello CE Analyzer")
     ap.add_argument("--folder", action="append", type=Path, help="Data folder (repeatable)")
+    ap.add_argument("--check", action="store_true",
+                    help="report which dependencies are available and exit")
     args = ap.parse_args()
+    if args.check:
+        from analyzer_core import environment_report
+        raise SystemExit(environment_report())
     app = LimoncelloAnalyzerApp(initial_folders=args.folder)
     app.mainloop()
 
