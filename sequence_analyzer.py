@@ -219,6 +219,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.theme = tk.StringVar(value="Classic")
         self.wrap_rows = tk.IntVar(value=5)
 
+        # Embedded (same-window) manual genotyping editor, if active:
+        self.genotyping_active = False
+        self.editor_panel = None
+
         # Shared X/Y view, stored as [first, last] fractions of the full data
         # range. One model drives every visible graph plus the axis bars.
         self._view_x = [0.0, 1.0]
@@ -402,7 +406,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         genotyping_m = tk.Menu(self, tearoff=0)
         genotyping_m.add_command(label="Manual peak picking…",
-                                 command=self.open_genotyping)
+                                 command=self.toggle_genotyping_editor)
         genotyping_m.add_separator()
         genotyping_m.add_command(label="Fragment genotyping (planned)",
                                  state=tk.DISABLED)
@@ -569,6 +573,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         # ----- Center: plots -----
         center = ttk.Frame(body)
+        self.center = center
         body.add(center, weight=5)
 
         chan_bar = ttk.Frame(center)
@@ -578,7 +583,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         for i in range(len(CHANNEL_ORDER)):
             cb = tk.Checkbutton(
                 chan_bar, text=f"  Ch{i + 1} {CHANNEL_ORDER[i]}  ", variable=self.chan_show[i],
-                command=self.redraw, bg="#F2F4F7",
+                command=self._chan_changed, bg="#F2F4F7",
                 fg="#000000", activebackground="#F2F4F7",
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
@@ -608,7 +613,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         # Axis bars: drag to pan, mouse-wheel to zoom. One bar per axis and it
         # drives every visible graph at once (shared X / shared Y).
-        plotf = ttk.Frame(center)
+        plotf = self.plotf = ttk.Frame(center)
         plotf.pack(fill=tk.BOTH, expand=True)
         plotf.rowconfigure(0, weight=1)
         plotf.columnconfigure(0, weight=1)
@@ -1240,6 +1245,71 @@ class LimoncelloAnalyzerApp(tk.Tk):
                              theme_mode=mode)
         except Exception as e:
             messagebox.showerror("Genotyping", f"Could not open the window:\n{e}")
+
+    def toggle_genotyping_editor(self):
+        """Same-window manual peak picking: pick on the main plot, toggle
+        channels off to work one at a time.  Calling it again (or the Close
+        button) returns to the normal trace viewer."""
+        if self.genotyping_active:
+            self.exit_genotyping_editor()
+            return
+        self.enter_genotyping_editor()
+
+    def enter_genotyping_editor(self):
+        if not self.selected:
+            messagebox.showinfo("Genotyping",
+                                "Select a file/well in the list first.")
+            return
+        if self.genotyping_active:
+            return
+        try:
+            from genotyping import GenotypingEditor
+        except Exception as e:
+            messagebox.showerror("Genotyping",
+                                 f"Could not load the genotyping module:\n{e}")
+            return
+        path = self.selected[0]
+        try:
+            pan = GenotypingEditor(
+                self.center, path,
+                colors=self._theme_colors(),
+                base_order=self.base_order_var.get(),
+                theme_mode=self._theme_mode(),
+                show=lambda i: self.chan_show[i].get())
+        except Exception as e:
+            messagebox.showerror("Genotyping", f"Could not open the editor:\n{e}")
+            return
+        self.plotf.pack_forget()
+        self.editor_panel = pan
+        self.genotyping_active = True
+        pan.on_exit = self.exit_genotyping_editor
+        pan.pack(fill=tk.BOTH, expand=True)
+        self.status_var.set(f"Genotyping {Path(path).name} — click peaks, "
+                            "toggle Channels to work one at a time, "
+                            "Close/back to viewer below.")
+
+    def exit_genotyping_editor(self):
+        if not self.genotyping_active:
+            return
+        if self.editor_panel is not None:
+            try:
+                self.editor_panel.destroy()
+            except Exception:
+                pass
+            self.editor_panel = None
+        self.genotyping_active = False
+        self.plotf.pack(fill=tk.BOTH, expand=True)
+        self.redraw()
+
+    def _chan_changed(self):
+        """Channel on/off toggles refresh the viewer, and the embedded
+        peak-picking editor when one is open."""
+        self.redraw()
+        if self.genotyping_active and self.editor_panel is not None:
+            try:
+                self.editor_panel.redraw()
+            except Exception:
+                pass
 
     def _show_sequence(self):
         self.seq_text.delete("1.0", tk.END)
@@ -2111,9 +2181,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "    'quality' line is OFF by default.  Turn it on only if you want\n"
              "    it:  View ▸ Show quality profile (0-100).\n\n"
 "6b. GENOTYPING  (Genotyping menu, between Base calling and Comments)\n"
-              "  Manual peak picking…  opens a second window for the selected well.\n"
-              "  It is built from scratch for fragment genotyping (CTC-CE runs, e.g.\n"
-              "  a FAM sample with an Atto532 internal standard in another channel).\n"
+               "  Manual peak picking…  swaps the plot area of THIS window for a\n"
+               "  peak editor on the selected well — you stay in the same interface.\n"
+               "  Use the Channels row above the plot to turn channels off and work\n"
+               "  one at a time (toggle changes redraw instantly).  The same menu\n"
+               "  item or the  Close / back to viewer  button returns to the normal\n"
+               "  trace viewer.  It is built from scratch for fragment genotyping\n"
+               "  (CTC-CE runs, e.g. a FAM sample with an Atto532 internal standard\n"
+               "  in another channel).\n"
 "  • Click a peak (or just beside it) — the best available algorithm\n"
                "    locates it, shades the peak area and logs scan, channel/base,\n"
                "    height and area.  The recognition method is selectable\n"

@@ -192,8 +192,12 @@ letters, peak marks and quality curve look confusing), undo it with
 the `.rsd`/`.scf` data files are never modified.
 
 The **Genotyping** menu is an independent top-level heading (between *Base
-calling* and *Comments*). It now holds **Manual peak picking…**, a separate
-window for fragment genotyping, built from scratch:
+calling* and *Comments*). It holds **Manual peak picking…**, which needs no
+second window: the plot area of the main window is swapped for the peak editor
+on the selected well, so you stay in the same interface. The **Channels** row
+above the plot turns channels on/off — work one channel at a time and the plot
+redraws instantly. The same menu item (or *Close / back to viewer*) returns to
+the normal trace viewer. The editor is built from scratch:
 
 - Click a peak (or just beside it) — the best available algorithm locates it,
   shades the peak area and logs scan, channel/base, height (V) and area

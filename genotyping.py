@@ -43,14 +43,15 @@ class _Record(dict):
     """One picked peak. Writable dict so rows feed straight into export."""
 
 
-class GenotypingDialog(tk.Toplevel):
-    """A standalone window: the selected well's traces, click-to-pick peaks,
-    area shading, stutter/+A tagging, a results table and Excel/CSV/JSON out."""
+class GenotypingEditor(ttk.Frame):
+    """Click-to-pick peak editor. Usable as a standalone Toplevel widget pack
+    (GenotypingDialog wraps it) or embedded in the main window so the user can
+    stay in the same interface; channels can be switched off one at a time."""
 
-    def __init__(self, parent, path, colors=None, base_order=None,
-                 theme_mode="base"):
-        super().__init__(parent)
-        self.parent = parent
+    def __init__(self, master, path, colors=None, base_order=None,
+                 theme_mode="base", show=None):
+        super().__init__(master)
+        self.show = show or (lambda col: True)
         self.path = Path(path)
         self.colors = dict(colors or {"A": "#00AA00", "C": "#0000DD",
                                       "G": "#111111", "T": "#DD0000"})
@@ -60,9 +61,7 @@ class GenotypingDialog(tk.Toplevel):
         try:
             self.doc = load_trace(self.path, base_order=self.base_order)
         except Exception as e:
-            messagebox.showerror("Genotyping", f"Could not load trace:\n{e}", parent=self)
-            self.destroy()
-            return
+            raise ValueError(f"Could not load trace: {e}")
 
         self.records: list[_Record] = []
         self._gid = 0
@@ -70,6 +69,7 @@ class GenotypingDialog(tk.Toplevel):
         self.length_bp = None
         self.col_color = {}
         self._d2_cache: dict[int, tuple] = {}
+        self.on_exit = None
         for ci, base in enumerate(self.base_order[:4]):
             if base in CHANNEL_ORDER:
                 if self.theme_mode == "channel":
@@ -79,8 +79,6 @@ class GenotypingDialog(tk.Toplevel):
                     self.col_color[CHANNEL_ORDER.index(base)] = \
                         self.colors.get(base, "#444444")
 
-        self.title("Manual genotyping — " + self.path.name)
-        self.geometry("1080x680")
         self._build()
         self.redraw()
 
@@ -184,7 +182,8 @@ class GenotypingDialog(tk.Toplevel):
         http_bar = ttk.Frame(right)
         http_bar.pack(fill=tk.X, padx=4, pady=4)
         ttk.Button(http_bar, text="Save table…", command=self._save).pack(side=tk.LEFT)
-        ttk.Button(http_bar, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        ttk.Button(http_bar, text="Close / back to viewer",
+                   command=self._request_close).pack(side=tk.RIGHT)
 
         self.frac_var = tk.StringVar(value="No positions with two peaks yet.")
         fout = ttk.Label(right, textvariable=self.frac_var,
@@ -205,6 +204,8 @@ class GenotypingDialog(tk.Toplevel):
         radius = max(CLICK_RADIUS, int(self._spacing() * 2.0))
         cands = []
         for col, color in self.col_color.items():
+            if not self.show(col):
+                continue
             pk = self._detect(col, scan, radius)
             if pk is None:
                 continue
@@ -445,6 +446,17 @@ class GenotypingDialog(tk.Toplevel):
                 return d
         return float(max(6.0, self.doc.n_scans * 0.004))
 
+    def _request_close(self):
+        """Leave peak picking: back to the main viewer when embedded, or the
+        standalone window when opened as a dialog."""
+        if self.on_exit is not None:
+            self.on_exit()
+        else:
+            self.destroy()
+
+    def _close(self):
+        self._request_close()
+
     def _status(self, msg):
         self.het_label.config(text=msg)
 
@@ -503,6 +515,8 @@ class GenotypingDialog(tk.Toplevel):
         n = self.doc.acgt.shape[0]
         x = np.arange(n)
         for col, color in self.col_color.items():
+            if not self.show(col):
+                continue
             ax.plot(x, self.doc.acgt[:, col], color=color, lw=0.7,
                     label=f"Ch{col + 1} {CHANNEL_ORDER[col]}")
         # base letters of an existing call, faint, for orientation
@@ -512,6 +526,8 @@ class GenotypingDialog(tk.Toplevel):
             top = float(np.nanmax(self.doc.acgt))
             for pi, b in enumerate(seq):
                 if pi >= len(pos) or b not in CHANNEL_ORDER:
+                    continue
+                if not self.show(CHANNEL_ORDER.index(b)):
                     continue
                 ax.text(pos[pi], top * 1.01, b, ha="center", va="bottom",
                         fontsize=5, color=self.colors.get(b, "#444"), alpha=0.85, zorder=2)
@@ -692,3 +708,30 @@ class GenotypingDialog(tk.Toplevel):
                 max(8, min(28, 6 + len(h)))
         ws.freeze_panes = "A2"
         wb.save(path)
+
+
+class GenotypingDialog(tk.Toplevel):
+    """Standalone window wrapping a GenotypingEditor (kept for scripts/tests;
+    the app embeds the editor directly so the user stays in one window)."""
+
+    def __init__(self, parent, path, colors=None, base_order=None,
+                 theme_mode="base"):
+        super().__init__(parent)
+        self.title("Manual genotyping — " + Path(path).name)
+        self.geometry("1080x680")
+        try:
+            ed = GenotypingEditor(self, path, colors=colors, base_order=base_order,
+                                  theme_mode=theme_mode)
+        except Exception as e:
+            messagebox.showerror("Genotyping", f"Could not load trace:\n{e}",
+                                 parent=self)
+            self.destroy()
+            return
+        self._editor = ed
+        ed.pack(fill=tk.BOTH, expand=True)
+
+    def __getattr__(self, name):
+        ed = self.__dict__.get("_editor")
+        if ed is None:
+            raise AttributeError(name)
+        return getattr(ed, name)
