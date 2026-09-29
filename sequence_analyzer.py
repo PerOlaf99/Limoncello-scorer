@@ -326,6 +326,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ("raw", "Raw traces"),
             ("processed", "Processed (ACGT)"),
             ("called", "Base-called (with peaks)"),
+            ("genotyping", "Genotyping (ESD peaks)"),
             ("wrap", "Wrap (one well, N rows)"),
         ]:
             view_m.add_radiobutton(
@@ -384,13 +385,26 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 label=name, variable=self.theme, value=name, command=self.redraw)
         view_m.add_cascade(label="Trace colors", menu=theme_m)
 
-        analysis_m = tk.Menu(self, tearoff=0)
-        analysis_m.add_command(label="Basecall selected", command=self.basecall_selected)
-        analysis_m.add_command(label="Basecall all in list", command=self.basecall_all)
-        analysis_m.add_separator()
-        analysis_m.add_command(label="⚙ Basecall settings…", command=self.open_settings)
-        analysis_m.add_separator()
-        analysis_m.add_command(label="Genotyping (planned)", state=tk.DISABLED)
+        basecall_m = tk.Menu(self, tearoff=0)
+        basecall_m.add_command(label="Basecall selected", command=self.basecall_selected)
+        basecall_m.add_command(label="Basecall all in list", command=self.basecall_all)
+        basecall_m.add_separator()
+        basecall_m.add_command(label="⚙ Basecall settings…", command=self.open_settings)
+        basecall_m.add_separator()
+        basecall_m.add_command(label="Clear base calls (undo)", command=self.clear_basecalls)
+
+        genotyping_m = tk.Menu(self, tearoff=0)
+        genotyping_m.add_radiobutton(
+            label="Peaks (ESD-style)",
+            variable=self.view_mode, value="genotyping", command=self.redraw)
+        genotyping_m.add_radiobutton(
+            label="Sequencing traces (processed)",
+            variable=self.view_mode, value="processed", command=self.redraw)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Remove base-call overlay (undo)",
+                                 command=self.clear_basecalls)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Allele calling… (planned)", state=tk.DISABLED)
 
         help_m = tk.Menu(self, tearoff=0)
         help_m.add_command(label="User manual…", command=self.show_help)
@@ -401,7 +415,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         comments_m.add_command(label="Run info…", command=self.show_run_info)
 
         self._menus = {"File": file_m, "View": view_m,
-                       "Analysis": analysis_m, "Comments": comments_m, "Help": help_m}
+                       "Base calling": basecall_m, "Genotyping": genotyping_m,
+                       "Comments": comments_m, "Help": help_m}
     def _build_layout(self):
         # Yellow title bar — the window is undecorated ('splash'), so this is
         # the top of the app and carries the name (centred) + window buttons.
@@ -1179,6 +1194,30 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.selected = list(self.files)
         self.basecall_selected()
 
+    def clear_basecalls(self):
+        """Undo a base call: drop sequence/peaks/qualities so a run that was
+        mistakenly call-ed (e.g. genotyping/fragment data) shows clean traces
+        again.  Only the in-memory documents are touched; data files stay
+        as they are."""
+        if not self.selected:
+            messagebox.showinfo("Clear base calls",
+                                "Select one or more wells in the list first.")
+            return
+        cleared = 0
+        for path in self.selected:
+            doc = self.docs.get(str(path.resolve()))
+            if doc is not None and doc.sequence:
+                doc.sequence = ""
+                doc.peak_positions = []
+                doc.qualities = []
+                doc.settings_used = None
+                cleared += 1
+        self.status_var.set(
+            f"Cleared base calls for {cleared} well(s)" if cleared
+            else "No base calls to clear on the selected wells")
+        self.redraw()
+        self._show_sequence()
+
     def _show_sequence(self):
         self.seq_text.delete("1.0", tk.END)
         for path in self.selected[: self.n_graphs.get()]:
@@ -1449,7 +1488,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 ax.tick_params(labelsize=6)
                 self._style_x_axis(ax, r == rows - 1,
                                    label=(r == rows - 1 and k == len(shows) - 1))
-                self._draw_letters(ax, doc, sel[0], sel[-1] + 1, colors, force=True)
+                if self.show_letters.get():
+                    self._draw_letters(ax, doc, sel[0], sel[-1] + 1, colors, force=True)
         for ax in axes:
             ax.grid(True, alpha=0.15)
         self.fig.suptitle(f"Wrap view — {len(shows)} well(s) × {rows} rows", fontsize=9)
@@ -1481,6 +1521,43 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 ax.text(p, ytop + 0.015 * ytop, base_, color=colors[base_],
                         ha="center", va="bottom", fontsize=6.5, zorder=5, clip_on=True)
         return med_sp
+
+    def _draw_genotyping_peaks(self, ax, doc, s0, s1, channel_lines):
+        """ESD-style fragment view: instead of base letters, ring each channel's
+        detected peaks so the eye reads a clean peak pattern (like a MegaBACE
+        .esd electropherogram).  Visual aid only — a real allele call comes
+        with the planned  Genotyping ▸ Allele calling…  feature."""
+        tr = doc.acgt
+        if tr is None or tr.size == 0 or s1 <= s0:
+            return
+        seg = tr[s0:s1]
+        for ci, base, col, color in channel_lines:
+            y = seg[:, col]
+            if y.size < 3:
+                continue
+            y0 = float(np.nanmin(y))
+            y1 = float(np.nanmax(y))
+            if not np.isfinite(y1 - y0) or y1 - y0 <= 1e-9:
+                continue
+            rng = y1 - y0
+            # strict local maxima lifted off the noise floor (>5% of range)
+            cand = np.flatnonzero(
+                (y[1:-1] >= y[:-2]) & (y[1:-1] > y[2:])
+                & (y[1:-1] - y0 >= 0.05 * rng))
+            cand += 1
+            keep = []
+            for p in cand:
+                if not keep or p - keep[-1] >= 3:
+                    keep.append(p)
+            if not keep:
+                continue
+            kp = np.asarray(keep, dtype=int)
+            peak_v = y[kp]
+            ax.vlines(s0 + kp, y0, peak_v, color=color, lw=0.5, alpha=0.30,
+                      zorder=2, clip_on=True)
+            ax.scatter(s0 + kp, peak_v, s=14, marker="o",
+                       facecolors="none", edgecolors=color, linewidths=0.7,
+                       zorder=5, rasterized=True, clip_on=True)
 
     def _draw_quality(self, ax, doc, s0, s1):
         if not doc.sequence or not doc.qualities:
@@ -1734,8 +1811,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     fontsize=6, color="#333", zorder=6)
             self._style_x_axis(ax, i == len(paths) - 1)
 
-            if doc.sequence and settings.view_mode == "called" and doc.peak_positions:
-                self._draw_letters(ax, doc, s0, s1, colors, force=False)
+            if settings.view_mode == "genotyping":
+                self._draw_genotyping_peaks(
+                    ax, doc, s0, s1, self._channel_lines(settings))
+            elif doc.sequence and settings.view_mode == "called" and doc.peak_positions:
+                if self.show_letters.get():
+                    self._draw_letters(ax, doc, s0, s1, colors, force=False)
                 ytop = float(np.nanmax(tr[s0:s1])) if s1 > s0 else 1.0
                 if self.show_qnum.get():
                     q = doc.qualities or []
@@ -1750,7 +1831,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                 ha="center", va="top", fontsize=6, zorder=5, clip_on=True)
 
             if (self.show_qcurve.get() and doc.sequence and doc.qualities
-                    and settings.view_mode != "raw"):
+                    and settings.view_mode not in ("raw", "genotyping")):
                 self._draw_quality(ax, doc, s0, s1)
         if gx0 is not None and gy0 is not None and gx1 > gx0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -1923,12 +2004,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "    aligned.\n"
             "  • Lost in the zoom?  Right-click the plot or a bar, press Home, or\n"
             "    use the  ⟲ Reset view  button (View ▸ Reset view) to start over.\n\n"
-            "5. VIEW MODES  (View menu)\n"
-            "  • Raw traces            — detector signal as recorded.\n"
-            "  • Processed (ACGT)      — colour-separated channels.\n"
-            "  • Base-called           — peaks with base letters and quality.\n"
-            "  • Wrap                  — one well split over N rows; set\n"
-            "                            View ▸ Wrap rows (2-8).\n"
+"5. VIEW MODES  (View menu)\n"
+             "  • Raw traces            — detector signal as recorded.\n"
+             "  • Processed (ACGT)      — colour-separated channels.\n"
+             "  • Base-called           — peaks with base letters and quality.\n"
+             "  • Genotyping (ESD peaks)— fragment view WITHOUT base letters:\n"
+             "                            each channel's detected peaks get a\n"
+             "                            small ring, like a MegaBACE .esd\n"
+             "                            electropherogram (Genotyping menu too).\n"
+             "  • Wrap                  — one well split over N rows; set\n"
+             "                            View ▸ Wrap rows (2-8).\n"
             "  • Channels submenu toggles the four channels; Trace colors picks a\n"
             "    colour scheme.  Traces are drawn in the run's physical channel\n"
             "    order (Ch1..Ch4) — the first tick is always the first channel —\n"
@@ -1954,10 +2039,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "                                   (the order Fragment-readers are used to).\n"
             "  • Page forward / Page backward step through wells; auto-tour plays\n"
             "    them automatically (Space starts/stops it).\n\n"
-"6. BASECALLING  (Analysis menu)\n"
+"6. BASECALLING  (Base calling menu)\n"
              "  • Basecall selected — calls the wells currently plotted.\n"
              "  • Basecall all in list — calls everything listed (asks first if big).\n"
              "  • ⚙ Basecall settings… — pick a basecaller + advanced parameters.\n"
+             "  • Clear base calls (undo) — removes a call's letters, peak marks\n"
+             "    and quality curve, e.g. when fragment/genotyping data was\n"
+             "    base-called by mistake (also under the Genotyping menu).\n"
              "  • Basecaller presets (instrument × mode):\n"
              "      mb1000_accuracy  MB1000 · longest error-free run, high %ID\n"
              "      mb1000_length    MB1000 · longest read at ID ≥95%\n"
@@ -1969,15 +2057,20 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "      raw_peaks        minimal envelope-peak call (debug)\n"
              "  • Use mb4000_* only on MegaBACE 4000 data; on 1000 traces the\n"
              "    4000 spectral matrix is the wrong chemistry and reads collapse.\n"
-             "  • Called sequence(s) appear in the box below the plot.\n"
-             "  • Genotyping is planned for a later release.\n\n"
+             "  • Called sequence(s) appear in the box below the plot.\n\n"
+             "6b. GENOTYPING (independent menu, between Base calling and Comments)\n"
+             "  • Peaks (ESD-style) — the clean fragment view described in\n"
+             "    section 5: ringed peaks per channel, no base letters.\n"
+             "  • Sequencing traces (processed) — switch back to the standard\n"
+             "    channel view.  Allele calling itself is planned for a later\n"
+             "    release.\n"
             "7. EXPORT  (File menu)\n"
             "  • Export sequence (FASTA)…   called bases per well.\n"
             "  • Export peak table (CSV)…   well, base, scan position, quality.\n"
             "  • Export trace text (V + µA)… raw values.\n"
             "  • Save graph image…          the plot area as PNG/PDF/SVG.\n"
             "  • Save / Load settings JSON…  remembers your caller setup.\n\n"
-            "7b. COMMENTS & RUN INFO  (Comments menu, between Analysis and Help)\n"
+            "7b. COMMENTS & RUN INFO  (Comments menu, between Genotyping and Help)\n"
             "  • Run comments…  — write a note for the selected run; it is stored\n"
             "    beside the data file as '<file>.comment.txt' (the .rsd header is\n"
             "    left untouched) and shown under the sequence once saved.\n"
@@ -2023,7 +2116,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "            pos_profile are legacy aliases of those; hz_soften,\n"
              "            raw_peaks remain), see the Basecall settings dialog.\n"
             "Multi-folder load, multi-graph, auto-tour, well sort/filter.\n"
-            "Genotyping is planned for a later release.\n\n"
+            "Genotyping peaks view (ESD-style) included; allele calling planned.\n\n"
             "Uses our own tuned spacing tracker.",
         )
 
