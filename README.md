@@ -123,7 +123,8 @@ bundled `BEST_BASECALLER_RELEASE/configs.py`.
 > Use `mb4000_*` only on MegaBACE 4000 traces — on 1000 data the 4000
 > spectral matrix is the wrong chemistry and reads collapse.
 
-Dye order default **TGCA** (ET plate).
+Base order default **ACTG** (MegaBACE: Ch1=A, Ch2=C, Ch3=T, Ch4=G).
+DYEnamic runs are **TGCA** — set it under ⚙ Basecall settings → Dye/channel.
 
 ## Trace colors / MegaBACE dye sets
 
@@ -132,19 +133,20 @@ and **View → Trace colors** control the trace colors. Traces are drawn in the
 run's **physical channel order** (Ch1..Ch4) — the first tick is always the
 first channel — each labelled by the base it carries (that base order is the
 chemistry under **⚙ Basecall settings → Dye/channel → Base order**, default
-**TGCA**).
+**ACTG**).
 
-**Classic (default)** keeps its colors **fixed per channel**, the classic
-primer look:
+**Classic (default)** is the MegaBACE software look — colors **fixed per base
+letter** (A green, C blue, T red, G black). With the default base order that
+shows Ch1=A green, Ch2=C blue, Ch3=T red, Ch4=G black; other chemistries only
+shift which channel shows which color (letters keep theirs):
 
 | Option | Ch1 | Ch2 | Ch3 | Ch4 |
 |--------|-----|-----|-----|-----|
-| **Classic** *(default)* | Green | Blue | Red | Black |
+| **Classic** *(default, base order ACTG)* | A green | C blue | T red | G black |
 
 Sequencing dye sets are fixed per **base**, as the MegaBACE sequence analyser
-shows them (A green, C blue, T red, G black) — the base order only decides
-which base sits on which channel, so the same traces keep the same colors
-whatever the kit:
+shows them (A green, C blue, T red, G black) — the same traces as Classic, but
+each kit shown in its own channel order:
 
 | Option | Ch1 | Ch2 | Ch3 | Ch4 |
 |--------|-----|-----|-----|-----|

@@ -76,11 +76,13 @@ SCAN_RATE_HZ = 1.75         # instrument scan rate (~0.571 s per scan)
 WELL_RE = re.compile(r"([A-Ha-h]\d{1,2})")
 
 TRACE_THEMES = {
-    # Classic = the ink colour per physical CHANNEL (Ch1..Ch4), the look most
-    # primer sets display by default: Ch1 green, Ch2 blue, Ch3 red, Ch4 black.
-    # Tick boxes and legend show the channel in this order, so the first button
-    # (Ch1) is always green and the fourth (Ch4) black.
-    "Classic": {"A": "#00AA00", "C": "#0000DD", "G": "#DD0000", "T": "#111111"},
+    # Classic = the MegaBACE software look, colours FIXED per base letter:
+    # A green, C blue, T red, G black.  Traces are drawn Ch1..Ch4 in the run's
+    # base order (default A·C·T·G), so on a default run Ch1=A (green),
+    # Ch2=C (blue), Ch3=T (red), Ch4=G (black) — exactly as on the MegaBACE
+    # sequence analyser.  The base order only shifts which channel shows
+    # which colour; colours stay with the letters.
+    "Classic": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
     # Sequencing (MegaBACE SA) colours are FIXED per base, exactly as the SA
     # software shows them: A green, C blue, T red, G black.  The base order
     # changes per chemistry (it only decides which base sits on which physical
@@ -100,10 +102,9 @@ TRACE_THEMES = {
 }
 
 # "channel" themes paint each trace by position (Channel1..4), ignoring which
-# base letter the channel carries (Classic inc, and genotyping dye sets).
-# "base" themes paint every trace by the colour of its base letter (sequencing).
+# base letter the channel carries (genotyping dye sets).  Everything else,
+# including Classic, paints by the colour of the base letter (MegaBACE SA).
 TRACE_THEME_MODE = {
-    "Classic": "channel",
     "Genotyping (R·B·Blk·G)": "channel",
     "Genotyping (G·B·R·Blk)": "channel",
 }
@@ -681,8 +682,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.base_order_var = tk.StringVar(value=self.settings.base_order)
         ttk.Label(f, text="Base order (instrument)").pack(anchor=tk.W)
         ttk.Combobox(f, textvariable=self.base_order_var,
-                     values=["TGCA", "ACGT", "GATC", "CTAG"], width=12).pack(anchor=tk.W)
-        ttk.Label(f, text="Applies to RSD / text traces; ABI uses its own FWO order.",
+                     values=["ACTG", "TGCA", "GATC", "CTAG"], width=12).pack(anchor=tk.W)
+        ttk.Label(f, text="MegaBACE default is ACTG (Ch1=A, Ch2=C, Ch3=T, Ch4=G); "
+                          "DYEnamic runs are TGCA. ABI uses its own FWO order.",
                   foreground="#777", wraplength=250).pack(anchor=tk.W)
 
         f = section("Baseline")
@@ -1299,7 +1301,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             add("Sequence", "not base-called yet")
         tr = doc.acgt
         if tr.size:
-            order = (doc.base_order or "TGCA").upper()
+            order = (doc.base_order or "ACTG").upper()
             per = ", ".join(
                 f"Ch{c + 1} {b}={float(np.nanmax(tr[:, c])):.3f} V"
                 for c, b in enumerate(order[:4]))
@@ -1338,7 +1340,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         """Physical channel order Ch1..Ch4 -> (channel_idx, base letter,
         acgt column, colour), so traces render exactly as MegaBACE SA shows
         them: channels in run order, each coloured by the base it carries."""
-        order = (settings.base_order or "TGCA").upper()
+        order = (settings.base_order or "ACTG").upper()
         colors = self._theme_colors()
         mode = self._theme_mode()
         lines = []
@@ -1359,7 +1361,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         cbs = getattr(self, "_chan_cbs", None)
         if not cbs:
             return
-        order = (self.base_order_var.get() or "TGCA").upper()
+        order = (self.base_order_var.get() or "ACTG").upper()
         colors = self._theme_colors()
         mode = self._theme_mode()
         for ci, base in enumerate(order[:4]):
@@ -1873,7 +1875,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if hasattr(self.settings, k):
                 setattr(self.settings, k, v)
         self.basecaller.set(data.get("basecaller", "mb1000_accuracy"))
-        self.base_order_var.set(data.get("base_order", "TGCA"))
+        self.base_order_var.set(data.get("base_order", "ACTG"))
         self.bonus.set(data.get("channel_peak_bonus", 0.7))
         self.pullback.set(data.get("pullback_weight", 0.008))
         self._refresh_channel_buttons()
@@ -1932,9 +1934,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "    order (Ch1..Ch4) — the first tick is always the first channel —\n"
             "    each labelled by the base it carries (set the chemistry under\n"
             "    ⚙ Basecall settings ▸ Dye/channel ▸ Base order).\n"
-            "      'Classic' (default) keeps its colours FIXED per channel,\n"
-            "      like the classic primer look: Ch1 green, Ch2 blue, Ch3 red,\n"
-            "      Ch4 black, whatever the chemistry.\n"
+            "      'Classic' (default) is the MegaBACE software look: colours\n"
+            "      are FIXED per base letter — A green, C blue, T red, G black.\n"
+            "      With the default base order A·C·T·G that shows\n"
+            "      Ch1=A green, Ch2=C blue, Ch3=T red, Ch4=G black.  Other\n"
+            "      chemistries only shift which channel shows which colour;\n"
+            "      the letters keep their colours (DYEnamic runs = TGCA).\n"
             "      Sequencing dye sets are FIXED per base, like the MegaBACE SA:\n"
             "      A green, C blue, T red, G black — the same traces therefore keep\n"
             "      the same colours whatever the kit, only the channels shift.\n"

@@ -57,7 +57,7 @@ class AnalysisSettings:
     basecaller: str = "mb1000_accuracy"
 
     # Channel / dye
-    base_order: str = "TGCA"  # instrument dye order → ACGT columns
+    base_order: str = "ACTG"  # channel -> base, MegaBACE default (Ch1=A,Ch2=C,Ch3=T,Ch4=G)
 
     # Baseline
     baseline_method: str = "percentile"  # percentile | none
