@@ -861,6 +861,8 @@ class GenotypingDialog(tk.Toplevel):
             return
         self._editor = ed
         ed.pack(fill=tk.BOTH, expand=True)
+        self.bind("<Control-z>", lambda e: self._editor._undo_last())
+        self.bind("<Control-Z>", lambda e: self._editor._undo_last())
 
     def __getattr__(self, name):
         ed = self.__dict__.get("_editor")

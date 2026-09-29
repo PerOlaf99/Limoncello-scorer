@@ -232,7 +232,8 @@ scratch:**
 - **Mutant/variant fraction** is computed for two main peaks of the *same
   channel* within one repeat (~one base): small/(small+large), shown in the
   table. The grouping window scales with the run's own peak spacing.
-- **Undo last pick / Clear picks** manage the picks; an already-picked **area
+- **Undo last pick / Clear picks** manage the picks (`Ctrl+Z` undoes the last
+  pick while peak picking is active); an already-picked **area
   cannot be picked again** (the click is refused with a status-bar message —
   undo it first to re-pick). Neighbouring peaks such as the two alleles of a
   heterozygote remain pickable; **Save peaks table…**

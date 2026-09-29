@@ -194,6 +194,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.bind("<F11>", lambda e: self._toggle_zoom())
         self.bind("<F1>", lambda e: self.show_help())
         self.bind("<Home>", lambda e: self._reset_zoom())
+        self.bind("<Control-z>", lambda e: self._gen_undo())
+        self.bind("<Control-Z>", lambda e: self._gen_undo())
 
         self.folders: List[Path] = list(initial_folders or [])
         self.files: List[Path] = []
@@ -2510,8 +2512,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "    statistics, per-channel signal maxima and the instrument current.\n\n"
             "8. KEYBOARD SHORTCUTS\n"
             "  ↑ / ↓ / PgUp / PgDn   page through wells\n"
-            "  Space                 start / stop auto-tour\n"
-            "  Delete                remove selected sample(s)\n"
+"  Space                 start / stop auto-tour\n"
+             "  Delete                remove selected sample(s)\n"
+             "  Ctrl+Z                undo last peak pick (in peak picking)\n"
             "  Home / right-click    reset the X & Y view\n"
             "  F1                    this manual\n"
             "  F11                   zoom the window to full screen / restore\n"
