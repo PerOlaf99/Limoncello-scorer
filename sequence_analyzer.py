@@ -17,8 +17,9 @@ A desktop viewer and base caller for capillary-electrophoresis traces:
 Base calling uses our own tuned caller (best_basecaller spacing tracker),
 not commercial instrument algorithms.
 
-Genotyping (allele calling next to base calling) is planned for a later
-release; the toolbar/menu layout already leaves room for it.
+Genotyping sits next to base calling in the Genotyping menu: manual peak
+picking straight on the stacked viewer (batch 4-6 wells at a time, click to
+pick, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML).
 
 Run:
   python sequence_analyzer.py
@@ -34,7 +35,7 @@ import shutil
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from pathlib import Path
 from typing import List, Optional
 
@@ -219,9 +220,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.theme = tk.StringVar(value="Classic")
         self.wrap_rows = tk.IntVar(value=5)
 
-        # Embedded (same-window) manual genotyping editor, if active:
+        # Main-window manual genotyping: the user pages the current batch
+        # (n_graphs wells at a time), zooms in and clicks peaks on the stacked
+        # viewer.  One PeakPicker per displayed well accumulates the records.
         self.genotyping_active = False
-        self.editor_panel = None
+        self._gen_pickers: dict = {}
+        self._gen_active_path: Optional[Path] = None
+        self._pick_cid = None
+        self.pick_table = None
+        self.pick_tree = None
+        self._gen_sh = tk.BooleanVar(value=True)
+        self._gen_d2 = tk.BooleanVar(value=True)
 
         # Shared X/Y view, stored as [first, last] fractions of the full data
         # range. One model drives every visible graph plus the axis bars.
@@ -406,10 +415,28 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         genotyping_m = tk.Menu(self, tearoff=0)
         genotyping_m.add_command(label="Manual peak picking…",
-                                 command=self.toggle_genotyping_editor)
+                                 command=self.toggle_genotyping_picking)
         genotyping_m.add_separator()
-        genotyping_m.add_command(label="Fragment genotyping (planned)",
-                                 state=tk.DISABLED)
+        genotyping_m.add_checkbutton(
+            label="Add stutter & +A (A-addition)",
+            variable=self._gen_sh, command=self._sync_gen_opts)
+        genotyping_m.add_checkbutton(
+            label="Mark start/end from the 2nd derivative",
+            variable=self._gen_d2, command=self._sync_gen_opts)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Undo last pick", command=self._gen_undo)
+        genotyping_m.add_command(label="Clear picks", command=self._gen_clear)
+        genotyping_m.add_command(label="Mark peaks as standard…",
+                                 command=self._gen_mark_std)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
+        genotyping_m.add_command(label="Next batch →",
+                                 command=lambda: self._page_by(1))
+        genotyping_m.add_command(label="← Previous batch",
+                                 command=lambda: self._page_by(-1))
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Exit peak picking",
+                                 command=self.exit_genotyping_picking)
 
         help_m = tk.Menu(self, tearoff=0)
         help_m.add_command(label="User manual…", command=self.show_help)
@@ -637,10 +664,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
             bar.bind("<Button-3>", self._on_right_click)
             bar.configure(cursor="hand2")
 
-        # Sequence readout
+        # Sequence readout (the pane is retitled and swapped for the picked-
+        # peaks table while manual peak picking is active)
         hdr = ttk.Frame(center)
         hdr.pack(fill=tk.X, padx=4)
-        ttk.Label(hdr, text="Called sequence").pack(side=tk.LEFT)
+        self.seq_hdr = ttk.Label(hdr, text="Called sequence")
+        self.seq_hdr.pack(side=tk.LEFT)
         self.seq_text = scrolledtext.ScrolledText(center, height=4, wrap=tk.CHAR,
                                                   font=("Courier", 9))
         self.seq_text.pack(fill=tk.X, padx=4, pady=2)
@@ -1224,92 +1253,318 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._show_sequence()
 
-    def open_genotyping(self):
-        """Open the manual genotyping window for the current selection."""
-        if not self.selected:
-            messagebox.showinfo("Genotyping",
-                                "Select a file/well in the list first.")
-            return
-        try:
-            from genotyping import GenotypingDialog
-        except Exception as e:
-            messagebox.showerror("Genotyping",
-                                 f"Could not load the genotyping module:\n{e}")
-            return
-        path = self.selected[0]
-        colors = self._theme_colors()
-        base_order = self.base_order_var.get()
-        mode = self._theme_mode()
-        try:
-            GenotypingDialog(self, path, colors=colors, base_order=base_order,
-                             theme_mode=mode)
-        except Exception as e:
-            messagebox.showerror("Genotyping", f"Could not open the window:\n{e}")
-
-    def toggle_genotyping_editor(self):
-        """Same-window manual peak picking: pick on the main plot, toggle
-        channels off to work one at a time.  Calling it again (or the Close
-        button) returns to the normal trace viewer."""
+    def toggle_genotyping_picking(self):
+        """Main-window manual peak picking: the viewer stays exactly as it is
+        (zoom bars, µA, Channels), but clicks on a subplot pick peaks for that
+        well and the sequence pane shows the picked-peaks table instead.
+        Calling it again (or Exit peak picking) returns to the viewer."""
         if self.genotyping_active:
-            self.exit_genotyping_editor()
+            self.exit_genotyping_picking()
             return
-        self.enter_genotyping_editor()
+        self.enter_genotyping_picking()
 
-    def enter_genotyping_editor(self):
+    def enter_genotyping_picking(self):
         if not self.selected:
             messagebox.showinfo("Genotyping",
-                                "Select a file/well in the list first.")
+                                "Select the wells to genotype in the list first.")
             return
         if self.genotyping_active:
             return
-        try:
-            from genotyping import GenotypingEditor
-        except Exception as e:
-            messagebox.showerror("Genotyping",
-                                 f"Could not load the genotyping module:\n{e}")
-            return
-        path = self.selected[0]
-        try:
-            pan = GenotypingEditor(
-                self.center, path,
-                colors=self._theme_colors(),
-                base_order=self.base_order_var.get(),
-                theme_mode=self._theme_mode(),
-                show=lambda i: self.chan_show[i].get())
-        except Exception as e:
-            messagebox.showerror("Genotyping", f"Could not open the editor:\n{e}")
-            return
-        self.plotf.pack_forget()
-        self.editor_panel = pan
+        self.seq_text.pack_forget()
+        self.seq_hdr.config(text="Picked peaks")
+        self._build_pick_table()
+        self._pick_cid = self.canvas.mpl_connect("button_press_event",
+                                                 self._on_gen_pick)
         self.genotyping_active = True
-        pan.on_exit = self.exit_genotyping_editor
-        pan.pack(fill=tk.BOTH, expand=True)
-        self.status_var.set(f"Genotyping {Path(path).name} — click peaks, "
-                            "toggle Channels to work one at a time, "
-                            "Close/back to viewer below.")
+        self.status_var.set("Manual genotyping — zoom in, click each peak you "
+                            "want; page the batch (Genotyping · Next/Previous "
+                            "batch) and pick the next wells.")
+        self.redraw()
 
-    def exit_genotyping_editor(self):
+    def exit_genotyping_picking(self):
         if not self.genotyping_active:
             return
-        if self.editor_panel is not None:
+        if self._pick_cid is not None:
             try:
-                self.editor_panel.destroy()
+                self.canvas.mpl_disconnect(self._pick_cid)
             except Exception:
                 pass
-            self.editor_panel = None
+            self._pick_cid = None
+        if self.pick_table is not None:
+            try:
+                self.pick_table.destroy()
+            except Exception:
+                pass
+            self.pick_table = None
+            self.pick_tree = None
         self.genotyping_active = False
-        self.plotf.pack(fill=tk.BOTH, expand=True)
+        self.seq_hdr.config(text="Called sequence")
+        self.seq_text.pack(fill=tk.X, padx=4, pady=2)
+        self.status_var.set("Back to the trace viewer.")
         self.redraw()
 
-    def _chan_changed(self):
-        """Channel on/off toggles refresh the viewer, and the embedded
-        peak-picking editor when one is open."""
+    def _build_pick_table(self):
+        tblf = ttk.Frame(self.center)
+        tblf.pack(fill=tk.X, padx=4, pady=2)
+        cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac")
+        self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings", height=4)
+        widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34, "kind": 62,
+                  "h V": 66, "area": 66, "frac": 50}
+        for c in cols:
+            self.pick_tree.heading(c, text=c)
+            self.pick_tree.column(c, width=widths[c],
+                                  anchor="e" if c not in ("well", "kind") else "w",
+                                  stretch=(c in ("scan", "kind")))
+        vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=self.pick_tree.yview)
+        self.pick_tree.configure(yscrollcommand=vs.set)
+        self.pick_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.pick_table = tblf
+
+    def _gen_paths(self):
+        n = max(1, min(8, self.n_graphs.get()))
+        sel = [Path(p) for p in (self.selected or [])]
+        return sel[:n]
+
+    def _ensure_picker(self, path):
+        from genotyping import PeakPicker
+        key = str(path.resolve())
+        pk = self._gen_pickers.get(key)
+        if pk is None:
+            doc = self._ensure_doc(path)
+            pk = PeakPicker(doc, path, colors=self._theme_colors(),
+                            base_order=self.base_order_var.get(),
+                            theme_mode=self._theme_mode(),
+                            show=lambda i: self.chan_show[i].get(),
+                            include_sh=self._gen_sh.get(),
+                            show_d2=self._gen_d2.get())
+            self._gen_pickers[key] = pk
+        return pk
+
+    def _on_gen_pick(self, event):
+        if not self.genotyping_active:
+            return
+        if event.inaxes is None or event.xdata is None:
+            return
+        if getattr(event, "button", 1) != 1:
+            return
+        try:
+            i = self._plot_axes.index(event.inaxes)
+        except ValueError:
+            return
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            return
+        path = paths[i]
+        try:
+            pk = self._ensure_picker(path)
+        except Exception as e:
+            self.status_var.set(f"Could not load {path.name}: {e}")
+            return
+        rec = pk.pick(event.xdata, vol=event.ydata)
+        if rec is None:
+            self.status_var.set(f"No peak found near that scan on {path.name} — "
+                                "try again closer to a hump.")
+            return
+        self._gen_active_path = path
+        self.status_var.set(f"{path.parent.name}/{path.name} · well {pk.doc.well}: "
+                            f"peak scan {rec['scan']} · {rec['base']} "
+                            f"height {rec['height']:.3f} V")
         self.redraw()
-        if self.genotyping_active and self.editor_panel is not None:
+        self._sync_pick_table()
+
+    def _redraw_genotyping(self):
+        """Stack the current batch and draw each well's raw channels plus the
+        picked-peak overlays, so zoom / µA / Reset view keep working while the
+        user picks peaks on the main window"""
+        self.fig.clear()
+        self._plot_axes = []
+        self._full_xlim = None
+        self._full_ylim = None
+        paths = self._gen_paths()
+        if not paths:
+            self.canvas.draw_idle()
+            self._sync_pick_table()
+            return
+        gx0 = gx1 = gy0 = gy1 = None
+        for i, path in enumerate(paths):
+            ax = self.fig.add_subplot(len(paths), 1, i + 1)
             try:
-                self.editor_panel.redraw()
-            except Exception:
-                pass
+                pk = self._ensure_picker(path)
+                doc = pk.doc
+            except Exception as e:
+                ax.text(0.5, 0.5, f"Load error: {e}",
+                        ha="center", transform=ax.transAxes)
+                continue
+            n = doc.acgt.shape[0]
+            x = np.arange(n)
+            plotted = False
+            for col, color in pk.col_color.items():
+                if not self.chan_show[col].get():
+                    continue
+                seg = doc.acgt[:, col]
+                ax.plot(x, seg, color=color, lw=0.7,
+                        label=f"Ch{col + 1} {CHANNEL_ORDER[col]}")
+                m0 = float(np.nanmin(seg))
+                m1 = float(np.nanmax(seg))
+                gy0 = m0 if gy0 is None else min(gy0, m0)
+                gy1 = m1 if gy1 is None else max(gy1, m1)
+                plotted = True
+            if n:
+                gx0 = 0 if gx0 is None else 0
+                gx1 = n if gx1 is None else max(gx1, n)
+            self._plot_axes.append(ax)
+            if not plotted:
+                ax.text(0.5, 0.5, "(all channels hidden)", ha="center",
+                        va="center", transform=ax.transAxes, color="#888")
+            if self.show_current.get() and doc.current_ua is not None:
+                axc = ax.twinx()
+                cu = doc.current_ua
+                axc.plot(np.arange(n), cu, color=CURRENT_COLOR, lw=0.8,
+                         alpha=0.8, linestyle=":", label="I (µA)")
+                axc.set_ylabel("µA", color=CURRENT_COLOR, fontsize=6)
+                axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
+            pk.plot_overlay(ax)
+            ax.tick_params(labelsize=7)
+            ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
+                    transform=ax.transAxes, ha="left", va="top",
+                    fontsize=6, color="#333", zorder=6)
+            self._style_x_axis(ax, i == len(paths) - 1)
+        if gx1 is not None and gy0 is not None and gx1 > gx0:
+            pad = 0.02 * (gy1 - gy0) or 1.0
+            self._full_xlim = (float(gx0), float(gx1))
+            self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
+        self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
+        self._add_volt_label()
+        self._apply_zoom()
+        self.canvas.draw_idle()
+        self._sync_pick_table()
+
+    def _sync_pick_table(self):
+        if getattr(self, "pick_tree", None) is None:
+            return
+        self.pick_tree.delete(*self.pick_tree.get_children())
+        for path in self._gen_paths():
+            pk = self._gen_pickers.get(str(path.resolve()))
+            if pk is None:
+                continue
+            for r in pk.records:
+                fr = pk.clust_frac(r) if r["kind"] == "main" else None
+                self.pick_tree.insert("", tk.END, values=(
+                    pk.doc.well, r["scan"], pk.duplex_of(r), r["base"],
+                    r["kind"], f"{r['height']:.3f}", f"{r['area']:.1f}",
+                    f"{fr:.3f}" if fr else ""))
+
+    def _gen_picker_active(self):
+        """The picker to act on: the well of the last click, else the first
+        displayed well that already has picks, else the first displayed well."""
+        if self._gen_active_path is not None:
+            pk = self._gen_pickers.get(str(self._gen_active_path.resolve()))
+            if pk is not None:
+                return pk
+        for path in self._gen_paths():
+            pk = self._gen_pickers.get(str(path.resolve()))
+            if pk is not None and pk.records:
+                return pk
+        for path in self._gen_paths():
+            pk = self._gen_pickers.get(str(path.resolve()))
+            if pk is not None:
+                return pk
+        return None
+
+    def _sync_gen_opts(self):
+        for pk in self._gen_pickers.values():
+            pk.include_sh = bool(self._gen_sh.get())
+            pk.show_d2 = bool(self._gen_d2.get())
+        self.redraw()
+
+    def _gen_undo(self):
+        if not self.genotyping_active:
+            return
+        pk = self._gen_picker_active()
+        if pk is None or not pk.undo_last():
+            self.status_var.set("Nothing to undo.")
+            return
+        self.status_var.set("Removed last picked peak.")
+        self.redraw()
+
+    def _gen_clear(self):
+        if not self.genotyping_active:
+            return
+        if self._gen_pickers:
+            self._gen_pickers.clear()
+            self._gen_active_path = None
+            self.status_var.set("Picks cleared.")
+        self.redraw()
+
+    def _gen_mark_std(self):
+        if not self.genotyping_active:
+            return
+        pk = self._gen_picker_active()
+        if pk is None:
+            self.status_var.set("Select wells first.")
+            return
+        length = simpledialog.askstring(
+            "Internal standard",
+            "Fragment length (bp) of the standard — the same for the four\n"
+            "CTC-CE duplex peaks (HOM1/HOM2/HET1/HET2).\n"
+            "Leave empty if unknown.",
+            parent=self)
+        if length is None:
+            return
+        length_bp = None
+        if length.strip():
+            try:
+                length_bp = float(length.strip())
+            except ValueError:
+                messagebox.showerror("Internal standard",
+                                     f"'{length}' is not a number.")
+                return
+        try:
+            msg = pk.mark_std(length_bp)
+        except ValueError as e:
+            messagebox.showwarning("Internal standard", str(e))
+            return
+        self._gen_active_path = Path(pk.path)
+        self.status_var.set(f"Well {pk.doc.well}: {msg}")
+        self._sync_pick_table()
+
+    def _gen_save(self):
+        if not self.genotyping_active:
+            return
+        from genotyping import save_table
+        rows = []
+        for key, pk in self._gen_pickers.items():
+            if pk.records:
+                rows.extend(pk.export_rows())
+        if not rows:
+            messagebox.showinfo("Save peaks table",
+                                "Pick some peaks first, then save.")
+            return
+        types = [("CSV (Excel-compatible)", "*.csv"), ("JSON (ML)", "*.json")]
+        try:
+            import openpyxl  # noqa: F401
+            types.insert(1, ("Excel workbook (.xlsx)", "*.xlsx"))
+        except ImportError:
+            pass
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv",
+                                            filetypes=types)
+        if not path:
+            return
+        try:
+            save_table(path, rows)
+        except Exception as e:
+            messagebox.showerror("Save peaks table",
+                                 f"Could not write file:\n{e}")
+            return
+        wells = sorted({r["well"] for r in rows})
+        self.status_var.set(f"Saved {len(rows)} peak rows ({len(wells)} well"
+                            f"{'s' if len(wells) != 1 else ''}) to {path}")
+
+    def _chan_changed(self):
+        """Channel on/off toggles refresh the viewer (and the picked-peak
+        overlays when main-window picking is active)."""
+        self.redraw()
 
     def _show_sequence(self):
         self.seq_text.delete("1.0", tk.END)
@@ -1837,6 +2092,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.fig.supylabel("Volt", fontsize=8, x=0.014, color="#333")
 
     def redraw(self):
+        if self.genotyping_active:
+            self._redraw_genotyping()
+            return
         self.fig.clear()
         self._plot_axes = []
         self._full_xlim = None
@@ -2181,14 +2439,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "    'quality' line is OFF by default.  Turn it on only if you want\n"
              "    it:  View ▸ Show quality profile (0-100).\n\n"
 "6b. GENOTYPING  (Genotyping menu, between Base calling and Comments)\n"
-               "  Manual peak picking…  swaps the plot area of THIS window for a\n"
-               "  peak editor on the selected well — you stay in the same interface.\n"
-               "  Use the Channels row above the plot to turn channels off and work\n"
-               "  one at a time (toggle changes redraw instantly).  The same menu\n"
-               "  item or the  Close / back to viewer  button returns to the normal\n"
-               "  trace viewer.  It is built from scratch for fragment genotyping\n"
-               "  (CTC-CE runs, e.g. a FAM sample with an Atto532 internal standard\n"
-               "  in another channel).\n"
+               "  Manual peak picking…  keeps THIS window exactly as it is — the same\n"
+               "  stacked viewer, zoom bars, Reset view, µA and Channels row — but\n"
+               "  clicking a peak now records it for that well, and the Called-sequence\n"
+               "  box below the plot becomes the Picked-peaks table.  Show several\n"
+               "  wells at once (the Graphs spinbox), zoom in, and pick each well's\n"
+               "  peaks; then page the batch onward — Genotyping ▸ Next batch / Previous\n"
+               "  batch move 4-6 wells at a time.  The table collects every well you\n"
+               "  visited, so you save the whole run in one go.  Exit peak picking\n"
+               "  returns to the normal trace viewer.  It is built from scratch for\n"
+               "  fragment genotyping (CTC-CE runs, e.g. a FAM sample with an Atto532\n"
+               "  internal standard in another channel).\n"
 "  • Click a peak (or just beside it) — the best available algorithm\n"
                "    locates it, shades the peak area and logs scan, channel/base,\n"
                "    height and area.  The recognition method is selectable\n"
@@ -2210,21 +2471,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    differing by the single SNP base of the rs number) and two\n"
                "    heteroduplexes (peaks 3-4, made in the PCR when Watson and Crick\n"
                "    strands pair wrongly, giving one mismatch base pair).  Pick the\n"
-               "    four standard main peaks and press  Mark picked peaks as standard:\n"
-               "    the earlier ones become HOM1/HOM2, the later HET1/HET2.  A single\n"
-               "    fragment length (bp) may be entered (optional, shared by all four).\n"
-               "    Variant ratios come from the RELATIVE areas of these duplex peaks,\n"
-               "    so no bp ladder is involved.\n"
-               "  • Mutant/variant fraction appears under the table for any pair of\n"
-               "    main peaks within 8 scans (classic heterozygote): small/(small+large).\n"
-               "  • Undo last removes the most recent pick (with its stutter/+A\n"
-               "    tags); Clear all empties the table.\n"
-               "  • Save table…  writes the picked peaks as CSV (Excel-ready),\n"
-               "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
-               "    (main/stutter/+A), height (V), area (V·scan), duplex label\n"
-               "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  That table is\n"
-               "    your labelled training library for ML — peak picking works with\n"
-               "    or without an internal standard.\n"
+"    four standard main peaks and use  Mark peaks as standard…\n"
+                "    (Genotyping menu): the earlier ones become HOM1/HOM2, the later\n"
+                "    HET1/HET2.  A single\n"
+                "    fragment length (bp) may be entered (optional, shared by all four).\n"
+                "    Variant ratios come from the RELATIVE areas of these duplex peaks,\n"
+                "    so no bp ladder is involved.\n"
+                "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
+                "    8 scans (classic heterozygote): small/(small+large).\n"
+                "  • Undo last pick removes the most recent pick (with its stutter/+A\n"
+                "    tags); Clear picks empties the whole table.\n"
+                "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
+                "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
+                "    (main/stutter/+A), height (V), area (V·scan), duplex label\n"
+                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  That table is\n"
+                "    your labelled training library for ML — peak picking works with\n"
+                "    or without an internal standard.\n"
               "7. EXPORT  (File menu)\n"
             "  • Export sequence (FASTA)…   called bases per well.\n"
             "  • Export peak table (CSV)…   well, base, scan position, quality.\n"

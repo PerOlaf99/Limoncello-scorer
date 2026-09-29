@@ -193,16 +193,23 @@ the `.rsd`/`.scf` data files are never modified.
 
 The **Genotyping** menu is an independent top-level heading (between *Base
 calling* and *Comments*). It holds **Manual peak picking…**, which needs no
-second window: the plot area of the main window is swapped for the peak editor
-on the selected well, so you stay in the same interface. The **Channels** row
-above the plot turns channels on/off — work one channel at a time and the plot
-redraws instantly. The same menu item (or *Close / back to viewer*) returns to
-the normal trace viewer. The editor is built from scratch:
+second window and no pop-up: the main window stays exactly as it is — the same
+stacked viewer, zoom bars, Reset view, µA overlay and **Channels** row — but
+clicking a peak now records it for that well, and the *Called sequence* box
+below the plot becomes the *Picked peaks* table. **Peak picking is built from
+scratch:**
 
+- Show several wells at once with the **Graphs** spinbox (4–6 at a time is
+  the intended workflow), zoom in with the axis bars / mouse wheel, and click
+  each peak on its own subplot. Then move the batch onward —
+  **Genotyping → Next batch / Previous batch** pages 4–6 wells at a time — and
+  pick the next wells. The table below accumulates **every well you visited**,
+  so you save the whole run in one go.
 - Click a peak (or just beside it) — the best available algorithm locates it,
   shades the peak area and logs scan, channel/base, height (V) and area
-  (V·scan). The recognition method is selectable: Best prominence, Simple
-  local maxima, or Gaussian fit.
+  (V·scan). Clicking nearer the peak's actual height separates two channels
+  that share a scan. The recognition method is selectable: Best prominence,
+  Simple local maxima, or Gaussian fit.
 - **Mark start/end from the 2nd derivative** (on by default): square ticks
   show where each picked peak lifts off its baseline. The 2nd derivative of
   the smoothed trace crosses the noise floor from flat to concave-up at the
@@ -217,19 +224,22 @@ the normal trace viewer. The editor is built from scratch:
   capillary electrophoresis separates them by *sequence*: peaks 1–2 are the two
   **homoduplexes** (they differ by the single SNP base of the rs number), peaks
   3–4 the two **heteroduplexes** made in the PCR when Watson and Crick strands
-  pair wrongly, leaving one mismatch base pair. Pick the four standard main
-  peaks and press *Mark picked peaks as standard*: earlier ones become
-  `HOM1`/`HOM2`, later ones `HET1`/`HET2`. A single fragment length (bp) is
-  optional and shared by all four. Variant ratios come from the **relative
-  areas** of these duplex peaks, so no bp ladder is involved.
-- **Mutant/variant fraction** for classic heterozygous positions (two main
-  peaks within 8 scans) is shown under the table.
-- **Undo last / Clear all** manage the picks; **Save table…** writes CSV
-  (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan, channel,
-  base, kind (`main`/`stutter`/`+A`), start/end scan (2nd derivative), height,
-  area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and fraction.
-  That table is a labelled **training library for ML** — picking works with
-  or without an internal standard.
+  pair wrongly, leaving one mismatch base pair. Pick that well's four standard
+  main peaks *last* and use **Genotyping → Mark peaks as standard…** (a shared
+  fragment length in bp is optional): earlier ones become `HOM1`/`HOM2`, later
+  ones `HET1`/`HET2`. Variant ratios come from the **relative areas** of these
+  duplex peaks, so no bp ladder is involved.
+- **Mutant/variant fraction** is computed for two main peaks of the *same
+  channel* within one repeat (~one base): small/(small+large), shown in the
+  table. The grouping window scales with the run's own peak spacing.
+- **Undo last pick / Clear picks** manage the picks; **Save peaks table…**
+  writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
+  channel, base, kind (`main`/`stutter`/`+A`), start/end scan (2nd derivative),
+  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and
+  fraction. That table is a labelled **training library for ML** — picking
+  works with or without an internal standard.
+- **Exit peak picking** returns to the normal trace viewer (the same menu item
+  toggles back and forth).
 
 ## Comments & run info
 
