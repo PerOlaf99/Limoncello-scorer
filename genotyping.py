@@ -596,6 +596,8 @@ class PeakPicker:
 def _write_csv(path, rows):
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
+        if not rows:
+            return
         w.writerow(list(rows[0].keys()))
         for r in rows:
             w.writerow(list(r.values()))
@@ -607,19 +609,22 @@ def _write_xlsx(path, rows):
     wb = Workbook()
     ws = wb.active
     ws.title = "peaks"
-    headers = list(rows[0].keys())
-    ws.append(headers)
-    for r in rows:
-        ws.append([r[h] for h in headers])
-    for i, h in enumerate(headers, 1):
-        ws.column_dimensions[get_column_letter(i)].width = \
-            max(8, min(28, 6 + len(h)))
-    ws.freeze_panes = "A2"
+    if rows:
+        headers = list(rows[0].keys())
+        ws.append(headers)
+        for r in rows:
+            ws.append([r[h] for h in headers])
+        for i, h in enumerate(headers, 1):
+            ws.column_dimensions[get_column_letter(i)].width = \
+                max(8, min(28, 6 + len(h)))
+        ws.freeze_panes = "A2"
     wb.save(path)
 
 
 def save_table(path, rows):
-    """Write peak rows to CSV, JSON or XLSX depending on the file suffix."""
+    """Write peak rows to CSV, JSON or XLSX depending on the file suffix.
+
+    An empty *rows* list is written as an empty table rather than raising."""
     ext = Path(path).suffix.lower()
     if ext == ".json":
         Path(path).write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
