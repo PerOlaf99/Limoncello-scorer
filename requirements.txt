@@ -1,6 +1,16 @@
+# Core runtime (base caller + scorer) -- numpy and scipy only.
 numpy>=1.20
 scipy>=1.7
+
+# Desktop viewer (the GUI needs tkinter from the system Python).
 matplotlib>=3.5
-pillow>=9  # optional: empty-view background pictures
-# GUI: use system Python with tkinter (usually included on Windows/macOS)
-# On Linux: sudo apt install python3-tk
+
+# Empty-view background pictures.
+pillow>=9
+
+# Optional file formats.
+# openpyxl>=3.0   # Excel .xlsx peak export
+# biopython>=1.79 # .scf reading
+
+# The full dependency set lives in pyproject.toml (extras: gui, xlsx, scf, all).
+# On Ubuntu/Debian install tkinter with: sudo apt install python3-tk
