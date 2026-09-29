@@ -199,6 +199,11 @@ window for fragment genotyping, built from scratch:
   shades the peak area and logs scan, channel/base, height (V) and area
   (V·scan). The recognition method is selectable: Best prominence, Simple
   local maxima, or Gaussian fit.
+- **Mark start/end from the 2nd derivative** (on by default): square ticks
+  show where each picked peak lifts off its baseline. The 2nd derivative of
+  the smoothed trace crosses the noise floor from flat to concave-up at the
+  true start, and concave-up again on the return at the end. Uncheck for a
+  clean look. The start/end scans are also written to the exported table.
 - **Add stutter & +A** (on by default) also tags the strongest satellite on
   each side of the main peak — the stutter peak (~1 repeat shorter) and the
   Taq A-addition (+A shoulder a few scans later). Turn it off when clicking
@@ -217,8 +222,8 @@ window for fragment genotyping, built from scratch:
   peaks within 8 scans) is shown under the table.
 - **Undo last / Clear all** manage the picks; **Save table…** writes CSV
   (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan, channel,
-  base, kind (`main`/`stutter`/`+A`), height, area, duplex label
-  (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and fraction.
+  base, kind (`main`/`stutter`/`+A`), start/end scan (2nd derivative), height,
+  area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and fraction.
   That table is a labelled **training library for ML** — picking works with
   or without an internal standard.
 

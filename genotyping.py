@@ -69,6 +69,7 @@ class GenotypingDialog(tk.Toplevel):
         self.std = None
         self.length_bp = None
         self.col_color = {}
+        self._d2_cache: dict[int, tuple] = {}
         for ci, base in enumerate(self.base_order[:4]):
             if base in CHANNEL_ORDER:
                 if self.theme_mode == "channel":
@@ -120,6 +121,10 @@ class GenotypingDialog(tk.Toplevel):
         ttk.Checkbutton(det, text="Add stutter & +A (A-addition) peaks",
                         variable=self.include_sh,
                         command=lambda: (self.redraw(), self._sync_table())).pack(anchor=tk.W)
+        self.show_d2 = tk.BooleanVar(value=True)
+        ttk.Checkbutton(det, text="Mark start/end from the 2nd derivative",
+                        variable=self.show_d2,
+                        command=self.redraw).pack(anchor=tk.W)
         self.het_label = ttk.Label(det, text="Click a peak (or near it) to pick it.",
                                    foreground="#0F3A6E", wraplength=320, justify=tk.LEFT)
         self.het_label.pack(anchor=tk.W, pady=(4, 0))
@@ -228,6 +233,8 @@ class GenotypingDialog(tk.Toplevel):
             area=best["area"],
             left=best["left"],
             right=best["right"],
+            onset=best.get("onset", best["left"]),
+            end=best.get("end", best["right"]),
             color=best["color"],
             col=best["col"],
             gid=self._gid,
@@ -240,7 +247,8 @@ class GenotypingDialog(tk.Toplevel):
                     base=CHANNEL_ORDER[sib["col"]], kind=sib["kind"],
                     height=sib["height"], area=sib["area"],
                     left=sib["left"], right=sib["right"], color=sib["color"],
-                    col=sib["col"],
+                    col=sib["col"], onset=sib.get("onset", sib["left"]),
+                    end=sib.get("end", sib["right"]),
                     gid=self._gid,
                 )
                 self.records.append(rec2)
@@ -262,16 +270,57 @@ class GenotypingDialog(tk.Toplevel):
             return None
         alg = dict(PEAK_FINDERS)[self.finder.get()]
         if alg == "gauss":
-            v = self._numeric_peak(y, w)
+            v = self._numeric_peak(y, w, col)
             if v is None:
                 return v
             g = self._gauss_fit(y, v["left"], v["right"], v["apex"], v["height"])
             if g is not None:
                 v.update(g)
             return v
-        return self._numeric_peak(y, w)
+        return self._numeric_peak(y, w, col)
 
-    def _numeric_peak(self, y, w):
+    def _d2(self, col):
+        """Smoothed second derivative of one channel, plus a robust noise
+        estimate (median-absolute-deviation * 1.4826).  Cached per channel."""
+        if col in self._d2_cache:
+            return self._d2_cache[col]
+        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        try:
+            from scipy.signal import savgol_filter
+            yy = savgol_filter(y, window_length=7, polyorder=2, mode="interp")
+        except Exception:
+            k = np.ones(5) / 5.0
+            yy = np.convolve(y, k, mode="same")
+            yy = np.convolve(yy, k, mode="same")
+        d2 = np.gradient(np.gradient(np.asarray(yy, dtype=float)))
+        s2 = 1.4826 * np.median(np.abs(d2 - np.median(d2)))
+        self._d2_cache[col] = (d2, float(s2))
+        return self._d2_cache[col]
+
+    def _onset_end(self, col, apex, left, right):
+        """Start/stop of the peak from the second derivative: the concave-up
+        lift-off on the rising flank (onset) and the concave-up return on the
+        falling flank (end).  Falls back to the valley boundaries (left/right)
+        when no curvature threshold stands out."""
+        d2, s2 = self._d2(col)
+        th = 3.0 * s2
+        apex = int(apex)
+        left = max(0, int(left))
+        right = min(self.doc.acgt.shape[0] - 1, int(right))
+        onset = None
+        for i in range(left, max(left, apex - 1)):
+            if d2[i] > th and d2[i + 1] > th:
+                onset = i
+                break
+        end = None
+        for i in range(right, max(apex + 1, right - 1), -1):
+            if d2[i] > th and d2[i - 1] > th:
+                end = i
+                break
+        return (left if onset is None else onset,
+                right if end is None else end)
+
+    def _numeric_peak(self, y, w, col):
         seg = y[w]
         base = float(np.nanmin(seg))
         top = float(np.nanmax(seg))
@@ -302,7 +351,9 @@ class GenotypingDialog(tk.Toplevel):
         height = float(y[apex] - max(y[left], y[right]))
         if height <= 0 or area <= 0:
             return None
+        onset, end = self._onset_end(col, apex, left, right)
         return {"apex": apex, "left": left, "right": right,
+                "onset": onset, "end": end,
                 "area": area, "height": height}
 
     def _gauss_fit(self, y, left, right, apex, height):
@@ -361,7 +412,9 @@ class GenotypingDialog(tk.Toplevel):
             hgt = float(y[x] - max(y[left], y[right]))
             if hgt <= 0 or area <= 0:
                 continue
+            onset, end = self._onset_end(main["col"], x, left, right)
             out.append({"apex": x, "left": left, "right": right,
+                        "onset": onset, "end": end,
                         "area": area, "height": hgt,
                         "col": main["col"], "color": main["color"],
                         "kind": kind})
@@ -469,6 +522,18 @@ class GenotypingDialog(tk.Toplevel):
             ax.fill_between(xs, 0, y, color=r["color"], alpha=0.25, zorder=1)
             ax.plot([r["scan"]], [self.doc.acgt[r["scan"], r["col"]]],
                     marker="o", ms=5, mfc="none", mec=r["color"], zorder=4)
+            if self.show_d2.get():
+                tick = float(np.nanmax(self.doc.acgt)) * 0.03
+                for xx, tag in ((r["onset"], "start"), (r["end"], "end")):
+                    if not isinstance(xx, int) and xx is not None:
+                        xx = int(xx)
+                    if xx is None or not (0 <= xx < n):
+                        continue
+                    yy = self.doc.acgt[xx, r["col"]]
+                    ax.vlines(xx, max(0, yy - tick), yy + tick,
+                              color=r["color"], lw=1.0, zorder=4)
+                    ax.plot([xx], [yy], marker="s", ms=2.5, mfc=r["color"],
+                            mec=r["color"], zorder=4)
             txt = f"{r['scan']}·{r['base']}"
             if r["kind"] != "main":
                 txt = f"{r['kind']} " + txt
@@ -583,6 +648,7 @@ class GenotypingDialog(tk.Toplevel):
             rows.append({
                 "file": r["file"], "well": r["well"], "scan": r["scan"],
                 "channel": r["channel"], "base": r["base"], "kind": r["kind"],
+                "start_scan": r.get("onset"), "end_scan": r.get("end"),
                 "height_V": round(r["height"], 4),
                 "area_Vscan": round(r["area"], 3),
                 "duplex": self._duplex_of(r),
