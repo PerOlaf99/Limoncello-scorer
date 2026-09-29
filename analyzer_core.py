@@ -4,26 +4,42 @@ Wraps best_basecaller configs and optional Cimarron-style DSP stages.
 """
 from __future__ import annotations
 
+import os
+import inspect
 import struct
 import sys
+import warnings
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict, Any, Tuple
 
 import numpy as np
 
-# Locate best_basecaller package
+# ---------------------------------------------------------------------------
+# Locate the bundled basecaller package
+# ---------------------------------------------------------------------------
+# The caller is vendored at the repository root (``cimarron_basecaller/`` +
+# ``configs.py``).  Keep an env-var override for users who keep the caller
+# elsewhere (``BEST_BASECALLER_RELEASE``), and fall back to the historical
+# release layout (a sibling ``BEST_BASECALLER_RELEASE/`` folder inside the
+# distributed zip).  No developer-specific absolute paths remain.
 _ROOT = Path(__file__).resolve().parent
-for _p in (
-    _ROOT.parent / "BEST_BASECALLER_RELEASE",
-    Path("/home/per/Nedlastinger/BEST_BASECALLER_RELEASE"),
-    _ROOT.parent / "best_basecaller" / "best_basecaller",
-    Path("/home/workdir/artifacts/BEST_BASECALLER_RELEASE"),
-    Path("/home/workdir/artifacts/best_basecaller/best_basecaller"),
-):
-    if (_p / "cimarron_basecaller").is_dir() or (_p / "cimarron_basecaller").exists():
-        sys.path.insert(0, str(_p))
+_PKG_SEARCH = []
+_env = os.environ.get("BEST_BASECALLER_RELEASE")
+if _env:
+    _PKG_SEARCH.append(Path(_env).expanduser())
+_PKG_SEARCH += [
+    _ROOT,                                  # vendored at the repo root
+    _ROOT / "BEST_BASECALLER_RELEASE",      # bundled release folder
+    _ROOT.parent / "BEST_BASECALLER_RELEASE",  # sibling of the app folder
+]
+for _p in _PKG_SEARCH:
+    if (_p / "cimarron_basecaller").is_dir():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
         break
+
+BASECALLER_AVAILABLE = False
 
 try:
     from cimarron_basecaller.rsd_io import read_rsd, to_acgt_trace
@@ -44,6 +60,8 @@ try:
     from configs import CONFIGS as BB_CONFIGS
 except ImportError:
     BB_CONFIGS = {}
+
+BASECALLER_AVAILABLE = track_bases is not None
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +118,15 @@ class AnalysisSettings:
     # View
     view_mode: str = "processed"  # raw | baseline | processed | called
 
-    # AnalysisSettings fields that map 1:1 onto track_bases kwargs.
+    # AnalysisSettings fields that map 1:1 onto real track_bases kwargs.
+    # (Every name here is accepted by the vendored cimarron_basecaller; knobs
+    # that no longer exist in the caller -- multi-pass Wiener, a separate
+    # hard-zone deconvolution, a `pullback_profile` tuple -- are intentionally
+    # absent.)
     _KNOB_MAP = {
         "use_gaussian_reconstruction": "use_gaussian_reconstruction",
         "gaussian_recon_segment_size": "gaussian_recon_segment_size",
         "gaussian_recon_noise_reg": "gaussian_recon_noise_reg",
-        "use_multipass_wiener": "use_multipass_wiener",
         "use_combined_channel_score": "use_combined_channel_score",
         "channel_peak_bonus": "channel_peak_bonus",
         "pullback_weight": "pullback_weight",
@@ -115,56 +136,49 @@ class AnalysisSettings:
     }
 
     def to_track_kwargs(self) -> Dict[str, Any]:
-        """Map settings → track_bases kwargs (best_basecaller).
+        """Map settings -> ``track_bases`` kwargs.
 
-        For a named basecaller preset the preset's config (instrument × mode)
-        is authoritative; only knobs the user has actually changed from their
-        defaults override it. This is what lets e.g. mb4000_* keep its global
-        matrix / mb*_length keep its mid hard-zone deconv.
+        For a named preset in :data:`configs.CONFIGS` the preset is
+        authoritative and only knobs the user has actually changed from their
+        defaults override it.  A name that is *not* a preset (or when the
+        caller/config module is missing) falls back to the scalar UI knobs.
+        The returned dict contains only keywords the vendored
+        ``cimarron_basecaller.track_bases`` accepts.
         """
         defaults = AnalysisSettings()
         if self.basecaller in BB_CONFIGS:
             kw: Dict[str, Any] = dict(BB_CONFIGS[self.basecaller])
-            kw.pop("base_order", None)  # app passes base_order explicitly
-            for field, tkw in self._KNOB_MAP.items():
-                if getattr(self, field) != getattr(defaults, field):
-                    kw[tkw] = getattr(self, field)
-            if (self.window_frac_lo, self.window_frac_hi) != (defaults.window_frac_lo, defaults.window_frac_hi):
-                kw["window_frac"] = (self.window_frac_lo, self.window_frac_hi)
-            if (self.pullback_frac, self.pullback_start, self.pullback_end) != (
-                    defaults.pullback_frac, defaults.pullback_start, defaults.pullback_end
-            ):
-                if self.pullback_profile_enable:
-                    kw["pullback_profile"] = (self.pullback_frac, self.pullback_start, self.pullback_end)
-                else:
-                    kw.pop("pullback_profile", None)
-            elif not self.pullback_profile_enable:
-                kw.pop("pullback_profile", None)
-            # user explicitly turned the position-adaptive toggle off
-            if self.position_adaptive_spectral != defaults.position_adaptive_spectral:
-                kw["position_adaptive_spectral"] = self.position_adaptive_spectral
-            kw.setdefault("local_hardzone_deconv", False)
-            kw.setdefault("use_multipass_wiener", self.use_multipass_wiener)
-            return kw
+        else:
+            if BB_CONFIGS and self.basecaller not in ("raw_peaks", ""):
+                warnings.warn(
+                    f"Unknown basecaller preset {self.basecaller!r}; falling "
+                    "back to the scalar UI knobs.", RuntimeWarning,
+                    stacklevel=2)
+            kw = dict(
+                use_gaussian_reconstruction=self.use_gaussian_reconstruction,
+                gaussian_recon_segment_size=self.gaussian_recon_segment_size,
+                gaussian_recon_noise_reg=self.gaussian_recon_noise_reg,
+                use_combined_channel_score=self.use_combined_channel_score,
+                channel_peak_bonus=self.channel_peak_bonus,
+                pullback_weight=self.pullback_weight,
+                ema_alpha=self.ema_alpha,
+                window_frac=(self.window_frac_lo, self.window_frac_hi),
+                local_norm_window=self.local_norm_window,
+                baseline_window=self.baseline_window,
+            )
+        kw.pop("base_order", None)  # app passes base_order explicitly
 
-        # No preset (e.g. a custom name): pass every knob through.
-        kw = dict(
-            use_gaussian_reconstruction=self.use_gaussian_reconstruction,
-            gaussian_recon_segment_size=self.gaussian_recon_segment_size,
-            gaussian_recon_noise_reg=self.gaussian_recon_noise_reg,
-            use_multipass_wiener=self.use_multipass_wiener,
-            use_combined_channel_score=self.use_combined_channel_score,
-            channel_peak_bonus=self.channel_peak_bonus,
-            pullback_weight=self.pullback_weight,
-            ema_alpha=self.ema_alpha,
-            window_frac=(self.window_frac_lo, self.window_frac_hi),
-            local_norm_window=self.local_norm_window,
-            baseline_window=self.baseline_window,
-            position_adaptive_spectral=self.position_adaptive_spectral and self.spectral_enable,
-            local_hardzone_deconv=False,
-        )
-        if self.pullback_profile_enable:
-            kw["pullback_profile"] = (self.pullback_frac, self.pullback_start, self.pullback_end)
+        for field, tkw in self._KNOB_MAP.items():
+            if getattr(self, field) != getattr(defaults, field):
+                kw[tkw] = getattr(self, field)
+        if (self.window_frac_lo, self.window_frac_hi) != (
+                defaults.window_frac_lo, defaults.window_frac_hi):
+            kw["window_frac"] = (self.window_frac_lo, self.window_frac_hi)
+        # position-adaptive spectral separation is only meaningful when
+        # separation itself is enabled.
+        if self.position_adaptive_spectral != defaults.position_adaptive_spectral:
+            kw["position_adaptive_spectral"] = (
+                self.position_adaptive_spectral and self.spectral_enable)
         return kw
 
 
@@ -579,20 +593,20 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
 def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocument:
     """Run selected basecaller; updates sequence + peak_positions."""
     if track_bases is None:
-        raise RuntimeError("track_bases not available")
+        raise RuntimeError(
+            "The basecaller is not available. It normally ships with this app "
+            "(cimarron_basecaller/ at the repository root); set the "
+            "BEST_BASECALLER_RELEASE environment variable to its folder, or "
+            "run `python sequence_analyzer.py --check`.")
 
     order = "ACGT"
     kw = settings.to_track_kwargs()
     # mobility / spectral off if disabled
     if not settings.mobility_enable:
-        kw["mobility_shifts"] = (0, 0, 0, 0)
+        kw["mobility_shifts"] = [0, 0, 0, 0]
     if not settings.spectral_enable:
         kw["position_adaptive_spectral"] = False
-        # identity matrix if supported
-        try:
-            kw["spectral_separation_matrix"] = np.eye(4)
-        except Exception:
-            pass
+        kw["spectral_separation_matrix"] = np.eye(4)
 
     if settings.basecaller == "raw_peaks":
         # minimal: local maxima on envelope
@@ -609,7 +623,19 @@ def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocumen
         doc.settings_used = settings
         return doc
 
-    seq, quals, bands = track_bases(doc.acgt, base_order=order, **kw)
+    # Keep only keywords track_bases actually accepts, so a stale knob can
+    # never crash a whole run.
+    try:
+        accepted = set(inspect.signature(track_bases).parameters)
+        kw = {k: v for k, v in kw.items() if k in accepted}
+    except (TypeError, ValueError):                     # pragma: no cover
+        pass
+    try:
+        seq, quals, bands = track_bases(doc.acgt, base_order=order, **kw)
+    except TypeError as exc:                            # pragma: no cover
+        raise RuntimeError(
+            f"basecaller rejected the settings ({exc}); choose a preset under "
+            "Base calling -> Basecall settings.") from exc
     doc.sequence = seq
     doc.peak_positions = [int(b.position) for b in bands]
     doc.qualities = list(quals) if quals is not None else []
@@ -618,9 +644,77 @@ def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocumen
 
 
 def display_trace(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
-    """Return (n,4) array for plotting according to view_mode."""
+    """Return the (n, 4) array to plot for the selected view mode.
+
+    * ``raw``      -- the detector signal as loaded (instrument order mapped to
+      A,C,G,T, no correction).
+    * ``baseline`` -- raw after the caller's own smoothing + robust baseline
+      subtraction (the first real stage of the pipeline).
+    * ``processed``/``called`` -- the colour-separated A,C,G,T channels the
+      caller works on; base letters/peaks/quality are drawn on top by the
+      viewer.
+    """
     if settings.view_mode == "raw":
         return doc.raw
-    # For baseline/processed without full intermediate API, show acgt
-    # (full pipeline intermediates would need deeper hooks)
+    if settings.view_mode == "baseline":
+        try:
+            from cimarron_basecaller.spacing_caller import smooth_trace
+            from cimarron_basecaller.simple_caller import robust_baseline_subtract
+            return robust_baseline_subtract(
+                smooth_trace(doc.acgt, settings.smooth_window),
+                window=settings.baseline_window)
+        except Exception:                               # pragma: no cover
+            return doc.acgt
     return doc.acgt
+
+
+# ---------------------------------------------------------------------------
+# Environment self-test
+# ---------------------------------------------------------------------------
+def environment_report(verbose: bool = True) -> int:
+    """Print which pieces of the app are available; return 0 if it can call.
+
+    Shared by ``scorer.py check`` and ``sequence_analyzer.py --check`` so both
+    CLIs report the same thing.  Never requires tkinter/matplotlib, so it also
+    works on a headless build box.
+    """
+    def line(label: str, value: str) -> None:
+        if verbose:
+            print(f"  {label:<20}: {value}")
+
+    if verbose:
+        print("Limoncello environment check")
+    line("python", sys.version.split()[0])
+    try:
+        import numpy
+        import scipy
+        line("numpy/scipy", f"{numpy.__version__} / {scipy.__version__}")
+    except ImportError as exc:                           # pragma: no cover
+        line("numpy/scipy", f"MISSING ({exc})")
+    line("app folder", str(_ROOT))
+    line("basecaller", "OK" if BASECALLER_AVAILABLE else "MISSING")
+    if BB_CONFIGS:
+        line("presets", ", ".join(sorted(BB_CONFIGS)))
+    line("versions", ", ".join(BASECALLER_VERSIONS) if BASECALLER_VERSIONS else "(none)")
+
+    optional = {}
+    for mod, label in (("tkinter", "GUI (tkinter)"),
+                       ("matplotlib", "plots (matplotlib)"),
+                       ("openpyxl", "Excel .xlsx export"),
+                       ("PIL", "background pictures"),
+                       ("Bio", "SCF reading")):
+        try:
+            __import__(mod)
+            optional[label] = "yes"
+        except ImportError:
+            optional[label] = "no"
+    for label, state in optional.items():
+        line(label, state)
+
+    if not BASECALLER_AVAILABLE:
+        if verbose:
+            print("\nThe basecaller is required to call traces. It normally "
+                  "ships with this repo (cimarron_basecaller/); set "
+                  "BEST_BASECALLER_RELEASE if you keep it elsewhere.")
+        return 1
+    return 0
