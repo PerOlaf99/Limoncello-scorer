@@ -67,6 +67,7 @@ class GenotypingDialog(tk.Toplevel):
         self.records: list[_Record] = []
         self._gid = 0
         self.std = None
+        self.length_bp = None
         self.col_color = {}
         for ci, base in enumerate(self.base_order[:4]):
             if base in CHANNEL_ORDER:
@@ -123,50 +124,33 @@ class GenotypingDialog(tk.Toplevel):
                                    foreground="#0F3A6E", wraplength=320, justify=tk.LEFT)
         self.het_label.pack(anchor=tk.W, pady=(4, 0))
 
-        std = ttk.LabelFrame(right, text="Internal standard (size calibrant)", padding=6)
+        std = ttk.LabelFrame(right, text="Internal standard (CTC-CE duplex pattern)",
+                             padding=6)
         std.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Label(std, text="After picking the four standard main peaks, enter their\n"
-                            "sizes (bp) and press Mark. Rows then get a size (bp).",
-                  justify=tk.LEFT, foreground="#555", wraplength=330).pack(anchor=tk.W, pady=(0, 4))
+        fw = 330
+        ttk.Label(std, text="The four standard peaks are the SAME fragment (same bp),\n"
+                            "separated by cycling-temperature CE according to sequence:\n"
+                            "peaks 1-2 = the two homoduplexes (they differ by the single\n"
+                            "SNP base of the rs number); peaks 3-4 = the two heteroduplexes\n"
+                            "made in the PCR by Watson/Crick re-annealing (one mismatch base).",
+                  justify=tk.LEFT, foreground="#555", wraplength=fw).pack(anchor=tk.W, pady=(0, 4))
         sz = ttk.Frame(std)
         sz.pack(fill=tk.X)
-        self.std_sizes = []
-        for i in range(4):
-            ttk.Label(sz, text=f"S{i + 1}").grid(row=0, column=i * 2, sticky=tk.E, padx=(0, 1))
-            e = ttk.Entry(sz, width=6, justify=tk.RIGHT)
-            e.grid(row=1, column=i * 2, sticky=tk.EW, padx=(0, 2))
-            e.insert(0, ["50", "100", "150", "200"][i])
-            self.std_sizes.append(e)
-        sz.columnconfigure(1, weight=1)
-        sz.columnconfigure(3, weight=1)
-        sz.columnconfigure(5, weight=1)
-        sz.columnconfigure(7, weight=1)
+        ttk.Label(sz, text="Fragment length (bp)").pack(side=tk.LEFT)
+        self.len_entry = ttk.Entry(sz, width=8, justify=tk.RIGHT)
+        self.len_entry.pack(side=tk.LEFT, padx=4)
+        ttk.Label(sz, text="optional — same for all four",
+                  foreground="#888").pack(side=tk.LEFT)
         sbtn = ttk.Frame(std)
         sbtn.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(sbtn, text="Mark picked peaks as standard",
                    command=self._mark_std).pack(side=tk.LEFT)
         ttk.Button(sbtn, text="Clear", command=self._clear_std).pack(side=tk.LEFT, padx=4)
-        al = ttk.Frame(std)
-        al.pack(fill=tk.X, pady=(4, 0))
-        ttk.Label(al, text="Align") .grid(row=0, column=0, sticky=tk.W)
-        self.std_shift_entries = []
-        for i in range(4):
-            ttk.Label(al, text=f"Ch{i + 1}").grid(row=0, column=1 + i * 2,
-                                                  sticky=tk.E, padx=(3, 1))
-            e = ttk.Entry(al, width=4, justify=tk.RIGHT)
-            e.grid(row=0, column=2 + i * 2, sticky=tk.EW, padx=(0, 2))
-            e.insert(0, "0")
-            self.std_shift_entries.append(e)
-        al.columnconfigure(2, weight=1)
-        al.columnconfigure(4, weight=1)
-        al.columnconfigure(6, weight=1)
-        al.columnconfigure(8, weight=1)
-        ttk.Label(std, text="Δ scans per channel aligns the sample dye (FAM) to\n"
-                            "the standard (Atto532, injected first): same fragment,\n"
-                            "slightly different mobility.",
-                  foreground="#777", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W)
-        self.std_lbl = ttk.Label(std, text="No standard set (export rows without bp).",
-                                 foreground="#555", wraplength=330, justify=tk.LEFT)
+        ttk.Label(std, text="The four first main peaks (scan order) are tagged\n"
+                            "HOM1, HOM2 (homoduplexes) then HET1, HET2 (heteroduplexes).",
+                  foreground="#777", wraplength=fw, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
+        self.std_lbl = ttk.Label(std, text="No standard set.",
+                                 foreground="#555", wraplength=fw, justify=tk.LEFT)
         self.std_lbl.pack(anchor=tk.W, pady=(4, 0))
 
         bars = ttk.Frame(right)
@@ -179,9 +163,9 @@ class GenotypingDialog(tk.Toplevel):
         tblf = ttk.LabelFrame(right, text="Picked peaks",
                               padding=4)
         tblf.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        cols = ("#", "scan", "bp", "ch", "kind", "height V", "area V·sc", "frac")
+        cols = ("#", "scan", "duplex", "ch", "kind", "height V", "area V·sc", "frac")
         self.tree = ttk.Treeview(tblf, columns=cols, show="headings", height=12)
-        widths = {"#": 34, "scan": 54, "bp": 52, "ch": 40, "kind": 66,
+        widths = {"#": 34, "scan": 54, "duplex": 58, "ch": 40, "kind": 66,
                   "height V": 70, "area V·sc": 78, "frac": 50}
         for c in cols:
             self.tree.heading(c, text=c)
@@ -411,69 +395,53 @@ class GenotypingDialog(tk.Toplevel):
     def _status(self, msg):
         self.het_label.config(text=msg)
 
-    # ----------------------------------------------- internal-standard size
+    # ------------------------------------- internal-standard CTC-CE duplexes
     def _mark_std(self):
-        """Turn the four main peaks (in scan order) into bp calibrants."""
-        mains = sorted((r for r in self.records if r["kind"] == "main"),
-                       key=lambda r: r["scan"])
-        if len(mains) < 2:
-            self.std_lbl.config(text="Pick the standard main peaks first (need ≥ 2).",
+        """Tag the standard mains (scan order) as the four CTC-CE duplexes:
+        HOM1, HOM2 (homoduplexes, one rs SNP base apart), HET1, HET2
+        (heteroduplexes, one mismatch base from Watson/Crick re-annealing).
+        All four are the same fragment, so a shared length (bp) is optional.
+        The standard channel is the one of the last main you picked."""
+        mains = [r for r in self.records if r["kind"] == "main"]
+        if not mains:
+            self.std_lbl.config(text="Pick the standard main peaks first.",
                                 foreground="#A33")
             return
-        sizes = []
-        for e in self.std_sizes:
-            try:
-                sizes.append(float(e.get()))
-            except ValueError:
-                sizes.append(float("nan"))
-        if not all(np.isfinite(sizes)):
-            self.std_lbl.config(text="Enter 4 valid sizes (bp).", foreground="#A33")
-            return
-        pairs = sorted(zip([m["scan"] for m in mains], sizes))
-        if len(pairs) > 4:
-            pairs = pairs[:4]
-        if len(set(s for _, s in pairs)) < 2 or len(set(x for x, _ in pairs)) < 2:
-            self.std_lbl.config(text="Need ≥ 2 distinct standard scans/sizes.",
+        last_col = mains[-1]["col"]
+        col_mains = sorted((m for m in mains if m["col"] == last_col),
+                           key=lambda m: m["scan"])
+        if len(col_mains) < 2:
+            self.std_lbl.config(text="Need ≥ 2 standard main peaks on the same channel.",
                                 foreground="#A33")
             return
+        names = ["HOM1", "HOM2", "HET1", "HET2"][:min(len(col_mains), 4)]
+        pairs = [(m["scan"], n) for m, n in zip(col_mains[:4], names)]
         self.std = pairs
-        self.std_lbl.config(
-            text="Standard set: " + ", ".join(f"{x}→{s:g}" for x, s in pairs)
-                 + "  (per-channel Δ applies to sizing)",
-            foreground="#0A5"
-        )
+        try:
+            self.length_bp = float(self.len_entry.get())
+        except ValueError:
+            self.length_bp = None
+        msg = "Standard set: " + ", ".join(f"{n}@{x}" for x, n in pairs)
+        if self.length_bp is not None:
+            msg += f"  (len {self.length_bp:g} bp)"
+        self.std_lbl.config(text=msg, foreground="#0A5")
         self._sync_table()
 
     def _clear_std(self):
         self.std = None
-        self.std_lbl.config(text="No standard set (export rows without bp).",
-                            foreground="#555")
+        self.length_bp = None
+        self.std_lbl.config(text="No standard set.", foreground="#555")
         self._sync_table()
 
-    def _channel_shift(self, col):
-        """Per-channel scan offset that aligns a sample dye (e.g. FAM) to the
-        standard ladder (Atto532, injected first) before size mapping."""
-        try:
-            return float(self.std_shift_entries[col].get())
-        except (ValueError, IndexError):
-            return 0.0
-
-    def _bp_of(self, rec):
-        """Piecewise-linear bp from the standard calibrants; '' if none."""
+    def _duplex_of(self, rec):
+        """Duplex label (HOM1/HOM2/HET1/HET2) for a main peak that is one of
+        the marked standard peaks; '' otherwise."""
         if not self.std or rec["kind"] != "main":
             return ""
-        xs = np.array([x for x, _ in self.std])
-        ys = np.array([s for _, s in self.std])
-        if xs.size < 2:
-            return ""
-        scan = float(rec["scan"]) + self._channel_shift(rec["col"])
-        if scan <= xs[0]:
-            bp = ys[0]
-        elif scan >= xs[-1]:
-            bp = ys[-1]
-        else:
-            bp = float(np.interp(scan, xs, ys))
-        return f"{bp:.1f}"
+        for x, n in self.std:
+            if abs(rec["scan"] - x) <= 2:
+                return n
+        return ""
 
     # ---------------------------------------------------------------- view
     def redraw(self):
@@ -553,7 +521,7 @@ class GenotypingDialog(tk.Toplevel):
         for i, r in enumerate(self.records, 1):
             fr = self._clust_frac(r) if r["kind"] == "main" else ""
             self.tree.insert("", tk.END, values=(
-                i, r["scan"], self._bp_of(r), r["base"], r["kind"],
+                i, r["scan"], self._duplex_of(r), r["base"], r["kind"],
                 f"{r['height']:.3f}", f"{r['area']:.1f}",
                 f"{fr:.3f}" if fr else ""))
 
@@ -617,7 +585,8 @@ class GenotypingDialog(tk.Toplevel):
                 "channel": r["channel"], "base": r["base"], "kind": r["kind"],
                 "height_V": round(r["height"], 4),
                 "area_Vscan": round(r["area"], 3),
-                "size_bp": self._bp_of(r),
+                "duplex": self._duplex_of(r),
+                "length_bp": self.length_bp,
                 "fraction": round(self._clust_frac(r), 4)
                 if r["kind"] == "main" else "",
             })

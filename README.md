@@ -26,7 +26,7 @@ wired to the plate-validated **best basecaller** configs.
 | Run info panel | Yes — Comments menu |
 | Undo a mistaken base call (clear overlay) | Yes — Base calling → Clear base calls (undo) |
 | Sequencing trace (ESD peaks) view | Yes — Base calling menu + View menu |
-| Genotyping — manual peak picking (click/area, stutter & +A, sizes via internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
+| Genotyping — manual peak picking (click/area, stutter & +A, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 
 ## Requirements
@@ -203,18 +203,22 @@ window for fragment genotyping, built from scratch:
   each side of the main peak — the stutter peak (~1 repeat shorter) and the
   Taq A-addition (+A shoulder a few scans later). Turn it off when clicking
   allele peaks so a second allele is not swallowed by the +A tag.
-- **Internal standard**: pick the four known-size standard peaks, enter their
-  sizes (bp), press *Mark picked peaks as standard*, and every row gains a
-  size (bp). In cycling-temperature capillary electrophoresis every capillary
-  sees its own temperature, so peak positions shift with scan number between
-  runs — the per-run standard ladder absorbs that. The **Align Δ scans per
-  channel** entries correct the small dye/injection offset between the sample
-  (e.g. FAM) and the standard (Atto532, injected first).
-- **Mutant/variant fraction** for heterozygous positions (two main peaks
-  within 8 scans) is shown under the table.
+- **Internal standard** (CTC-CE duplex pattern): the four standard peaks are
+  all **one** fragment (the same number of base pairs) — cycling-temperature
+  capillary electrophoresis separates them by *sequence*: peaks 1–2 are the two
+  **homoduplexes** (they differ by the single SNP base of the rs number), peaks
+  3–4 the two **heteroduplexes** made in the PCR when Watson and Crick strands
+  pair wrongly, leaving one mismatch base pair. Pick the four standard main
+  peaks and press *Mark picked peaks as standard*: earlier ones become
+  `HOM1`/`HOM2`, later ones `HET1`/`HET2`. A single fragment length (bp) is
+  optional and shared by all four. Variant ratios come from the **relative
+  areas** of these duplex peaks, so no bp ladder is involved.
+- **Mutant/variant fraction** for classic heterozygous positions (two main
+  peaks within 8 scans) is shown under the table.
 - **Undo last / Clear all** manage the picks; **Save table…** writes CSV
   (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan, channel,
-  base, kind (`main`/`stutter`/`+A`), height, area, size (bp) and fraction.
+  base, kind (`main`/`stutter`/`+A`), height, area, duplex label
+  (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and fraction.
   That table is a labelled **training library for ML** — picking works with
   or without an internal standard.
 
