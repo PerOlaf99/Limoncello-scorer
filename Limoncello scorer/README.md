@@ -210,14 +210,28 @@ scratch:**
   (V·scan). Clicking nearer the peak's actual height separates two channels
   that share a scan. The recognition method is selectable: Best prominence,
   Simple local maxima, or Gaussian fit.
-- **A peak's area is measured between its own two valleys.** The click radius
-  stays generous so the peak is found reliably, but the baseline for height,
-  area, onset/end and the variant fraction is only ever drawn between the
-  nearest valley *on each side of that peak* (capped at 0.95 × the run's own
-  peak spacing). A tight pair of alleles therefore no longer borrows each
-  other's area — the small allele of a het pair used to report a nearly equal
-  area, and a fake ~50/50 fraction with it. The fractions in the table are
-  always `small/(small+large)` of the picked areas, never of the raw window.
+- **A peak's area is measured between its own two valleys**, and the area is
+  integrated out to those valleys — a variant fraction is only as good as the
+  two areas it is built from, so the peak keeps every tail scan that is really
+  its own. The click radius stays generous so the peak is found reliably, but
+  the baseline for height, area, onset/end and the variant fraction is only ever
+  drawn between the nearest valley *on each side of that peak*. A tight pair of
+  alleles therefore no longer borrows each other's area — the small allele of a
+  het pair used to report a nearly equal area, and a fake ~50/50 fraction with
+  it. The fractions in the table are always `small/(small+large)` of the picked
+  areas, never of the raw window.
+  - The valley search walks a slightly smoothed copy of the trace (the area
+    itself is always integrated from the raw samples), so the broad dip that
+    closes a peak is found while the one- or two-scan ripples on its shoulder
+    are not mistaken for it, and a peak whose own valley lies far out keeps its
+    full width instead of being cut at a fixed distance.
+  - The one case the peak's own valley cannot settle is a **low minor allele
+    sitting on a main peak's tail**, which has no dip of its own. There the
+    area is still bounded at 1.5 × the run's peak spacing — the same reach as
+    the heterozygote window — so it can never measure into where a neighbour
+    could start, at the cost of reading that minor allele's fraction slightly
+    low. The fractions in the table are always `small/(small+large)` of the
+    picked areas, never of the raw window.
 - **Hovering a subplot shows a crosshair and a live readout** in that
   subplot's corner: the scan under the pointer, its voltage, and the dominant
   peak within one base on any visible channel, marked `[picked]` once you have
