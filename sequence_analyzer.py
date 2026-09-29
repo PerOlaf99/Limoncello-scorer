@@ -1363,8 +1363,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         rec = pk.pick(event.xdata, vol=event.ydata)
         if rec is None:
-            self.status_var.set(f"No peak found near that scan on {path.name} — "
-                                "try again closer to a hump.")
+            if getattr(pk, "_reject", None) == "area":
+                self.status_var.set(f"That area is already picked on {path.name} "
+                                    "— undo it first to pick it again.")
+            else:
+                self.status_var.set(f"No peak found near that scan on {path.name} — "
+                                    "try again closer to a hump.")
             return
         self._gen_active_path = path
         self.status_var.set(f"{path.parent.name}/{path.name} · well {pk.doc.well}: "
@@ -2479,8 +2483,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    so no bp ladder is involved.\n"
                 "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
                 "    8 scans (classic heterozygote): small/(small+large).\n"
-                "  • Undo last pick removes the most recent pick (with its stutter/+A\n"
-                "    tags); Clear picks empties the whole table.\n"
+"  • Undo last pick removes the most recent pick (with its stutter/+A\n"
+                 "    tags); Clear picks empties the whole table.  An area that is\n"
+                 "    already picked cannot be picked again: the click is refused and\n"
+                 "    the status bar says so — undo it first if you meant a re-pick\n"
+                 "    (neighbouring peaks, e.g. the two alleles of a heterozygote,\n"
+                 "    stay pickable).\n"
                 "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
                 "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
                 "    (main/stutter/+A), height (V), area (V·scan), duplex label\n"

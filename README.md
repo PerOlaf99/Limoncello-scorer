@@ -232,7 +232,10 @@ scratch:**
 - **Mutant/variant fraction** is computed for two main peaks of the *same
   channel* within one repeat (~one base): small/(small+large), shown in the
   table. The grouping window scales with the run's own peak spacing.
-- **Undo last pick / Clear picks** manage the picks; **Save peaks table…**
+- **Undo last pick / Clear picks** manage the picks; an already-picked **area
+  cannot be picked again** (the click is refused with a status-bar message —
+  undo it first to re-pick). Neighbouring peaks such as the two alleles of a
+  heterozygote remain pickable; **Save peaks table…**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
   channel, base, kind (`main`/`stutter`/`+A`), start/end scan (2nd derivative),
   height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and

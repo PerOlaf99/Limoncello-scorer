@@ -80,6 +80,7 @@ class PeakPicker:
 
         self.records: list[_Record] = []
         self._gid = 0
+        self._reject = None
         self.std = None
         self.length_bp = None
         self.col_color = {}
@@ -97,7 +98,12 @@ class PeakPicker:
     def pick(self, scan, vol=None):
         """Pick the peak you clicked on: nearest scan wins, then nearest
         voltage (tells channels apart when two share a scan), then tallest.
-        Returns the new record (plus any stutter/+A records appended) or None."""
+        A peak whose area is already picked on the same channel is never
+        picked again — undo it first if you need to (neighbouring peaks, e.g.
+        the two alleles of a heterozygote, stay pickable).  Returns the new
+        record (plus any stutter/+A records appended) or None; on a refused
+        re-pick, ``_reject`` is set to ``"area"`` for the UI message."""
+        self._reject = None
         radius = max(CLICK_RADIUS, int(self._spacing() * 2.0))
         cands = []
         for col, color in self.col_color.items():
@@ -110,6 +116,7 @@ class PeakPicker:
             pk["color"] = color
             cands.append(pk)
         if not cands:
+            self._reject = "none"
             return None
         if vol is None:
             cands.sort(key=lambda p: (abs(p["apex"] - scan), -p["height"]))
@@ -118,6 +125,11 @@ class PeakPicker:
                                       abs(p["height"] - float(vol)),
                                       -p["height"]))
         best = cands[0]
+        tol = max(1, int(round(self._spacing() * 0.25)))
+        for rec in self.records:
+            if rec["col"] == best["col"] and abs(rec["scan"] - best["apex"]) <= tol:
+                self._reject = "area"
+                return None
         self._gid += 1
         rec = _Record(
             file=str(self.path),
@@ -683,7 +695,12 @@ class GenotypingEditor(ttk.Frame):
     def _pick_peak(self, scan, vol=None):
         rec = self.pk.pick(scan, vol=vol)
         if rec is None:
-            self._status("No peak found near that scan — try again closer to a hump.")
+            if self.pk._reject == "area":
+                self._status("That area is already picked — undo it first to "
+                             "pick it again.")
+            else:
+                self._status("No peak found near that scan — try again closer "
+                             "to a hump.")
             return
         self._status(f"Peak at scan {rec['scan']} · {rec['base']}"
                      f" height {rec['height']:.3f} V, area {rec['area']:.2f} V·scan")
