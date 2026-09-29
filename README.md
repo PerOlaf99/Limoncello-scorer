@@ -26,12 +26,14 @@ wired to the plate-validated **best basecaller** configs.
 | Run info panel | Yes — Comments menu |
 | Undo a mistaken base call (clear overlay) | Yes — Base calling → Clear base calls (undo) |
 | Sequencing trace (ESD peaks) view | Yes — Base calling menu + View menu |
-| Genotyping (heading only) | Planned — to be built from scratch |
+| Genotyping — manual peak picking (click/area, stutter & +A, sizes via internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
+| Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 
 ## Requirements
 
 ```bash
 pip install numpy scipy matplotlib pillow   # pillow only for backgrounds
+pip install openpyxl                        # optional: Excel .xlsx peak export
 # tkinter: included on Windows/macOS Python installers
 # Ubuntu/Debian: sudo apt install python3-tk
 ```
@@ -189,9 +191,32 @@ letters, peak marks and quality curve look confusing), undo it with
 **Base calling → Clear base calls (undo)**. Only the in-memory view is reset;
 the `.rsd`/`.scf` data files are never modified.
 
-The **Genotyping** menu is kept as an independent top-level heading (between
-*Base calling* and *Comments*) and will be filled in from scratch when allele
-/fragment calling is built.
+The **Genotyping** menu is an independent top-level heading (between *Base
+calling* and *Comments*). It now holds **Manual peak picking…**, a separate
+window for fragment genotyping, built from scratch:
+
+- Click a peak (or just beside it) — the best available algorithm locates it,
+  shades the peak area and logs scan, channel/base, height (V) and area
+  (V·scan). The recognition method is selectable: Best prominence, Simple
+  local maxima, or Gaussian fit.
+- **Add stutter & +A** (on by default) also tags the strongest satellite on
+  each side of the main peak — the stutter peak (~1 repeat shorter) and the
+  Taq A-addition (+A shoulder a few scans later). Turn it off when clicking
+  allele peaks so a second allele is not swallowed by the +A tag.
+- **Internal standard**: pick the four known-size standard peaks, enter their
+  sizes (bp), press *Mark picked peaks as standard*, and every row gains a
+  size (bp). In cycling-temperature capillary electrophoresis every capillary
+  sees its own temperature, so peak positions shift with scan number between
+  runs — the per-run standard ladder absorbs that. The **Align Δ scans per
+  channel** entries correct the small dye/injection offset between the sample
+  (e.g. FAM) and the standard (Atto532, injected first).
+- **Mutant/variant fraction** for heterozygous positions (two main peaks
+  within 8 scans) is shown under the table.
+- **Undo last / Clear all** manage the picks; **Save table…** writes CSV
+  (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan, channel,
+  base, kind (`main`/`stutter`/`+A`), height, area, size (bp) and fraction.
+  That table is a labelled **training library for ML** — picking works with
+  or without an internal standard.
 
 ## Comments & run info
 

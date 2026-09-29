@@ -401,7 +401,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         basecall_m.add_command(label="Clear base calls (undo)", command=self.clear_basecalls)
 
         genotyping_m = tk.Menu(self, tearoff=0)
-        genotyping_m.add_command(label="Genotyping (planned — built here later)",
+        genotyping_m.add_command(label="Manual peak picking…",
+                                 command=self.open_genotyping)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Fragment genotyping (planned)",
                                  state=tk.DISABLED)
 
         help_m = tk.Menu(self, tearoff=0)
@@ -1215,6 +1218,28 @@ class LimoncelloAnalyzerApp(tk.Tk):
             else "No base calls to clear on the selected wells")
         self.redraw()
         self._show_sequence()
+
+    def open_genotyping(self):
+        """Open the manual genotyping window for the current selection."""
+        if not self.selected:
+            messagebox.showinfo("Genotyping",
+                                "Select a file/well in the list first.")
+            return
+        try:
+            from genotyping import GenotypingDialog
+        except Exception as e:
+            messagebox.showerror("Genotyping",
+                                 f"Could not load the genotyping module:\n{e}")
+            return
+        path = self.selected[0]
+        colors = self._theme_colors()
+        base_order = self.base_order_var.get()
+        mode = self._theme_mode()
+        try:
+            GenotypingDialog(self, path, colors=colors, base_order=base_order,
+                             theme_mode=mode)
+        except Exception as e:
+            messagebox.showerror("Genotyping", f"Could not open the window:\n{e}")
 
     def _show_sequence(self):
         self.seq_text.delete("1.0", tk.END)
@@ -2085,10 +2110,37 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "  • After a call the plot itself stays clean — the extra green\n"
              "    'quality' line is OFF by default.  Turn it on only if you want\n"
              "    it:  View ▸ Show quality profile (0-100).\n\n"
-             "6b. GENOTYPING (independent heading, between Base calling and Comments)\n"
-             "  Planned — this menu will hold allele / fragment calling when it is\n"
-             "  built.  It is intentionally empty for now.\n"
-            "7. EXPORT  (File menu)\n"
+"6b. GENOTYPING  (Genotyping menu, between Base calling and Comments)\n"
+              "  Manual peak picking…  opens a second window for the selected well.\n"
+              "  It is built from scratch for fragment genotyping (CTC-CE runs, e.g.\n"
+              "  a FAM sample with an Atto532 internal standard in another channel).\n"
+              "  • Click a peak (or just beside it) — the best available algorithm\n"
+              "    locates it, shades the peak area and logs scan, channel/base,\n"
+              "    height and area.  The recognition method is selectable\n"
+              "    (Best prominence, Simple maxima, Gaussian fit).\n"
+              "  •  Add stutter & +A  (on by default) also tags the strongest\n"
+              "    satellite either side of the main peak: the stutter peak\n"
+              "    (~1 repeat shorter) and the Taq A-addition (the +A shoulder a\n"
+              "    few scans later).  Turn it off when clicking allele peaks so\n"
+              "    the second allele is not swallowed by the +A tag.\n"
+              "  • Internal standard — pick the four known-size standard peaks,\n"
+              "    enter their sizes (bp) and press  Mark picked peaks as standard.\n"
+              "    Each table row then also gets a size (bp).  Because every\n"
+              "    capillary sits at its own temperature (cycling-temperature CE),\n"
+              "    peak positions shift with scan number between runs — the\n"
+              "    per-run standard ladder absorbs that.  The  Align  Δ scans per\n"
+              "    channel corrects the small dye injection offset between the\n"
+              "    sample (e.g. FAM) and the standard (Atto532, injected first).\n"
+              "  • Mutant/variant fraction appears under the table for any pair of\n"
+              "    main peaks within 8 scans (heterozygote): small / (small+large).\n"
+              "  • Undo last removes the most recent pick (with its stutter/+A\n"
+              "    tags); Clear all empties the table.\n"
+              "  • Save table…  writes the picked peaks as CSV (Excel-ready),\n"
+              "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
+              "    (main/stutter/+A), height (V), area (V·scan), size (bp) and\n"
+              "    fraction.  That table is your labelled training library for ML\n"
+              "    — peak picking works with or without an internal standard.\n"
+              "7. EXPORT  (File menu)\n"
             "  • Export sequence (FASTA)…   called bases per well.\n"
             "  • Export peak table (CSV)…   well, base, scan position, quality.\n"
             "  • Export trace text (V + µA)… raw values.\n"
@@ -2140,7 +2192,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "            pos_profile are legacy aliases of those; hz_soften,\n"
              "            raw_peaks remain), see the Basecall settings dialog.\n"
             "Multi-folder load, multi-graph, auto-tour, well sort/filter.\n"
-            "ESD-style processed view under Base calling; genotyping planned.\n\n"
+            "ESD-style processed view under Base calling; manual peak picking\n"
+            "genotyping (click peaks, stutter/+A, sizes via internal standard,\n"
+            "Excel/CSV/JSON export) under Genotyping.\n"
             "Uses our own tuned spacing tracker.",
         )
 
