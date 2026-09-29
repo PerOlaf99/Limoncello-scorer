@@ -460,9 +460,14 @@ class PeakPicker:
 
     # ---------------------------------------------------------------- export
     def export_rows(self):
-        """One writable dict per picked peak, ready for CSV/JSON/XLSX."""
+        """One writable dict per picked peak, ready for CSV/JSON/XLSX.
+
+        Rows come out in scan order, not the order they were clicked, so one
+        sample's peaks read left to right down the migration axis."""
         rows = []
-        for r in self.records:
+        for r in sorted(self.records,
+                        key=lambda r: (int(r["scan"]), int(r["col"]),
+                                       int(r.get("gid", 0)))):
             rows.append({
                 "file": r["file"], "well": r["well"], "scan": r["scan"],
                 "channel": r["channel"], "base": r["base"], "kind": r["kind"],
