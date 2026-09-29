@@ -10,7 +10,7 @@ wired to the plate-validated **best basecaller** configs.
 | Multiple data folders | Yes — File → Add data folder |
 | Wells list (.rsd / .scf / .ab1 / text) | Yes — multi-select |
 | Number of graphs (1–8) | Yes — spinbox |
-| Views: raw / processed / base-called / genotyping (ESD peaks) / wrap | Yes — View menu |
+| Views: raw / processed / base-called / sequencing trace (ESD peaks) / wrap | Yes — View menu |
 | Basecaller versions | `mb1000_accuracy`, `mb1000_length`, `mb4000_accuracy`, `mb4000_length`, `pos_bonus07`, `pos_profile`, `hz_soften`, `raw_peaks` |
 | Advanced params (knobs) | Base calling → ⚙ Basecall settings… (dialog) |
 | Wrap rows, tour interval | View menu |
@@ -25,8 +25,8 @@ wired to the plate-validated **best basecaller** configs.
 | Run comments (per-file, Stored beside the data) | Yes — Comments menu |
 | Run info panel | Yes — Comments menu |
 | Undo a mistaken base call (clear overlay) | Yes — Base calling → Clear base calls (undo) |
-| Genotyping peaks (ESD-style fragment view) | Yes — Genotyping menu |
-| Allele calling | Planned — later release |
+| Sequencing trace (ESD peaks) view | Yes — Base calling menu + View menu |
+| Genotyping (heading only) | Planned — to be built from scratch |
 
 ## Requirements
 
@@ -72,7 +72,7 @@ required to view them (place `BEST_BASECALLER_RELEASE` beside this folder).
 
 1. **File → Add data folder** → select a directory of `.rsd` files (add more folders if needed).
 2. Select one or more wells in the list; set **Graphs to show**.
-3. Choose **View** (raw / processed / called / wrap).
+3. Choose **View** (raw / processed / called / ESD peaks / wrap).
 4. Pick a **basecaller version**; rarely-needed tuning lives in **Base calling → ⚙ Basecall settings…** → *Apply + redraw* or *Basecall selected*. Ran the call on fragment/genotyping data by mistake? **Base calling → Clear base calls (undo)**.
 5. Inspect sequence pane; **File → Export sequence (FASTA)** for BLAST.
 
@@ -165,22 +165,33 @@ Genotyping dye sets are fixed **per channel** (no base colors):
 Changing the scheme recolors the traces only; it does not change the base
 labels or the basecalling dye order.
 
-## Genotyping view & undoing a call
+## ESD-style sequencing view & undoing a call
 
-The **Genotyping** menu is a top-level heading (between *Base calling* and
-*Comments*):
+**Base calling** is the sequencing menu (once *Analysis*). Besides the call
+actions it offers the two plot styles so a base call and its result live
+together:
 
-- **Peaks (ESD-style)** — fragment view without base letters: each channel's
-  detected peaks are ringed, like a MegaBACE `.esd` electropherogram. These
-  rings are a visual aid only; real allele calling is planned for a later
-  release.
-- **Sequencing traces (processed)** — back to the standard channel view.
+- **Sequencing trace (ESD peaks)** — the MegaBACE basecaller's processed
+  picture: the four dye traces with one ring per peak, coloured like the
+  trace that carries it. When the run is base-called the rings sit at the
+  caller's peaks, so a heterozygous position shows as two rings at one scan
+  and a mutation as a ring in an unexpected channel. No letters and no
+  quality line clutter this view (rings fall back to simple per-channel peak
+  detection until the run is called).
+- **Plain channels (processed)** — the standard channel view.
+
+By default the app no longer overlays the Q (0–100) quality line after a
+call, so the electropherogram stays clean; re-enable it under
+**View → Show quality profile (0-100)** if wanted.
 
 If a sequence base call was run on genotyping/fragment data by mistake (the
 letters, peak marks and quality curve look confusing), undo it with
-**Base calling → Clear base calls (undo)** (also available on the Genotyping
-menu as *Remove base-call overlay*). Only the in-memory view is reset; the
-`.rsd`/`.scf` data files are never modified.
+**Base calling → Clear base calls (undo)**. Only the in-memory view is reset;
+the `.rsd`/`.scf` data files are never modified.
+
+The **Genotyping** menu is kept as an independent top-level heading (between
+*Base calling* and *Comments*) and will be filled in from scratch when allele
+/fragment calling is built.
 
 ## Comments & run info
 
