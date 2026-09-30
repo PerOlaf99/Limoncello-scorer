@@ -186,6 +186,180 @@ def find_is_quartet(trace, cut=1900):
     return best[1], best[2]
 
 
+# --------------------------------------------------------------------------- #
+# batch auto-genotyping: one well -> one call, plus the reason when it cannot
+# --------------------------------------------------------------------------- #
+# The manual path is ``auto_mark_std`` for the standard and four hand-measured
+# duplexes for the sample.  That is fine for one well and unusable for a plate,
+# so this measures the same thing with no clicks: find the standard quartet,
+# read the sample channel in the four windows it defines, and call the well.
+#
+# Which channel is which is a property of the KIT, not something a trace can be
+# asked to work out.  Measured over the 96 rs1695 T9 wells with this module's
+# own ``find_is_quartet``, per ``doc.acgt`` column (which is always A,C,G,T):
+#
+#     column 0 (A)  quartet in 62/96 wells, position spread 191 scans
+#     column 1 (C)  quartet in 59/96 wells, position spread 190 scans
+#     column 2 (G)  quartet in 96/96 wells, position spread 125 scans
+#     column 3 (T)  quartet in 96/96 wells, position spread 125 scans
+#
+# Columns 2 and 3 carry the same standard -- a clean equimolar quartet present
+# in every well at a consistent position is the signature, and it bleeds a
+# little into G.  Column 3 is the dye itself, so that is the one to read.  The
+# sample is column 1: reading it reproduces ``rs1695_measured.csv`` to within a
+# few percent and its sample-to-standard area ratio is constant across the
+# plate, which is what a real amplicon looks like and the standard never does.
+#
+# On this plate's "ACTG" dye order (Ch1=A, Ch2=C, Ch3=T, Ch4=G) that makes the
+# standard Ch3 and the sample Ch2, i.e. ``auto_mark_std``'s ``channel=3``
+# default.  Both constants stay explicit because getting this pair wrong does
+# not fail loudly -- it scores the standard's own peaks as the sample and
+# returns confident nonsense -- and every result row records the channels it
+# was measured on.
+#
+# Beware when comparing against the analysis cache: ``t9raw.npz`` stores wells
+# in the plate's physical channel order, not A,C,G,T, so a column index means
+# something different there.  On this plate npz->acgt is [2, 3, 1, 0].
+DEFAULT_IS_CHANNEL = 3
+DEFAULT_SAMPLE_CHANNEL = 2
+DEFAULT_IS_CUT = 1900        # scans; skip the injection front before looking
+
+# A duplex is measured between the midpoints to its neighbours -- the standard's
+# own spacing already says where one fragment stops and the next begins, which
+# is tighter than any per-peak valley search and cannot wander into a
+# neighbour's area.
+NOISE_SGOLAY_WINDOW = 9      # noise = scatter left over by a 9-scan SG fit
+SEGMENT_BASELINE_PAD = 80    # scans either side of a duplex to set its baseline
+SEGMENT_APEX_RADIUS = 13     # scans either side of the standard peak to look for
+                            # the sample apex: the two migrate close but not
+                            # identically, and the residual shift is what the
+                            # sample's own height must be read at
+MIN_SEGMENT_SPAN = 3         # narrower than this and it is not a peak at all
+
+
+def _noise_sigma(y):
+    """Robust per-scan noise as 1.4826 x the MAD of a Savitzky-Golay residual.
+
+    A plain standard deviation is wrong here: the four duplexes are large
+    enough to dominate it, which would make the noise read far too high and
+    every peak look insignificant.  The median absolute deviation of what the
+    smooth fit fails to explain is not.
+    """
+    from scipy.signal import savgol_filter
+    fit = savgol_filter(y, NOISE_SGOLAY_WINDOW, 2, mode="interp")
+    d = y - fit
+    return 1.4826 * float(np.median(np.abs(d - np.median(d))))
+
+
+def _quartet_segments(scans):
+    """Integration window per duplex, from the midpoints to its neighbours.
+
+    Extrapolated half a spacing beyond the outer peaks so the first and last
+    duplexes are measured over the same width as the inner two.
+    """
+    n = len(scans)
+    if n < 2:
+        return [(max(0, scans[0] - 1), min(len(scans), scans[0] + 1))] if n else []
+    edge = (scans[1] - scans[0]) / 2.0
+    bounds = [scans[0] - edge]
+    bounds += [(scans[i] + scans[i + 1]) / 2.0 for i in range(n - 1)]
+    bounds += [scans[-1] + edge]
+    return [(int(round(bounds[i])), int(round(bounds[i + 1])))
+            for i in range(n)]
+
+
+def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
+                  sample_channel=DEFAULT_SAMPLE_CHANNEL,
+                  base_order="ACTG", cut=DEFAULT_IS_CUT, run_name=""):
+    """Genotype one well without any clicking -> a result row.
+
+    Returns a plain dict (so it feeds straight into ``save_table``) with the
+    call, the four duplex areas, their significances, and -- when there is no
+    call -- a *reason* naming what was missing.  Never raises for a bad well:
+    a plate is 96 chances to hit a bad well and one of them must not take the
+    other 95 down with it.
+    """
+    import scorer
+
+    row = {
+        "run": run_name, "well": getattr(doc, "well", "") or "",
+        "call": "no-call", "frac": 0.0, "flags": "",
+        "hom1": 0.0, "hom2": 0.0, "het1": 0.0, "het2": 0.0,
+        "snr1": 0.0, "snr2": 0.0, "snr3": 0.0, "snr4": 0.0,
+        "is_channel": is_channel, "sample_channel": sample_channel,
+        "std_scans": "", "reason": "",
+    }
+
+    try:
+        is_col = acgt_index_for_channel(base_order, is_channel)
+        samp_col = acgt_index_for_channel(base_order, sample_channel)
+    except ValueError as e:
+        row["reason"] = str(e)
+        return row
+    if is_col == samp_col:
+        row["reason"] = (f"standard and sample are both on Ch{is_channel} "
+                         "(same acgt column)")
+        return row
+
+    acgt = np.asarray(getattr(doc, "acgt", None), dtype=float)
+    if acgt.ndim != 2 or acgt.shape[0] == 0 or acgt.shape[1] <= max(is_col, samp_col):
+        row["reason"] = "trace has no usable channels"
+        return row
+
+    found = find_is_quartet(acgt[:, is_col], cut=cut)
+    if found is None:
+        row["reason"] = f"no standard quartet on Ch{is_channel}"
+        return row
+
+    scans, _heights = found
+    row["std_scans"] = "/".join(str(x) for x in scans)
+    segs = _quartet_segments(scans)
+    if len(segs) != 4:
+        row["reason"] = "standard quartet too short to measure"
+        return row
+
+    y = np.asarray(acgt[:, samp_col], dtype=float)
+    n = y.size
+    sigma = _noise_sigma(y)
+    idx = np.arange(n)
+    areas, snrs = [], []
+    for k, (lo, hi) in enumerate(segs):
+        lo, hi = max(0, lo), min(n, hi)
+        if hi - lo < MIN_SEGMENT_SPAN:
+            areas.append(0.0)
+            snrs.append(0.0)
+            continue
+        # Baseline from the quiet trace either side of this duplex, not from its
+        # own peak: a peak sitting on a raised baseline would otherwise measure
+        # the step under it as signal.
+        m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
+            (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
+        base = float(np.median(y[m]))
+        a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
+        b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
+        apex = float(y[a:b].max()) if b > a else 0.0
+        areas.append(max(0.0, float(np.trapz(y[lo:hi] - base, dx=1.0))))
+        snrs.append((apex - base) / sigma if sigma > 0 else 0.0)
+
+    for i, name in enumerate(("hom1", "hom2", "het1", "het2")):
+        row[name] = round(areas[i], 1)
+        row["snr%d" % (i + 1)] = round(snrs[i], 1)
+
+    call, frac, flags = scorer.t9_call(areas[0], areas[1], areas[2], areas[3], snrs)
+    row["call"] = call
+    row["frac"] = round(frac, 4)
+    row["flags"] = ",".join(sorted(flags))
+    if call == "no-call":
+        if sigma <= 0:
+            row["reason"] = f"no signal on Ch{sample_channel}"
+        elif max(snrs) < scorer.T9_MIN_DOMINANT_SIGMA:
+            row["reason"] = (f"weakest sample duplex is only "
+                             f"{max(snrs):.0f}x the noise on Ch{sample_channel}")
+        else:
+            row["reason"] = "no standard quartet on Ch%d" % is_channel
+    return row
+
+
 DEFAULT_COLORS = {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"}
 
 
