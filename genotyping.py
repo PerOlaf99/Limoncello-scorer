@@ -186,6 +186,26 @@ def find_is_quartet(trace, cut=1900):
     return best[1], best[2]
 
 
+DEFAULT_COLORS = {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"}
+
+
+def channel_colors(base_order, colors=None, theme_mode="base"):
+    """Map each ``doc.acgt`` column to its line colour.
+
+    Shared by every trace tool here so a colour can never mean one thing in the
+    picker and another in the area measure.  Keys are ACGT column indices; in
+    "channel" mode the dye a channel carries is ignored and the colour follows
+    the channel's position, which is what the genotyping themes want.
+    """
+    colors = dict(colors or DEFAULT_COLORS)
+    out = {}
+    for ci, base in enumerate((base_order or "ACTG").upper()[:4]):
+        if base in CHANNEL_ORDER:
+            key = CHANNEL_ORDER[ci] if theme_mode == "channel" else base
+            out[CHANNEL_ORDER.index(base)] = colors.get(key, "#444444")
+    return out
+
+
 class PeakPicker:
     """Headless click-to-pick peak recognition for one trace.
 
@@ -215,16 +235,9 @@ class PeakPicker:
         self._reject = None
         self.std = None
         self.length_bp = None
-        self.col_color = {}
+        self.col_color = channel_colors(self.base_order, self.colors,
+                                        theme_mode)
         self._d2_cache: dict[int, tuple] = {}
-        for ci, base in enumerate(self.base_order[:4]):
-            if base in CHANNEL_ORDER:
-                if self.theme_mode == "channel":
-                    self.col_color[CHANNEL_ORDER.index(base)] = \
-                        self.colors.get(CHANNEL_ORDER[ci], "#444444")
-                else:
-                    self.col_color[CHANNEL_ORDER.index(base)] = \
-                        self.colors.get(base, "#444444")
 
     # ------------------------------------------------------------- detection
     def pick(self, scan, vol=None):
@@ -824,6 +837,192 @@ def save_table(path, rows):
         _write_csv(path, rows)
 
 
+# --------------------------------------------------------------------------- #
+# drag to measure: a deliberately plainer manual area tool
+# --------------------------------------------------------------------------- #
+# PeakPicker decides for itself where a peak begins and ends, which is what you
+# want for a CTC-CE duplex run and exactly what you do not want when you are
+# measuring one specific hump by hand.  This tool takes the operator's word for
+# it: press, drag, release.  The two scans you drag between are the baseline
+# endpoints, and the area is whatever the trace stands above that line.
+DRAG_MIN_SPAN = 3           # scans; closer than this was a click, not a drag
+DRAG_MIN_AREA = 1e-9        # V*scan
+
+
+def region_area(y, start, stop):
+    """Baseline-corrected area of *y* between two hand-placed scans.
+
+    The two scans are the markers the operator dragged, and they are used
+    exactly as placed: the baseline is the straight line joining the trace value
+    at *start* to the value at *stop*, and the area is the part of the trace
+    standing above that line.  Same recipe as the automatic pickers
+    (:meth:`PeakPicker._numeric_peak`) -- sum the clipped differences, no
+    trapezoid -- but nothing here goes hunting for valleys, because choosing
+    where the hump begins is the whole point.
+
+    Reversed spans are normalised, so dragging right-to-left works.  Returns a
+    dict, or None when the span is degenerate or the trace never rises above
+    the line at all.
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    if n < 2:
+        return None
+    start, stop = int(start), int(stop)
+    if start > stop:
+        start, stop = stop, start
+    start = max(0, min(n - 1, start))
+    stop = max(0, min(n - 1, stop))
+    if stop - start < DRAG_MIN_SPAN:
+        return None
+    xs = np.arange(start, stop + 1)
+    bl = np.linspace(float(y[start]), float(y[stop]), stop - start + 1)
+    above = np.clip(y[xs] - bl, 0.0, None)
+    area = float(np.sum(above))
+    if area <= DRAG_MIN_AREA:
+        return None
+    rel = int(np.argmax(above))
+    return {"start": start, "stop": stop,
+            "midpoint": (start + stop) // 2,
+            "peak_scan": start + rel,
+            "height": float(above[rel]),
+            "area": area,
+            "baseline_left": float(y[start]),
+            "baseline_right": float(y[stop])}
+
+
+class DragAreaPicker:
+    """Headless store for hand-measured peak areas on one trace.
+
+    Two scans and a channel in, one area out.  There is deliberately no peak
+    finding, no valley walking, no ``+A`` handling and no genotype call here --
+    a region measure should be exactly what the dragged span says, so the
+    genotype logic in :mod:`scorer` has nothing to second-guess.
+    """
+
+    def __init__(self, doc, path, colors=None, base_order=None,
+                 theme_mode="base", show=None, run_name=None):
+        self.doc = doc
+        self.path = Path(path)
+        self.show = show or (lambda col: True)
+        self.colors = dict(colors or DEFAULT_COLORS)
+        self.base_order = (base_order or "ACTG").upper()
+        self.col_color = channel_colors(self.base_order, self.colors,
+                                        theme_mode)
+        # A run is the folder a well came out of; wells in one run are what make
+        # a table worth having, so keep them apart in every row.
+        self.run_name = str(run_name or self.path.parent.name or "")
+        self.well = str(getattr(doc, "well", None) or self.path.stem)
+        self.records: list[_Record] = []
+
+    # ------------------------------------------------------------- measuring
+    def best_col(self, start, stop):
+        """The channel carrying the biggest hump in the span.
+
+        Defaults the measurement to the peak the operator was pointing at
+        rather than to whatever channel happens to be first.  Ties go to the
+        lowest column so the same drag always reports the same channel.
+        """
+        best, best_area = None, -1.0
+        for col in sorted(self.col_color):
+            if not self.show(col):
+                continue
+            res = region_area(self.doc.acgt[:, col], start, stop)
+            if res and res["area"] > best_area:
+                best, best_area = col, res["area"]
+        return best
+
+    def add(self, start, stop, col=None):
+        """Measure the span *start*..*stop* and record it.
+
+        *col* is an ``acgt`` column; None picks the tallest hump in the span.
+        Returns the new record, or None when the span is unusable.
+        """
+        if col is None:
+            col = self.best_col(start, stop)
+        if col is None or not (0 <= col < self.doc.acgt.shape[1]):
+            return None
+        res = region_area(self.doc.acgt[:, col], start, stop)
+        if res is None:
+            return None
+        rec = _Record(
+            file=str(self.path), run=self.run_name, well=self.well,
+            scan=res["midpoint"], start_scan=res["start"],
+            end_scan=res["stop"], midpoint=res["midpoint"],
+            peak_scan=res["peak_scan"], channel=col + 1,
+            base=CHANNEL_ORDER[col], kind="region",
+            height_V=round(res["height"], 4),
+            area_Vscan=round(res["area"], 3),
+            baseline_left_V=round(res["baseline_left"], 4),
+            baseline_right_V=round(res["baseline_right"], 4),
+        )
+        self.records.append(rec)
+        return rec
+
+    def undo_last(self):
+        if self.records:
+            return self.records.pop()
+        return None
+
+    def clear_all(self):
+        self.records = []
+
+    def rows(self):
+        """Recorded measurements, oldest first.
+
+        Click order rather than scan order, matching the on-screen table: the
+        sequence of measurements is itself the record of what was done.
+        """
+        return list(self.records)
+
+    def export_rows(self):
+        """Measurements left to right along the migration axis, for saving."""
+        return [dict(r) for r in sorted(self.records,
+                                        key=lambda r: (r["start_scan"],
+                                                       r["channel"]))]
+
+    # ---------------------------------------------------------------- drawing
+    def plot_overlay(self, ax, pending=None):
+        """Draw the baseline and markers for every recorded measurement.
+
+        *pending* is the span currently being dragged as ``(start, stop, col)``
+        and is drawn dashed, so what is about to be recorded is visible before
+        the mouse is released.
+        """
+        for r in self.records:
+            self._draw_span(ax, r["start_scan"], r["end_scan"],
+                            r["channel"] - 1,
+                            color=self.col_color.get(r["channel"] - 1, "#666666"),
+                            label=f"{r['area_Vscan']:.0f}")
+        if pending is not None and pending[0] is not None and pending[1] is not None:
+            col = pending[2] if len(pending) > 2 else None
+            self._draw_span(ax, pending[0], pending[1], col,
+                            color="#999999", label="", dashed=True)
+
+    def _draw_span(self, ax, start, stop, col, color="#666666", label="",
+                   dashed=False):
+        """Baseline line, shaded area and endpoint guides for one span."""
+        a, b = sorted((int(start), int(stop)))
+        if b - a < 1:
+            return
+        ls = "--" if dashed else "-"
+        if col is None or not (0 <= col < self.doc.acgt.shape[1]):
+            col = self.best_col(a, b) or 0
+        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        xs = np.arange(a, b + 1)
+        bl = np.linspace(float(y[a]), float(y[b]), b - a + 1)
+        ax.plot(xs, bl, color=color, lw=1.1, ls=ls, alpha=0.9, zorder=4)
+        ax.fill_between(xs, bl, np.maximum(y[xs], bl), color=color,
+                        alpha=0.16, linewidth=0, zorder=1)
+        for x in (a, b):
+            ax.axvline(x, color=color, lw=0.7, ls=":", alpha=0.7, zorder=3)
+        if not dashed and label:
+            k = int(np.argmax(y[xs] - bl))
+            ax.annotate(label, (xs[k], y[xs[k]]), textcoords="offset points",
+                        xytext=(0, 5), ha="center", fontsize=6,
+                        color=color, zorder=5)
+
+
 class GenotypingEditor(ttk.Frame):
     """Click-to-pick peak editor. Usable as a standalone Toplevel widget pack
     (GenotypingDialog wraps it); channels can be switched off one at a time.
@@ -1155,6 +1354,306 @@ class GenotypingDialog(tk.Toplevel):
         ed.pack(fill=tk.BOTH, expand=True)
         self.bind("<Control-z>", lambda e: self._editor._undo_last())
         self.bind("<Control-Z>", lambda e: self._editor._undo_last())
+
+    def __getattr__(self, name):
+        ed = self.__dict__.get("_editor")
+        if ed is None:
+            raise AttributeError(name)
+        return getattr(ed, name)
+
+# --------------------------------------------------------------------------- #
+# the drag-to-measure editor
+# --------------------------------------------------------------------------- #
+CHANNEL_CHOICES = ("auto",) + tuple(CHANNEL_ORDER)
+
+
+class ManualAreaEditor(ttk.Frame):
+    """Press-drag-release peak area measurement for one trace.
+
+    Hold the left button and drag between the two points you want the baseline
+    to pass through; the line and the area above it are drawn live while you
+    drag and recorded when you let go.  Every measurement is appended to a table
+    with its run, well, midpoint and area.
+
+    This is the plainer sibling of :class:`GenotypingEditor`: nothing is
+    detected, so there is no finder, no standard to mark and no genotype call --
+    just spans you drew yourself.
+    """
+
+    def __init__(self, master, path, doc=None, colors=None, base_order=None,
+                 theme_mode="base", show=None, run_name=None, on_exit=None):
+        super().__init__(master)
+        self.path = Path(path)
+        self.doc = doc if doc is not None else load_trace(self.path)
+        self.show = show or (lambda col: True)
+        self.theme_mode = theme_mode
+        self.on_exit = on_exit
+        self.pk = DragAreaPicker(self.doc, self.path, colors=colors,
+                                 base_order=base_order, theme_mode=theme_mode,
+                                 show=self.show, run_name=run_name)
+        self.chan = tk.StringVar(value="auto")
+        self._drag_from = None
+        self._drag_to = None
+        self._cids = ()
+        self._build()
+        self.redraw()
+
+    # ----------------------------------------------------------------- layout
+    def _build(self):
+        pane = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(pane)
+        pane.add(left, weight=3)
+        self.fig = Figure(figsize=(9, 5.5), dpi=100, facecolor="#FFFFFF")
+        self.fig.patch.set_facecolor("#FFFFFF")
+        self.canvas = FigureCanvasTkAgg(self.fig, master=left)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, window=left)
+        self.toolbar.update()
+        self._cids = (
+            self.canvas.mpl_connect("button_press_event", self._on_press),
+            self.canvas.mpl_connect("motion_notify_event", self._on_motion),
+            self.canvas.mpl_connect("button_release_event", self._on_release),
+        )
+
+        right = ttk.Frame(pane, width=360)
+        pane.add(right, weight=1)
+
+        ttk.Label(right, text="Run", font=("", 9, "bold")).pack(
+            anchor=tk.W, padx=6, pady=(6, 0))
+        ttk.Label(right, text=self.pk.run_name or "—", foreground="#0F3A6E",
+                  wraplength=330).pack(anchor=tk.W, padx=6)
+        ttk.Label(right, text="Well", font=("", 9, "bold")).pack(
+            anchor=tk.W, padx=6, pady=(6, 0))
+        ttk.Label(right, text=self.pk.well, foreground="#0F3A6E").pack(
+            anchor=tk.W, padx=6)
+
+        mframe = ttk.LabelFrame(right, text="Measure", padding=6)
+        mframe.pack(fill=tk.X, padx=4, pady=6)
+        ttk.Label(mframe, text="Hold the left button and drag between the two\n"
+                               "points the baseline should pass through.\n"
+                               "Release to record the area above that line.",
+                  foreground="#555", wraplength=330, justify=tk.LEFT).pack(
+                      anchor=tk.W)
+        row = ttk.Frame(mframe)
+        row.pack(anchor=tk.W, pady=(6, 0))
+        ttk.Label(row, text="Channel").pack(side=tk.LEFT)
+        cb = ttk.Combobox(row, textvariable=self.chan, state="readonly",
+                          values=list(CHANNEL_CHOICES), width=8)
+        cb.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(mframe, text="“auto” measures whichever channel has the "
+                               "tallest hump in the span.",
+                  foreground="#888", wraplength=330).pack(anchor=tk.W,
+                                                          pady=(4, 0))
+
+        tblf = ttk.LabelFrame(right, text="Measurements", padding=4)
+        tblf.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        cols = ("#", "run", "well", "ch", "start", "stop", "mid",
+                "height V", "area V·sc")
+        self.tree = ttk.Treeview(tblf, columns=cols, show="headings", height=12)
+        widths = {"#": 34, "run": 92, "well": 60, "ch": 34, "start": 50,
+                  "stop": 50, "mid": 52, "height V": 66, "area V·sc": 76}
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=widths[c],
+                             anchor="e" if c not in ("#", "run", "well") else "w",
+                             stretch=(c in ("run", "well")))
+        vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vs.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+
+        bar = ttk.Frame(right)
+        bar.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Button(bar, text="Undo last", command=self._undo_last).pack(
+            side=tk.LEFT)
+        ttk.Button(bar, text="Clear all", command=self._clear_all).pack(
+            side=tk.LEFT, padx=4)
+
+        bar2 = ttk.Frame(right)
+        bar2.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Button(bar2, text="Save table…", command=self._save).pack(side=tk.LEFT)
+        ttk.Button(bar2, text="Close", command=self._close).pack(side=tk.RIGHT)
+
+        self.het_label = ttk.Label(right, text="", foreground="#555",
+                                   wraplength=330)
+        self.het_label.pack(anchor=tk.W, padx=6, pady=(4, 6))
+
+    # ----------------------------------------------------------------- events
+    def _on_press(self, event):
+        if event.xdata is None or event.inaxes is None:
+            return
+        if getattr(event, "button", 1) != 1 or self.toolbar.mode != "":
+            return
+        self._drag_from = int(round(event.xdata))
+        self._drag_to = self._drag_from
+
+    def _on_motion(self, event):
+        if self._drag_from is None or event.xdata is None:
+            return
+        self._drag_to = int(round(event.xdata))
+        self._draw_pending()
+
+    def _on_release(self, event):
+        if self._drag_from is None:
+            return
+        a = self._drag_from
+        # The release position is the most reliable end of the span: a brisk
+        # drag can finish before any motion event arrives, so trusting
+        # _drag_to alone would silently drop the measurement.
+        x = getattr(event, "xdata", None)
+        b = int(round(x)) if x is not None else self._drag_to
+        self._drag_from = self._drag_to = None
+        if getattr(event, "button", 1) != 1 or b is None:
+            return
+        if a is None or abs(b - a) < DRAG_MIN_SPAN:
+            self._status("Drag a span of at least %d scans to measure a peak."
+                         % DRAG_MIN_SPAN)
+            self.redraw()
+            return
+        col = None if self.chan.get() == "auto" else \
+            CHANNEL_ORDER.index(self.chan.get())
+        rec = self.pk.add(a, b, col=col)
+        if rec is None:
+            self._status("Nothing rises above the baseline between those two "
+                         "points — try a wider or better-placed span.")
+        else:
+            self._status(f"{rec['base']} · scan {rec['midpoint']} "
+                         f"(peak {rec['peak_scan']}) height "
+                         f"{rec['height_V']:.3f} V, area {rec['area_Vscan']:.1f} "
+                         f"V·scan")
+        self.redraw()
+        self._sync_table()
+
+    def _draw_pending(self):
+        """Preview the span being dragged without rebuilding the figure."""
+        if self._drag_from is None or self._drag_to is None:
+            return
+        if abs(self._drag_to - self._drag_from) < DRAG_MIN_SPAN:
+            return
+        self.redraw()
+
+    def _chan_col(self):
+        v = self.chan.get()
+        return None if v == "auto" else CHANNEL_ORDER.index(v)
+
+    # ----------------------------------------------------------------- output
+    def redraw(self):
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        n = self.doc.acgt.shape[0]
+        x = np.arange(n)
+        for col, color in sorted(self.pk.col_color.items()):
+            if not self.show(col):
+                continue
+            ax.plot(x, self.doc.acgt[:, col], color=color, lw=0.7,
+                    label=f"Ch{col + 1} {CHANNEL_ORDER[col]}")
+        pending = None
+        if self._drag_from is not None and self._drag_to is not None \
+                and abs(self._drag_to - self._drag_from) >= DRAG_MIN_SPAN:
+            pending = (self._drag_from, self._drag_to, self._chan_col())
+        self.pk.plot_overlay(ax, pending=pending)
+        ax.set_xlim(0, n)
+        ax.set_ylim(0, float(np.nanmax(self.doc.acgt)) * 1.08 or 1.0)
+        ax.set_xlabel("scan")
+        ax.set_ylabel("V")
+        ax.set_title(f"{self.path.name} — hold left button and drag to measure "
+                     f"a peak", fontsize=9)
+        ax.grid(True, alpha=0.15)
+        ax.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.6)
+        self.fig.tight_layout()
+        self.canvas.draw_idle()
+
+    def _sync_table(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, r in enumerate(self.pk.rows(), 1):
+            self.tree.insert("", tk.END, values=(
+                i, r["run"] or "—", r["well"], r["base"],
+                r["start_scan"], r["end_scan"], r["midpoint"],
+                f"{r['height_V']:.3f}", f"{r['area_Vscan']:.1f}"))
+
+    def _status(self, msg):
+        self.het_label.config(text=msg)
+
+    def _undo_last(self):
+        rec = self.pk.undo_last()
+        self._status(f"Removed {rec['base']} at scan {rec['midpoint']}."
+                     if rec else "Nothing to undo.")
+        self.redraw()
+        self._sync_table()
+
+    def _clear_all(self):
+        self.pk.clear_all()
+        self._status("Cleared all measurements.")
+        self.redraw()
+        self._sync_table()
+
+    def _save(self):
+        rows = self.pk.export_rows()
+        if not rows:
+            self._status("Nothing measured yet — drag a span across a peak "
+                         "first.")
+            return
+        filetypes = [("CSV", "*.csv"), ("JSON", "*.json")]
+        try:
+            import openpyxl                      # noqa: F401
+            filetypes.append(("Excel", "*.xlsx"))
+        except Exception:
+            pass
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save measured areas",
+            defaultextension=".csv",
+            initialfile=f"{self.pk.well}_areas.csv", filetypes=filetypes)
+        if not path:
+            return
+        try:
+            save_table(path, rows)
+        except Exception as e:
+            messagebox.showerror("Area measure", f"Could not save:\n{e}",
+                                 parent=self)
+            return
+        self._status(f"Saved {len(rows)} measurement(s) to {Path(path).name}.")
+
+    def _request_close(self):
+        if self.on_exit:
+            self.on_exit()
+        else:
+            self.destroy()
+
+    def _close(self):
+        for cid in self._cids:
+            try:
+                self.canvas.mpl_disconnect(cid)
+            except Exception:
+                pass
+        self._cids = ()
+        self._request_close()
+
+
+class ManualAreaDialog(tk.Toplevel):
+    """Standalone window wrapping a :class:`ManualAreaEditor`."""
+
+    def __init__(self, parent, path, doc=None, colors=None, base_order=None,
+                 theme_mode="base", on_exit=None):
+        super().__init__(parent)
+        self.title("Peak area by drag — " + Path(path).name)
+        self.geometry("1180x700")
+        try:
+            ed = ManualAreaEditor(self, path, doc=doc, colors=colors,
+                                  base_order=base_order, theme_mode=theme_mode,
+                                  on_exit=on_exit)
+        except Exception as e:
+            messagebox.showerror("Area measure", f"Could not load trace:\n{e}",
+                                 parent=self)
+            self.destroy()
+            return
+        self._editor = ed
+        ed.pack(fill=tk.BOTH, expand=True)
+        self.bind("<Control-z>", lambda e: ed._undo_last())
+        self.bind("<Control-Z>", lambda e: ed._undo_last())
+        self.protocol("WM_DELETE_WINDOW", ed._close)
 
     def __getattr__(self, name):
         ed = self.__dict__.get("_editor")

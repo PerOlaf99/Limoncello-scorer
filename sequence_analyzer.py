@@ -428,6 +428,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m = tk.Menu(self, tearoff=0)
         genotyping_m.add_command(label="Manual peak picking…",
                                  command=self.toggle_genotyping_picking)
+        genotyping_m.add_command(label="Peak area by drag…",
+                                 command=self._gen_drag_area)
         genotyping_m.add_separator()
         genotyping_m.add_checkbutton(
             label="Add +A (A-addition) peak",
@@ -1344,6 +1346,30 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.pick_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
         self.pick_table = tblf
+
+    def _gen_drag_area(self):
+        """Open the drag-to-measure tool on the selected well.
+
+        One trace at a time: the tool is about a single span, and the
+        peak-picking mode already covers the batch case.
+        """
+        from genotyping import ManualAreaDialog
+        sel = [Path(p) for p in (getattr(self, "selected", None) or [])]
+        if not sel:
+            self.status_var.set("Select a well first.")
+            return
+        path = sel[0]
+        try:
+            doc = self._ensure_doc(path)
+        except Exception as e:
+            messagebox.showerror("Area measure",
+                                 f"{path.name}:\n{e}", parent=self)
+            return
+        # Held on self so Tk does not garbage-collect the window while open.
+        self._area_dialog = ManualAreaDialog(
+            self, path, doc=doc, colors=self._theme_colors(),
+            base_order=self.base_order_var.get(),
+            theme_mode=self._theme_mode())
 
     def _gen_paths(self):
         n = max(1, min(8, self.n_graphs.get()))
