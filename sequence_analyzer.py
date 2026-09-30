@@ -234,10 +234,18 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # (n_graphs wells at a time), zooms in and clicks peaks on the stacked
         # viewer.  One PeakPicker per displayed well accumulates the records.
         self.genotyping_active = False
+        # area_mode reuses this whole mode for the plainer drag-to-measure
+        # tool: same stacked viewer, same table, same batching, but a
+        # press-drag-release span instead of a click that detects a peak.
+        self.area_mode = False
         self._gen_pickers: dict = {}
+        self._area_pickers: dict = {}
+        self._area_drag = None
+        self._area_cursors: list = []
         self._gen_active_path: Optional[Path] = None
         self._pick_cid = None
         self._gen_motion_cid = None
+        self._area_release_cid = None
         self._gen_cursors: list = []
         self.pick_table = None
         self.pick_tree = None
@@ -429,7 +437,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m.add_command(label="Manual peak picking…",
                                  command=self.toggle_genotyping_picking)
         genotyping_m.add_command(label="Peak area by drag…",
-                                 command=self._gen_drag_area)
+                                 command=self.toggle_area_picking)
         genotyping_m.add_separator()
         genotyping_m.add_checkbutton(
             label="Add +A (A-addition) peak",
@@ -438,8 +446,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             label="Mark start/end from the 2nd derivative",
             variable=self._gen_d2, command=self._sync_gen_opts)
         genotyping_m.add_separator()
-        genotyping_m.add_command(label="Undo last pick", command=self._gen_undo)
-        genotyping_m.add_command(label="Clear picks", command=self._gen_clear)
+        genotyping_m.add_command(label="Undo last pick / measurement",
+                                 command=self._gen_undo)
+        genotyping_m.add_command(label="Clear picks / measurements",
+                                 command=self._gen_clear)
         genotyping_m.add_command(label="Mark peaks as standard…",
                                  command=self._gen_mark_std)
         genotyping_m.add_separator()
@@ -1275,7 +1285,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         (zoom bars, µA, Channels), but clicks on a subplot pick peaks for that
         well and the sequence pane shows the picked-peaks table instead.
         Calling it again (or Exit peak picking) returns to the viewer."""
-        if self.genotyping_active:
+        if self.genotyping_active and not self.area_mode:
             self.exit_genotyping_picking()
             return
         self.enter_genotyping_picking()
@@ -1286,7 +1296,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                 "Select the wells to genotype in the list first.")
             return
         if self.genotyping_active:
-            return
+            self.exit_genotyping_picking()     # switching between the two modes
+        self.area_mode = False
         self.seq_text.pack_forget()
         self.seq_hdr.config(text="Picked peaks")
         self._build_pick_table()
@@ -1300,22 +1311,54 @@ class LimoncelloAnalyzerApp(tk.Tk):
                             "batch) and pick the next wells.")
         self.redraw()
 
+    def toggle_area_picking(self):
+        """Drag-to-measure, in the same window and the same mode plumbing as
+        manual peak picking.  Holding the left button and dragging between two
+        points measures the area above the straight line between them, so there
+        is no second window to keep in sync with this one."""
+        if self.genotyping_active and self.area_mode:
+            self.exit_genotyping_picking()
+            return
+        self.enter_area_picking()
+
+    def enter_area_picking(self):
+        if not self.selected:
+            messagebox.showinfo("Area measure",
+                                "Select the wells to measure in the list first.")
+            return
+        if self.genotyping_active:
+            self.exit_genotyping_picking()
+        self.area_mode = True
+        self.seq_text.pack_forget()
+        self.seq_hdr.config(text="Measured areas")
+        self._build_pick_table(area=True)
+        self._pick_cid = self.canvas.mpl_connect("button_press_event",
+                                                 self._on_gen_pick)
+        self._gen_motion_cid = self.canvas.mpl_connect(
+            "motion_notify_event", self._on_gen_motion)
+        self._area_release_cid = self.canvas.mpl_connect(
+            "button_release_event", self._on_area_release)
+        self.genotyping_active = True
+        self.status_var.set("Drag to measure — hold the left button and drag "
+                            "between the two points the baseline should pass "
+                            "through, then release. Drag right-to-left works "
+                            "too; page the batch as usual.")
+        self.redraw()
+
     def exit_genotyping_picking(self):
         if not self.genotyping_active:
             return
-        if self._pick_cid is not None:
-            try:
-                self.canvas.mpl_disconnect(self._pick_cid)
-            except Exception:
-                pass
-            self._pick_cid = None
-        if self._gen_motion_cid is not None:
-            try:
-                self.canvas.mpl_disconnect(self._gen_motion_cid)
-            except Exception:
-                pass
-            self._gen_motion_cid = None
+        for attr in ("_pick_cid", "_gen_motion_cid", "_area_release_cid"):
+            cid = getattr(self, attr, None)
+            if cid is not None:
+                try:
+                    self.canvas.mpl_disconnect(cid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         self._gen_cursors = []
+        self._area_cursors = []
+        self._area_drag = None
         if self.pick_table is not None:
             try:
                 self.pick_table.destroy()
@@ -1324,52 +1367,56 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.pick_table = None
             self.pick_tree = None
         self.genotyping_active = False
+        self.area_mode = False
         self.seq_hdr.config(text="Called sequence")
         self.seq_text.pack(fill=tk.X, padx=4, pady=2)
         self.status_var.set("Back to the trace viewer.")
         self.redraw()
 
-    def _build_pick_table(self):
+    def _build_pick_table(self, area=False):
         tblf = ttk.Frame(self.center)
         tblf.pack(fill=tk.X, padx=4, pady=2)
-        cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac")
-        self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings", height=4)
-        widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34, "kind": 62,
-                  "h V": 66, "area": 66, "frac": 50}
+        if area:
+            cols = ("run", "well", "ch", "start", "stop", "mid", "h V", "area")
+            widths = {"run": 90, "well": 58, "ch": 34, "start": 48, "stop": 48,
+                      "mid": 50, "h V": 62, "area": 64}
+            left_anchor = ("run", "well")
+            stretch = ("run", "well")
+        else:
+            cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac")
+            widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34,
+                      "kind": 62, "h V": 66, "area": 66, "frac": 50}
+            left_anchor = ("well", "kind")
+            stretch = ("scan", "kind")
+        self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings",
+                                      height=4)
         for c in cols:
             self.pick_tree.heading(c, text=c)
             self.pick_tree.column(c, width=widths[c],
-                                  anchor="e" if c not in ("well", "kind") else "w",
-                                  stretch=(c in ("scan", "kind")))
+                                  anchor="w" if c in left_anchor else "e",
+                                  stretch=(c in stretch))
         vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=self.pick_tree.yview)
         self.pick_tree.configure(yscrollcommand=vs.set)
         self.pick_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
         self.pick_table = tblf
 
-    def _gen_drag_area(self):
-        """Open the drag-to-measure tool on the selected well.
-
-        One trace at a time: the tool is about a single span, and the
-        peak-picking mode already covers the batch case.
-        """
-        from genotyping import ManualAreaDialog
-        sel = [Path(p) for p in (getattr(self, "selected", None) or [])]
-        if not sel:
-            self.status_var.set("Select a well first.")
-            return
-        path = sel[0]
-        try:
+    def _ensure_area_picker(self, path):
+        """One DragAreaPicker per displayed well, built on first use."""
+        from genotyping import DragAreaPicker
+        key = str(path.resolve())
+        pk = self._area_pickers.get(key)
+        if pk is None:
             doc = self._ensure_doc(path)
-        except Exception as e:
-            messagebox.showerror("Area measure",
-                                 f"{path.name}:\n{e}", parent=self)
-            return
-        # Held on self so Tk does not garbage-collect the window while open.
-        self._area_dialog = ManualAreaDialog(
-            self, path, doc=doc, colors=self._theme_colors(),
-            base_order=self.base_order_var.get(),
-            theme_mode=self._theme_mode())
+            col2chan = self._col_to_chan()
+            pk = DragAreaPicker(doc, path, colors=self._theme_colors(),
+                                base_order=self.base_order_var.get(),
+                                theme_mode=self._theme_mode(),
+                                show=lambda c: self.chan_show[
+                                    col2chan.get(c, c)].get(),
+                                run_name=path.parent.name)
+            self._area_pickers[key] = pk
+        return pk
 
     def _gen_paths(self):
         n = max(1, min(8, self.n_graphs.get()))
@@ -1456,6 +1503,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if not (0 <= i < len(paths)):
             return
         path = paths[i]
+        if self.area_mode:
+            # arm a span on this subplot; _on_area_release commits it
+            self._area_drag = {"i": i, "start": int(round(xs)),
+                               "stop": int(round(xs))}
+            return
         try:
             pk = self._ensure_picker(path)
         except Exception as e:
@@ -1474,6 +1526,120 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"{path.parent.name}/{path.name} · well {pk.doc.well}: "
                             f"peak scan {rec['scan']} · {rec['base']} "
                             f"height {rec['height']:.3f} V")
+        self.redraw()
+        self._sync_pick_table()
+
+    def _make_area_markers(self, ax):
+        """Live preview artists for the span being dragged on one subplot.
+
+        Persistent artists updated with set_data/set_xdata rather than a full
+        figure rebuild, because this runs on every motion event and a redraw of
+        eight stacked traces would stutter badly.
+        """
+        line = ax.plot([], [], color="#B00020", lw=1.2, ls="--", alpha=0.9,
+                       zorder=23, visible=False)[0]
+        left = ax.axvline(0, color="#B00020", lw=0.7, ls=":", alpha=0.7,
+                          zorder=23, visible=False)
+        right = ax.axvline(0, color="#B00020", lw=0.7, ls=":", alpha=0.7,
+                           zorder=23, visible=False)
+        ann = ax.annotate("", xy=(0.5, 0.90), xycoords="axes fraction",
+                          ha="center", va="top", fontsize=7, color="#111",
+                          zorder=25, visible=False,
+                          bbox=dict(boxstyle="round,pad=0.3", fc="#FFF9C4",
+                                    ec="#999", lw=0.6, alpha=0.9))
+        return (ax, line, left, right, ann)
+
+    def _area_preview(self, event):
+        """Follow the pointer with the dashed baseline and a live area readout."""
+        from genotyping import DRAG_MIN_SPAN, region_area
+        drag = self._area_drag
+        if drag is None or not self._area_cursors:
+            return
+        if getattr(event, "xdata", None) is None:
+            return
+        drag["stop"] = int(round(event.xdata))
+        i = drag["i"]
+        if not (0 <= i < len(self._area_cursors)):
+            return
+        ax, line, left, right, ann = self._area_cursors[i]
+        a, b = sorted((drag["start"], drag["stop"]))
+        for art in self._area_cursors:
+            for k in art[1:]:
+                k.set_visible(False)
+        if b - a < DRAG_MIN_SPAN:
+            self.canvas.draw_idle()
+            return
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            return
+        try:
+            pk = self._ensure_area_picker(paths[i])
+        except Exception:
+            return
+        col = pk.best_col(a, b)
+        if col is None:
+            return
+        y = np.asarray(pk.doc.acgt[:, col], dtype=float)
+        xs = np.arange(a, b + 1)
+        bl = np.linspace(float(y[a]), float(y[b]), b - a + 1)
+        line.set_data(xs, bl)
+        line.set_visible(True)
+        left.set_xdata([a, a])
+        right.set_xdata([b, b])
+        left.set_visible(True)
+        right.set_visible(True)
+        res = region_area(y, a, b)
+        if res is not None:
+            ann.set_text(f"mid {res['midpoint']} · {res['area']:.1f} V·scan")
+            ann.set_visible(True)
+        self.canvas.draw_idle()
+
+    def _on_area_release(self, event):
+        """Commit the dragged span as one measurement."""
+        from genotyping import DRAG_MIN_SPAN
+        drag = self._area_drag
+        if not self.area_mode or drag is None:
+            return
+        self._area_drag = None
+        for art in self._area_cursors:
+            for k in art[1:]:
+                k.set_visible(False)
+        if getattr(event, "button", 1) != 1:
+            self.canvas.draw_idle()
+            return
+        # The release position is the reliable end of the span: a brisk drag
+        # can finish before any motion event arrives.
+        x = getattr(event, "xdata", None)
+        stop = int(round(x)) if x is not None else drag["stop"]
+        i = drag["i"]
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            self.canvas.draw_idle()
+            return
+        path = paths[i]
+        a, b = sorted((drag["start"], stop))
+        if b - a < DRAG_MIN_SPAN:
+            self.status_var.set(f"Drag at least {DRAG_MIN_SPAN} scans to "
+                                f"measure a peak on {path.name}.")
+            self.canvas.draw_idle()
+            return
+        try:
+            pk = self._ensure_area_picker(path)
+        except Exception as e:
+            self.status_var.set(f"Could not load {path.name}: {e}")
+            return
+        rec = pk.add(a, b)
+        if rec is None:
+            self.status_var.set(f"Nothing rises above the baseline between "
+                                f"those scans on {path.name} — try a wider or "
+                                f"better-placed span.")
+        else:
+            self._gen_active_path = path
+            self.status_var.set(
+                f"{path.parent.name}/{path.name} · well {rec['well']}: "
+                f"{rec['base']} mid {rec['midpoint']} (peak {rec['peak_scan']}) "
+                f"height {rec['height_V']:.3f} V, area "
+                f"{rec['area_Vscan']:.1f} V·scan")
         self.redraw()
         self._sync_pick_table()
 
@@ -1528,7 +1694,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 + ("  [picked]" if picked else ""))
 
     def _on_gen_motion(self, event):
-        if not self.genotyping_active or not self._gen_cursors:
+        if not self.genotyping_active:
+            return
+        if self.area_mode:
+            # area mode keeps its own preview artists, so the crosshair guard
+            # below must not apply to it
+            if self._area_cursors:
+                self._area_preview(event)
+            return
+        if not self._gen_cursors:
             return
         hit = self._gen_axes_hit(event)
         if hit is None:
@@ -1572,6 +1746,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.fig.clear()
         self._plot_axes = []
         self._gen_cursors = []
+        self._area_cursors = []
         self._full_xlim = None
         self._full_ylim = None
         paths = self._gen_paths()
@@ -1583,7 +1758,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         for i, path in enumerate(paths):
             ax = self.fig.add_subplot(len(paths), 1, i + 1)
             try:
-                pk = self._ensure_picker(path)
+                pk = (self._ensure_area_picker(path) if self.area_mode
+                      else self._ensure_picker(path))
                 doc = pk.doc
             except Exception as e:
                 ax.text(0.5, 0.5, f"Load error: {e}",
@@ -1620,12 +1796,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
                          alpha=0.8, linestyle=":", label="I (µA)")
                 axc.set_ylabel("µA", color=CURRENT_COLOR, fontsize=6)
                 axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
-            pk.plot_overlay(ax)
+            if self.area_mode:
+                ap = self._area_pickers.get(str(path.resolve()))
+                if ap is not None:
+                    ap.plot_overlay(ax)
+                self._area_cursors.append(self._make_area_markers(ax))
+            else:
+                pk.plot_overlay(ax)
             ax.tick_params(labelsize=7)
             ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                     transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#333", zorder=6)
-            self._gen_cursors.append(self._make_gen_cursor(ax))
+            if not self.area_mode:
+                self._gen_cursors.append(self._make_gen_cursor(ax))
             self._style_x_axis(ax, i == len(paths) - 1)
         if gx1 is not None and gy0 is not None and gx1 > gx0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -1641,6 +1824,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if getattr(self, "pick_tree", None) is None:
             return
         self.pick_tree.delete(*self.pick_tree.get_children())
+        if self.area_mode:
+            for path in self._gen_paths():
+                pk = self._area_pickers.get(str(path.resolve()))
+                if pk is None:
+                    continue
+                for r in sorted(pk.records,
+                                key=lambda r: (int(r["start_scan"]),
+                                               int(r["channel"]))):
+                    self.pick_tree.insert("", tk.END, values=(
+                        r["run"] or "-", r["well"], r["base"],
+                        r["start_scan"], r["end_scan"], r["midpoint"],
+                        f"{r['height_V']:.3f}", f"{r['area_Vscan']:.1f}"))
+            return
         for path in self._gen_paths():
             pk = self._gen_pickers.get(str(path.resolve()))
             if pk is None:
@@ -1680,21 +1876,46 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _gen_undo(self):
         if not self.genotyping_active:
             return
+        if self.area_mode:
+            rec = None
+            if self._gen_active_path is not None:
+                pk = self._area_pickers.get(str(self._gen_active_path.resolve()))
+                if pk is not None:
+                    rec = pk.undo_last()
+            if rec is None:
+                for path in self._gen_paths():
+                    pk = self._area_pickers.get(str(path.resolve()))
+                    if pk is not None and pk.records:
+                        rec = pk.undo_last()
+                        self._gen_active_path = path
+                        break
+            if rec is None:
+                self.status_var.set("Nothing to undo.")
+                return
+            self.status_var.set(f"Removed {rec['base']} at mid "
+                                f"{rec['midpoint']}.")
+            self.redraw()
+            self._sync_pick_table()
+            return
         pk = self._gen_picker_active()
         if pk is None or not pk.undo_last():
             self.status_var.set("Nothing to undo.")
             return
         self.status_var.set("Removed last picked peak.")
         self.redraw()
+        self._sync_pick_table()
 
     def _gen_clear(self):
         if not self.genotyping_active:
             return
-        if self._gen_pickers:
-            self._gen_pickers.clear()
+        store = self._area_pickers if self.area_mode else self._gen_pickers
+        if store:
+            store.clear()
             self._gen_active_path = None
-            self.status_var.set("Picks cleared.")
+            self.status_var.set("Measurements cleared." if self.area_mode
+                                else "Picks cleared.")
         self.redraw()
+        self._sync_pick_table()
 
     def _gen_mark_std(self):
         if not self.genotyping_active:
@@ -1733,15 +1954,26 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         from genotyping import save_table
         rows = []
-        # group by sample first (run folder, then well name) so one sample's
-        # peaks are never interleaved with another's, then scan order inside
-        for key, pk in sorted(self._gen_pickers.items(),
-                              key=lambda kv: str(kv[1].path)):
-            if pk.records:
-                rows.extend(pk.export_rows())
+        if self.area_mode:
+            # run folder first, then well, then left-to-right along the trace
+            for key, pk in sorted(self._area_pickers.items(),
+                                  key=lambda kv: (kv[1].run_name, kv[1].well,
+                                                  str(kv[1].path))):
+                if pk.records:
+                    rows.extend(pk.export_rows())
+        else:
+            # group by sample first (run folder, then well name) so one
+            # sample's peaks are never interleaved with another's, then scan
+            # order inside
+            for key, pk in sorted(self._gen_pickers.items(),
+                                  key=lambda kv: str(kv[1].path)):
+                if pk.records:
+                    rows.extend(pk.export_rows())
         if not rows:
-            messagebox.showinfo("Save peaks table",
-                                "Pick some peaks first, then save.")
+            messagebox.showinfo(
+                "Save peaks table" if not self.area_mode else "Save areas",
+                "Pick some peaks first, then save." if not self.area_mode
+                else "Measure something first, then save.")
             return
         types = [("CSV (Excel-compatible)", "*.csv"), ("JSON (ML)", "*.json")]
         try:
@@ -1760,7 +1992,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                  f"Could not write file:\n{e}")
             return
         wells = sorted({r["well"] for r in rows})
-        self.status_var.set(f"Saved {len(rows)} peak rows ({len(wells)} well"
+        unit = "area" if self.area_mode else "peak"
+        self.status_var.set(f"Saved {len(rows)} {unit} rows ({len(wells)} well"
                             f"{'s' if len(wells) != 1 else ''}) to {path}")
 
     def _col_to_chan(self, order=None):

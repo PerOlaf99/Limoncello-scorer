@@ -252,69 +252,95 @@ def test_overlay_shows_the_span_being_dragged():
 
 
 # --------------------------------------------------------------------------- #
-# the drag state machine
+# the main-window drag state machine
 # --------------------------------------------------------------------------- #
-# The GUI cannot be launched headlessly, but the handlers only touch a handful
-# of attributes, so they are driven directly against a stub.  This is the part
-# with no precedent in the repo -- button_release_event is used nowhere else --
-# so the press/motion/release sequence deserves to be pinned explicitly.
+# The tool now lives inside the Limoncello window, driven by the same handlers
+# the peak-picking mode uses, so the state machine is exercised directly
+# against a stub.  press/motion/release is new in this repo, and the GUI cannot
+# be launched headlessly, so this is the only place it gets covered.
+import sequence_analyzer as sa
+
+
 class _Ev:
     def __init__(self, x, button=1, inaxes=True):
         self.xdata = x
         self.ydata = 0.0
         self.inaxes = object() if inaxes else None
         self.button = button
+        self.x = None
+        self.y = None
 
 
-class _Toolbar:
-    mode = ""
+class _Status:
+    def __init__(self):
+        self.msgs = []
+
+    def set(self, msg):
+        self.msgs.append(msg)
 
 
-class _Var:
-    def __init__(self, v):
-        self.v = v
+class _Canvas:
+    def __init__(self):
+        self.idles = 0
 
-    def get(self):
-        return self.v
+    def draw_idle(self):
+        self.idles += 1
+
+    def mpl_disconnect(self, cid):
+        pass
 
 
 class _Stub:
-    """Just enough of ManualAreaEditor for the three mouse handlers."""
+    """Enough of LimoncelloAnalyzerApp for the three area-mode handlers."""
 
-    def __init__(self, acgt, chan="auto", mode=""):
-        self.pk = g.DragAreaPicker(_Doc(acgt), RUN)
-        self.toolbar = _Toolbar()
-        self.toolbar.mode = mode
-        self.chan = _Var(chan)
-        self._drag_from = None
-        self._drag_to = None
+    def __init__(self, acgt, path=RUN, area_mode=True, active=True):
+        self.area_mode = area_mode
+        self.genotyping_active = active
+        self._area_drag = None
+        self._gen_dursors = []
+        self._area_cursors = []
+        self._gen_pickers = {}
+        self._area_pickers = {}
+        self._gen_active_path = None
+        self._paths = [path]
+        self.status_var = _Status()
+        self.canvas = _Canvas()
         self.redraws = 0
-        self.statuses = []
-        self._syncs = 0
+        self.syncs = 0
+        self._doc = _Doc(acgt)
+
+    def _gen_paths(self):
+        return list(self._paths)
+
+    def _ensure_area_picker(self, path):
+        key = str(Path(path).resolve())
+        pk = self._area_pickers.get(key)
+        if pk is None:
+            pk = g.DragAreaPicker(self._doc, path)
+            self._area_pickers[key] = pk
+        return pk
+
+    def _gen_axes_hit(self, event):
+        if event.xdata is None:
+            return None
+        return 0, None, event.xdata, 0.0
 
     def redraw(self):
         self.redraws += 1
 
-    def _draw_pending(self):
-        if self._drag_from is None or self._drag_to is None:
-            return
-        if abs(self._drag_to - self._drag_from) >= g.DRAG_MIN_SPAN:
-            self.redraws += 1
+    def _sync_pick_table(self):
+        self.syncs += 1
 
-    def _sync_table(self):
-        self._syncs += 1
-
-    def _status(self, msg):
-        self.statuses.append(msg)
-
-    def _chan_col(self):
-        v = self.chan.get()
-        return None if v == "auto" else g.CHANNEL_ORDER.index(v)
+    def records(self):
+        pk = self._ensure_area_picker(self._paths[0])
+        return pk.rows()
 
 
 def _driver(stub):
-    for name in ("_on_press", "_on_motion", "_on_release"):
-        setattr(stub, name, getattr(g.ManualAreaEditor, name).__get__(stub))
+    for name in ("_on_gen_pick", "_on_gen_motion", "_on_area_release",
+                 "_area_preview"):
+        setattr(stub, name,
+                getattr(sa.LimoncelloAnalyzerApp, name).__get__(stub))
 
 
 HUMP = _flat_trace([0, 0, 5, 0, 0])
@@ -323,98 +349,176 @@ HUMP = _flat_trace([0, 0, 5, 0, 0])
 def test_drag_records_one_measurement_on_release():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_press(_Ev(0))
-    assert st.pk.rows() == []          # nothing recorded while still dragging
-    st._on_motion(_Ev(2))
-    st._on_release(_Ev(4))
-    assert len(st.pk.rows()) == 1
-    assert st.pk.rows()[0]["midpoint"] == 2
-    assert st._syncs == 1              # the table is refreshed on release
+    st._on_gen_pick(_Ev(0))
+    assert st.records() == []              # nothing stored while still dragging
+    st._on_gen_motion(_Ev(2))
+    st._on_area_release(_Ev(4))
+    assert len(st.records()) == 1
+    assert st.records()[0]["midpoint"] == 2
+    assert st.syncs == 1                   # the table is refreshed on release
 
 
-def test_dragging_right_to_left_works():
+def test_drag_right_to_left_works():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_press(_Ev(4))
-    st._on_release(_Ev(0))
-    assert st.pk.rows()[0]["start_scan"] == 0
+    st._on_gen_pick(_Ev(4))
+    st._on_area_release(_Ev(0))
+    assert st.records()[0]["start_scan"] == 0
+
+
+def test_release_uses_its_own_coordinate_when_motion_never_arrived():
+    """A brisk drag can finish before any motion event; the release position is
+    the reliable end of the span."""
+    st = _Stub(HUMP)
+    _driver(st)
+    st._on_gen_pick(_Ev(0))
+    st._on_area_release(_Ev(4))
+    assert len(st.records()) == 1
+    assert st.records()[0]["end_scan"] == 4
 
 
 def test_click_without_drag_is_refused():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_press(_Ev(2))
-    st._on_release(_Ev(2))
-    assert st.pk.rows() == []
-    assert any("at least" in m for m in st.statuses)
-    assert st._drag_from is None        # the drag is finished either way
+    st._on_gen_pick(_Ev(2))
+    st._on_area_release(_Ev(2))
+    assert st.records() == []
+    assert any("at least" in m for m in st.status_var.msgs)
+    assert st._area_drag is None           # the drag is finished either way
 
 
 def test_motion_without_press_is_ignored():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_motion(_Ev(3))
-    st._on_release(_Ev(3))
-    assert st.pk.rows() == []
+    st._on_gen_motion(_Ev(3))
+    st._on_area_release(_Ev(3))
+    assert st.records() == []
 
 
 def test_release_without_press_is_ignored():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_release(_Ev(4))
-    assert st.pk.rows() == []
+    st._on_area_release(_Ev(4))
+    assert st.records() == []
 
 
 def test_right_button_does_not_start_a_drag():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_press(_Ev(0, button=3))
-    assert st._drag_from is None
-    st._on_release(_Ev(4, button=3))
-    assert st.pk.rows() == []
-
-
-def test_toolbar_pan_and_zoom_win_over_dragging():
-    for mode in ("pan/zoom", "zoom rect"):
-        st = _Stub(HUMP, mode=mode)
-        _driver(st)
-        st._on_press(_Ev(0))
-        assert st._drag_from is None, mode
-        st._on_release(_Ev(4))
-        assert st.pk.rows() == [], mode
+    st._on_gen_pick(_Ev(0, button=3))
+    assert st._area_drag is None
+    st._on_area_release(_Ev(4, button=3))
+    assert st.records() == []
 
 
 def test_click_outside_the_axes_is_ignored():
     st = _Stub(HUMP)
     _driver(st)
-    st._on_press(_Ev(0, inaxes=False))
-    assert st._drag_from is None
+    st._on_gen_pick(_Ev(0, inaxes=False))
+    assert st._area_drag is None
 
 
-def test_drag_over_flat_trace_reports_why():
+def test_drag_over_flat_trace_explains_itself():
     st = _Stub(_flat_trace([2, 2, 2, 2, 2, 2, 2]))
     _driver(st)
-    st._on_press(_Ev(0))
-    st._on_release(_Ev(6))
-    assert st.pk.rows() == []
-    assert any("baseline" in m for m in st.statuses)
+    st._on_gen_pick(_Ev(0))
+    st._on_area_release(_Ev(6))
+    assert st.records() == []
+    assert any("baseline" in m for m in st.status_var.msgs)
 
 
-def test_chosen_channel_is_used():
+def test_tallest_channel_is_measured():
     acgt = _flat_trace([0, 0, 1, 0, 0], col=0)
     acgt[:, 1] = [0, 0, 8, 0, 0]
-    st = _Stub(acgt, chan="C")
+    st = _Stub(acgt)
     _driver(st)
-    st._on_press(_Ev(0))
-    st._on_release(_Ev(4))
-    assert st.pk.rows()[0]["base"] == "C"
+    st._on_gen_pick(_Ev(0))
+    st._on_area_release(_Ev(4))
+    assert st.records()[0]["base"] == "C"
 
 
 def test_two_drags_make_two_rows():
-    acgt = _flat_trace([0, 0, 5, 0, 0, 0, 0, 0, 7, 0, 0])
-    st = _Stub(acgt)
+    st = _Stub(_flat_trace([0, 0, 5, 0, 0, 0, 0, 0, 7, 0, 0]))
     _driver(st)
     for a, b in ((0, 4), (6, 10)):
-        st._on_press(_Ev(a))
-        st._on_release(_Ev(b))
-    assert [r["midpoint"] for r in st.pk.rows()] == [2, 8]
+        st._on_gen_pick(_Ev(a))
+        st._on_area_release(_Ev(b))
+    assert [r["midpoint"] for r in st.records()] == [2, 8]
+
+
+def test_peak_picking_mode_is_untouched_by_the_drag_handlers():
+    """In the other mode a press picks a peak; it must not arm a span."""
+    st = _Stub(HUMP, area_mode=False)
+    _driver(st)
+    st._on_gen_pick(_Ev(0))
+    assert st._area_drag is None
+
+
+def test_handlers_do_nothing_outside_the_mode():
+    st = _Stub(HUMP, active=False)
+    _driver(st)
+    st._on_gen_pick(_Ev(0))
+    assert st._area_drag is None
+    st._on_area_release(_Ev(4))
+    assert st.records() == []
+
+
+# --------------------------------------------------------------------------- #
+# the live preview
+# --------------------------------------------------------------------------- #
+def _preview_stub(acgt):
+    """A stub with a real Agg figure behind it, so the preview artists exist."""
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    from matplotlib.figure import Figure
+
+    st = _Stub(acgt)
+    _driver(st)
+    fig = Figure()
+    ax = fig.add_subplot(111)
+    n = acgt.shape[0]
+    for col, color in sorted(st._ensure_area_picker(RUN).col_color.items()):
+        ax.plot(np.arange(n), acgt[:, col], color=color, lw=0.7)
+    st._area_cursors = [sa.LimoncelloAnalyzerApp._make_area_markers(st, ax)]
+    st._ax = ax
+    return st
+
+
+def test_preview_shows_the_span_being_dragged():
+    st = _preview_stub(HUMP)
+    st._on_gen_pick(_Ev(0))
+    st._area_preview(_Ev(4))
+    _ax, line, left, right, ann = st._area_cursors[0]
+    assert line.get_visible()
+    assert left.get_visible() and right.get_visible()
+    assert list(left.get_xdata()) == [0, 0]
+    assert list(right.get_xdata()) == [4, 4]
+    assert "mid 2" in ann.get_text()
+    assert "5.0" in ann.get_text()          # the live area
+
+
+def test_preview_hides_again_when_the_span_is_too_short():
+    st = _preview_stub(HUMP)
+    st._on_gen_pick(_Ev(2))
+    st._area_preview(_Ev(3))
+    for art in st._area_cursors[0][1:]:
+        assert not art.get_visible()
+
+
+def test_release_clears_the_preview():
+    st = _preview_stub(HUMP)
+    st._on_gen_pick(_Ev(0))
+    st._area_preview(_Ev(4))
+    st._on_area_release(_Ev(4))
+    for art in st._area_cursors[0][1:]:
+        assert not art.get_visible()
+    assert len(st.records()) == 1
+
+
+def test_motion_drives_the_preview_without_a_full_redraw():
+    st = _preview_stub(HUMP)
+    st._on_gen_pick(_Ev(0))
+    st._on_gen_motion(_Ev(4))
+    assert st.redraws == 0                  # preview artists, not a rebuild
+    _ax, line, _l, right, _a = st._area_cursors[0]
+    assert list(right.get_xdata()) == [4, 4]
