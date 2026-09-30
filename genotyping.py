@@ -43,6 +43,28 @@ CHANNEL_ORDER = "ACGT"
 CLICK_RADIUS = 30          # scans searched around a click
 HET_WINDOW = 8             # scans in which two mains count as heterozygote
 SATELLITE_FRAC = 0.05      # min height of a +A satellite vs the main peak
+# A +A product and a genuine minor allele one base downstream are close to
+# indistinguishable on position and height alone: _shoulders() must pick one,
+# and it currently always picks "+A", which drops the peak from clusters() and
+# makes clust_frac() report 0.0.  A heterozygote then reads as a homozygote
+# with no indication that anything was ambiguous -- the most damaging kind of
+# wrong.
+#
+# The honest fix is not a better threshold (that needs a plate of known
+# minor-allele hets to calibrate against, and a synthetic attempt regressed a
+# genuine +A case) but to stop hiding the ambiguity.  Above this height
+# fraction the tag is recorded as "could be a minor allele" so the caller can
+# raise an uncertain instead of reporting a confident 0.0.
+#
+# 0.15 is NOT calibrated against known minor alleles -- it has never been
+# tested against a plate of them, because none was available.  It is set from
+# two facts: a genuine 50% minor allele one spacing from its parent measures
+# only ~0.22 of that parent here, because the two peaks overlap badly and
+# _sat_height reads the local valley, not the apex; and typical +A tails run
+# 0.05-0.15.  So 0.15 sits above ordinary +A while still catching a minor allele
+# of roughly 30% or more.  Expect to revise it once real minor-allele samples
+# are available, and treat any flag it raises as "look at this", not as a call.
+SATELLITE_AMBIGUOUS_FRAC = 0.15
 MIN_PEAK_FRAC = 0.05       # peak candidates must stand off the segment floor
 VALLEY_CAP = 1.5           # hard bound on how far a peak's area may reach, in x
                            # spacings, and the same reach as the heterozygote
@@ -65,6 +87,103 @@ PEAK_FINDERS = [
 
 class _Record(dict):
     """One picked peak. Writable dict so rows feed straight into export."""
+
+
+# --------------------------------------------------------------------------- #
+# rs1695 internal-standard detection
+# --------------------------------------------------------------------------- #
+# On a CTC-CE run the internal standard is always present as four equimolar
+# peaks, so it can be found without the click-pick dance that ``mark_std``
+# otherwise needs.  The geometry is fixed by the chemistry: the two homoduplexes
+# are one SNP base apart, the heteroduplexes are one mismatch base from
+# Watson/Crick re-annealing, so d1 ~ d3 and d2 is roughly 2.5x either.
+#
+# The equimolar prior matters as much as the spacing.  Requiring the weakest of
+# the four to be at least 40% of the strongest is what keeps an arbitrary run of
+# four peaks from being read as a standard.
+IS_MIN_SPACING = 25.0        # scans; d1 and d3 (one SNP base)
+IS_OUTER_TOL = 0.75          # |d1 - d3| <= this * dm
+IS_MID_LO, IS_MID_HI = 1.7, 3.3   # d2, in units of dm
+IS_EQUIMOLAR_MIN = 0.40      # min(height) / max(height) across the four
+IS_PROMINENCE_FRAC = 0.010
+IS_HEIGHT_FRAC = 0.020
+IS_SAT_SKIP = (10, 32)       # a +A tail sits this many scans behind its parent
+IS_SAT_RATIO = 1.15
+IS_MAX_CANDIDATES = 60       # keep the O(n^4) search bounded
+
+
+def acgt_index_for_channel(base_order: str, channel: int) -> int:
+    """Column of ``doc.acgt`` holding MegaBACE *channel* (1-based).
+
+    ``doc.acgt`` is always in ACGT order, but the physical channel order is the
+    plate's dye order -- "ACTG" on a MegaBACE, so Ch1=A, Ch2=C, Ch3=T, Ch4=G.
+    Getting this backwards is easy and silently swaps the sample and standard
+    channels, so route every channel lookup through here.
+    """
+    order = (base_order or "ACTG").upper()
+    if len(order) != 4 or set(order) != set("ACGT"):
+        raise ValueError(f"Unexpected base_order {base_order!r}")
+    if not 1 <= channel <= 4:
+        raise ValueError(f"Channel must be 1..4, got {channel!r}")
+    return "ACGT".index(order[channel - 1])
+
+
+def _is_candidates(trace, cut=1900):
+    """Despiked, baseline-corrected peak candidates of the standard channel."""
+    from scipy.signal import find_peaks, medfilt, savgol_filter
+    y = savgol_filter(medfilt(np.asarray(trace, float), 5), 9, 2, mode="interp")
+    y = y - float(np.median(y[:400]))            # baseline before prominence
+    mx = float(y.max())
+    if mx <= 0:
+        return []
+    p, props = find_peaks(y, prominence=mx * IS_PROMINENCE_FRAC,
+                          height=mx * IS_HEIGHT_FRAC)
+    base = float(np.median(y[:400]))
+    cands = [(int(i), float(y[i] - base),
+              float(props["prominences"][k]))
+             for k, i in enumerate(p) if i >= cut]
+    # A +A tail is always shorter than and close behind its parent peak; drop it
+    # so it cannot stand in for a real member of the quartet.
+    kept = []
+    for x, h, prom in sorted(cands, key=lambda c: -c[1]):
+        if any(IS_SAT_SKIP[0] <= x - kx <= IS_SAT_SKIP[1] and kh > IS_SAT_RATIO * h
+               for kx, kh, _ in kept):
+            continue
+        kept.append((x, h, prom))
+    return sorted(kept, key=lambda c: c[0])[:IS_MAX_CANDIDATES]
+
+
+def find_is_quartet(trace, cut=1900):
+    """Locate the four internal-standard peaks, or ``None``.
+
+    *trace* is one channel's samples.  Returns ``(peaks, heights)`` where
+    *peaks* are the four scan positions in ascending order, chosen as the
+    highest-prominence candidate quartet that satisfies the geometry.  Found in
+    96/96 wells of the T9 rs1695 plate.
+    """
+    from itertools import combinations
+    pk = _is_candidates(trace, cut)
+    if len(pk) < 4:
+        return None
+    best = None
+    for combo in combinations(range(len(pk)), 4):
+        a, b, c, d = (pk[i] for i in combo)
+        d1, d2, d3 = b[0] - a[0], c[0] - b[0], d[0] - c[0]
+        if d1 < IS_MIN_SPACING or d3 < IS_MIN_SPACING:
+            continue
+        dm = (d1 + d3) / 2.0
+        if abs(d1 - d3) > IS_OUTER_TOL * dm or not (IS_MID_LO * dm <= d2 <= IS_MID_HI * dm):
+            continue
+        heights = [a[1], b[1], c[1], d[1]]
+        lo, hi = min(heights), max(heights)
+        if lo <= 0 or lo / hi < IS_EQUIMOLAR_MIN:
+            continue
+        score = sum((a[2], b[2], c[2], d[2]))
+        if best is None or score > best[0]:
+            best = (score, [a[0], b[0], c[0], d[0]], heights)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 class PeakPicker:
@@ -163,14 +282,15 @@ class PeakPicker:
         )
         if self.include_sh:
             for sib in self._shoulders(best, radius):
-                rec2 = _Record(
+                # Copy the detector's fields wholesale, then add the picker's
+                # own.  Listing them one by one used to drop any field the
+                # detector added later, which silently discarded the
+                # satellite's ambiguity flag.
+                rec2 = _Record(sib)
+                rec2.update(
                     file=str(self.path), well=self.doc.well,
                     scan=sib["apex"], channel=sib["col"] + 1,
-                    base=CHANNEL_ORDER[sib["col"]], kind=sib["kind"],
-                    height=sib["height"], area=sib["area"],
-                    left=sib["left"], right=sib["right"], color=sib["color"],
-                    col=sib["col"], onset=sib.get("onset", sib["left"]),
-                    end=sib.get("end", sib["right"]),
+                    base=CHANNEL_ORDER[sib["col"]],
                     gid=self._gid,
                 )
                 self.records.append(rec2)
@@ -429,11 +549,22 @@ class PeakPicker:
         if hgt <= 0 or area <= 0:
             return out
         onset, end = self._onset_end(main["col"], x, left, right)
+        ambiguous = (main["height"] > 0
+                     and hgt >= SATELLITE_AMBIGUOUS_FRAC * main["height"])
         out.append({"apex": x, "left": left, "right": right,
                     "onset": onset, "end": end,
                     "area": area, "height": hgt,
                     "col": main["col"], "color": main["color"],
-                    "kind": "+A"})
+                    "kind": "+A",
+                    "ambiguous": ambiguous,
+                    # Record which main this shadows.  The scorer needs it to
+                    # attach the ambiguity flag to the right call, and the
+                    # nearest-main search is no use here: a satellite sits up
+                    # to ~1.6 spacings out, which is outside the allelic
+                    # window, so it would find nothing and drop the flag.
+                    "parent_scan": int(main["apex"]),
+                    "height_frac": round(hgt / main["height"], 4)
+                    if main["height"] > 0 else None})
         return out
 
     def _window_peaks(self, col, lo, hi):
@@ -462,6 +593,33 @@ class PeakPicker:
         return float(max(6.0, self.doc.n_scans * 0.004))
 
     # ------------------------------------- internal-standard CTC-CE duplexes
+    def auto_mark_std(self, channel=3, cut=1900):
+        """Find the internal standard automatically and mark it as the duplex set.
+
+        The CTC-CE standard is always present, so on a real run there is no need
+        to click the four peaks by hand.  *channel* is the physical MegaBACE
+        channel (3 = the T channel on a standard "ACTG" plate); it is translated
+        to an ``acgt`` column here, because the two orderings differ and
+        confusing them silently swaps sample and standard.
+
+        Returns the same message :meth:`mark_std` returns, or raises ValueError
+        when no quartet is present (in which case the caller should fall back to
+        clicking).
+        """
+        col = acgt_index_for_channel(getattr(self.doc, "base_order", "ACTG"),
+                                     channel)
+        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        found = find_is_quartet(y, cut=cut)
+        if found is None:
+            raise ValueError(
+                f"No internal-standard quartet on channel {channel}; "
+                "pick the standard peaks by hand.")
+        scans, _heights = found
+        self.std = [(x, n) for x, n in zip(scans, ["HOM1", "HOM2", "HET1", "HET2"])]
+        self.length_bp = None
+        return "Standard set: " + ", ".join(f"{n}@{x}" for x, n in self.std) \
+            + "  (auto)"
+
     def mark_std(self, length_bp=None):
         """Tag the standard mains (scan order) as the four CTC-CE duplexes:
         HOM1, HOM2 (homoduplexes, one rs SNP base apart), HET1, HET2
@@ -574,10 +732,24 @@ class PeakPicker:
                 "area_Vscan": round(r["area"], 3),
                 "duplex": self.duplex_of(r),
                 "length_bp": self.length_bp,
+                "ambiguous": bool(r.get("ambiguous")),
+                "parent_scan": r.get("parent_scan", ""),
+                "height_frac": r.get("height_frac", ""),
                 "fraction": round(self.clust_frac(r), 4)
                 if r["kind"] == "main" else "",
             })
         return rows
+
+    def ambiguous_satellites(self):
+        """Satellites tall enough that they may really be a minor allele.
+
+        These are the positions where a heterozygote can be silently reported
+        as a homozygote: the peak is tagged ``+A`` so ``clusters()`` never sees
+        it and ``clust_frac()`` returns 0.0.  Callers should treat any position
+        near one of these as unresolved rather than confident.
+        """
+        return [r for r in self.records
+                if r.get("kind") == "+A" and r.get("ambiguous")]
 
     # ---------------------------------------------------------------- overlay
     def plot_overlay(self, ax):

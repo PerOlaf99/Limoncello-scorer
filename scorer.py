@@ -63,7 +63,7 @@ CONFIDENCE_NOTE = (
     "smallest).  It is not a calibrated probability."
 )
 
-CALLS = ("hom-major", "het", "uncertain", "no-call")
+CALLS = ("hom-major", "hom-1", "hom-2", "het", "uncertain", "no-call")
 
 # genotyping.export_rows() names the peak size columns height_V / area_Vscan;
 # hand-made training tables often just say height / area.  Accept both, plus
@@ -107,6 +107,22 @@ def _norm_key(row) -> tuple:
 
 def is_main(row) -> bool:
     return str(row.get("kind", "main")).lower() in ("main", "")
+
+
+def has_ambiguous_satellite(cluster: Iterable) -> bool:
+    """True when a ``+A`` in this cluster may really be a minor allele.
+
+    ``genotyping._shoulders`` must tag a trailing same-channel peak as either
+    ``+A`` or a second main, and a heterozygote's minor allele one base
+    downstream is the case it gets wrong: tagged ``+A`` it is excluded from
+    ``group_alleles``, so the position scores as a confident homozygote with
+    fraction 0.0.  When the peak is a substantial fraction of its parent the
+    picker records that, and the only honest answer is "unresolved".
+    """
+    for rec in cluster:
+        if not is_main(rec) and rec.get("ambiguous"):
+            return True
+    return False
 
 
 def median_peak_spacing(rows: Iterable) -> float:
@@ -248,6 +264,23 @@ def score_rows(rows: List[dict]) -> List[dict]:
         return best if (best is not None and best_d is not None
                         and best_d <= allele_window(spacing)) else None
 
+    def satellite_parent(rec):
+        """The main peak a satellite shadows, from the picker's own record.
+
+        A satellite sits up to ~1.6 spacings behind its parent, which is
+        outside the allelic window ``nearest_main`` uses, so the search finds
+        nothing and the ambiguity flag would be dropped.  The picker records
+        the parent exactly, so prefer that and only fall back for rows
+        exported by an older ``genotyping``.
+        """
+        parent = rec.get("parent_scan")
+        if parent not in (None, ""):
+            for m, mkey, mscan in mains:
+                if (mkey == _norm_key(rec)
+                        and mscan == _num(parent)):
+                    return m
+        return nearest_main(rec)
+
     out = []
     for r in rows:
         rec = dict(r)
@@ -262,6 +295,23 @@ def score_rows(rows: List[dict]) -> List[dict]:
             rec["confidence"] = conf
             rec["minor_fraction"] = ""
         out.append(rec)
+
+    # An ambiguous satellite cannot be scored on its own -- it was excluded from
+    # the cluster -- so it downgrades the main peak it shadows.  Doing it here
+    # rather than in genotype_call keeps the cluster functions pure.
+    for rec, donor in ((r, satellite_parent(r)) for r in rows
+                       if not is_main(r)):
+        if rec.get("ambiguous") and donor is not None:
+            for scored in out:
+                if scored is rec:
+                    continue
+                if (is_main(scored) and _norm_key(scored) == _norm_key(donor)
+                        and _num(scored.get("scan")) == _num(donor.get("scan"))):
+                    if scored["call"] in ("het", "hom-major", "hom-1", "hom-2"):
+                        scored["call"] = "uncertain"
+                        scored["confidence"] = 0.0
+                        scored["ambiguous_reason"] = \
+                            "satellite may be a minor allele"
     return out
 
 
@@ -277,7 +327,10 @@ def well_summary(rows: List[dict]) -> dict:
         calls = [r["call"] for r in positions if r["call"] in ("het", "hom-major")]
         n_het = sum(1 for c in calls if c == "het")
         n_hom = sum(1 for c in calls if c == "hom-major")
-        if calls and n_het and n_hom:
+        n_uncertain = sum(1 for r in positions if r["call"] == "uncertain")
+        if n_uncertain and not (n_het or n_hom):
+            overall = "uncertain"
+        elif calls and n_het and n_hom:
             overall = "mixed"
         elif n_het:
             overall = "het"
@@ -291,11 +344,103 @@ def well_summary(rows: List[dict]) -> dict:
                  if genotype_call(cl) in ("het", "hom-major")]
         out.append({
             "file": file, "well": well, "n_peaks": len(positions),
-            "n_het": n_het, "n_hom": n_hom, "genotype": overall,
+            "n_het": n_het, "n_hom": n_hom, "n_uncertain": n_uncertain,
+            "genotype": overall,
             "mean_confidence": round(statistics.mean(confs), 1) if confs else 0.0,
             "mean_minor_fraction": round(statistics.mean(fracs), 4) if fracs else 0.0,
         })
     return out
+
+
+# --------------------------------------------------------------------------- #
+# rs1695 / CTC-CE positions
+# --------------------------------------------------------------------------- #
+# Heterozygosity rests on the *heteroduplex* peaks, not on the ratio of the two
+# homoduplexes.  Heteroduplex only forms when two mismatched strands re-anneal,
+# so its presence is direct proof of heterozygosity.  A homoduplex ratio cannot
+# make that distinction: a severe allelic imbalance looks exactly like a
+# homozygote.  Measured on the 96-well T9 rs1695 plate, gating on the ratio
+# miscalls in both directions -- A12/G09/G10 are hets with big H2 that read as
+# homo2, while E03/G03 are homo1 whose minor peak drags the ratio to ~0.82.
+#
+# The call therefore needs BOTH heteroduplexes clearly present and comparable.
+# A one-sided heteroduplex is an artifact (stutter, or a partially re-annealed
+# duplex) and is deliberately not read as evidence of heterozygosity -- B12 is
+# a clean homo2 with a 119/24 sigma one-sided tail.
+#
+# T9_MIN_HET_SIGMA and T9_HET_RATIO_MIN are load-bearing.  They were fitted on
+# the plate and G09 sits in a genuine dead zone: C07 outranks it on both
+# measures (27.4/29.1 sigma, ratio 0.94) yet is a real homo2, so no cutoff
+# separates the two.  Relaxing T9_MIN_HET_SIGMA to catch G09 costs 7 correctly
+# called homozygotes.
+T9_MIN_HET_SIGMA = 30.0        # each heteroduplex must clear this, in sigmas
+T9_HET_RATIO_MIN = 0.5         # min/max of the two heteroduplexes
+T9_MIN_DOMINANT_SIGMA = 40.0   # a well below this everywhere is no-call
+T9_MIN_TOTAL_AREA = 3000.0
+T9_AI_DEVIATION = 0.25         # a het outside f1 in (0.25, 0.75) is AI
+
+
+def t9_allele_fraction(hom1, hom2, het1, het2) -> float:
+    """A (variant) fraction of one rs1695 position.
+
+    Each heteroduplex is one A strand and one G strand, so half of its area
+    belongs to A.  Returns 0.0 when the position carries no sample.
+    """
+    total = hom1 + hom2 + het1 + het2
+    if total <= 0:
+        return 0.0
+    return (hom1 + 0.5 * (het1 + het2)) / total
+
+
+def t9_call(hom1, hom2, het1, het2, sigmas=None) -> tuple:
+    """Genotype for one rs1695 position -> ``(call, fraction, flags)``.
+
+    *sigmas* is the optional ``(hom1, hom2, het1, het2)`` peak significance
+    above the trace noise.  When given it drives the detection thresholds; when
+    omitted the call rests on areas alone, which is all a hand-built peak table
+    carries.
+
+    ``call`` is one of ``CALLS``.  ``flags`` is a set and may contain ``"ai"``
+    for a heterozygote far off 50/50.
+    """
+    sigmas = tuple(sigmas or ())
+    dom = max(sigmas) if len(sigmas) == 4 else None
+    total = hom1 + hom2 + het1 + het2
+    s3, s4 = (sigmas[2], sigmas[3]) if len(sigmas) == 4 else (None, None)
+    lo, hi = (min(s3, s4), max(s3, s4)) if s3 is not None else (None, None)
+
+    # A well with no usable sample is a no-call, not a homozygote.
+    if dom is not None and dom < T9_MIN_DOMINANT_SIGMA:
+        return "no-call", 0.0, set()
+    if dom is None and total < T9_MIN_TOTAL_AREA:
+        return "no-call", 0.0, set()
+
+    frac = t9_allele_fraction(hom1, hom2, het1, het2)
+    flags = set()
+
+    # Het needs both heteroduplexes, present and comparable.
+    if s3 is not None:
+        both_present = (lo >= T9_MIN_HET_SIGMA and hi > 0
+                        and lo / hi >= T9_HET_RATIO_MIN)
+    else:
+        # No significance available: fall back to the two heteroduplex areas
+        # being comparable to each other, which is the same idea on the scale a
+        # peak table actually carries.
+        both_present = het1 > 0 and het2 > 0 and min(het1, het2) / max(het1, het2) \
+            >= T9_HET_RATIO_MIN
+
+    if both_present:
+        if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
+            flags.add("ai")
+        return "het", frac, flags
+
+    # Homozygote: the labelled homoduplex says which allele, so unlike the
+    # generic path this can distinguish the two homozygotes.
+    if hom1 > 0 and (hom2 <= 0 or hom1 >= hom2):
+        return "hom-1", frac, flags
+    if hom2 > 0:
+        return "hom-2", frac, flags
+    return "no-call", 0.0, flags
 
 
 # --------------------------------------------------------------------------- #
