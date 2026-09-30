@@ -251,6 +251,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.pick_tree = None
         self._gen_sh = tk.BooleanVar(value=True)
         self._gen_d2 = tk.BooleanVar(value=True)
+        # The two pick modes are radio buttons in effect: at most one can own
+        # the canvas, and the menu shows which one is live.
+        self._mode_pick = tk.BooleanVar(value=False)
+        self._mode_area = tk.BooleanVar(value=False)
 
         # Shared X/Y view, stored as [first, last] fractions of the full data
         # range. One model drives every visible graph plus the axis bars.
@@ -434,10 +438,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         basecall_m.add_command(label="Clear base calls (undo)", command=self.clear_basecalls)
 
         genotyping_m = tk.Menu(self, tearoff=0)
-        genotyping_m.add_command(label="Manual peak picking…",
-                                 command=self.toggle_genotyping_picking)
-        genotyping_m.add_command(label="Peak area by drag…",
-                                 command=self.toggle_area_picking)
+        genotyping_m.add_checkbutton(label="Manual peak picking…",
+                                     variable=self._mode_pick,
+                                     command=self.toggle_genotyping_picking)
+        genotyping_m.add_checkbutton(label="Peak area by drag…",
+                                     variable=self._mode_area,
+                                     command=self.toggle_area_picking)
         genotyping_m.add_separator()
         genotyping_m.add_checkbutton(
             label="Add +A (A-addition) peak",
@@ -1298,6 +1304,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if self.genotyping_active:
             self.exit_genotyping_picking()     # switching between the two modes
         self.area_mode = False
+        self._mode_pick.set(True)
+        self._mode_area.set(False)
         self.seq_text.pack_forget()
         self.seq_hdr.config(text="Picked peaks")
         self._build_pick_table()
@@ -1329,6 +1337,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if self.genotyping_active:
             self.exit_genotyping_picking()
         self.area_mode = True
+        self._mode_area.set(True)
+        self._mode_pick.set(False)
         self.seq_text.pack_forget()
         self.seq_hdr.config(text="Measured areas")
         self._build_pick_table(area=True)
@@ -1368,6 +1378,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.pick_tree = None
         self.genotyping_active = False
         self.area_mode = False
+        self._mode_pick.set(False)
+        self._mode_area.set(False)
         self.seq_hdr.config(text="Called sequence")
         self.seq_text.pack(fill=tk.X, padx=4, pady=2)
         self.status_var.set("Back to the trace viewer.")
@@ -2950,6 +2962,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    that subplot's corner: the scan under the pointer, its\n"
                "    voltage, and the dominant peak within one base on any visible\n"
                "    channel, marked [picked] once you have it.\n"
+"  Peak area by drag…  is the same mode with the automation switched off,\n"
+               "  for when you want to say where a peak starts and ends yourself.\n"
+               "  Hold the left button and drag between the two points, and the\n"
+               "  straight line between them becomes the baseline: the area above\n"
+               "  it is what gets measured, exactly as drawn.  A dashed baseline and\n"
+               "  a live ‘mid … area V·scan’ readout follow the pointer; release\n"
+               "  to record.  Dragging right-to-left works, and nothing is detected,\n"
+               "  so there is no finder, no internal standard to mark and no +A\n"
+               "  tagging.  The table becomes run / well / ch / start / stop / mid /\n"
+               "  h V / area.\n"
+"  •  Use it when the peak is crowded, overlapping or not peak-shaped, or\n"
+               "    when you want the area over a span the automatic valleys would\n"
+               "    not choose.  Use Manual peak picking when the trace is clean and\n"
+               "    you would rather not have to place anything by hand.\n"
+"  •  The two are radio buttons in effect — the tick in the Genotyping menu\n"
+               "    shows which mode is live, ticking one switches to it, and\n"
+               "    unticking returns to the normal trace viewer.  Both page the batch,\n"
+               "    and Undo / Clear / Save work the same way in either.\n"
                "  •  The picked-peaks table is sorted by scan (then channel) per\n"
                "    well, whatever order you clicked in; Undo last pick still\n"
                "    removes the most recent click.\n"

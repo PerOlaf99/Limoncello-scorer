@@ -274,9 +274,14 @@ class _Ev:
 class _Status:
     def __init__(self):
         self.msgs = []
+        self.text = ""
 
     def set(self, msg):
         self.msgs.append(msg)
+
+    def config(self, **kw):          # stands in for a ttk.Label header
+        if "text" in kw:
+            self.text = kw["text"]
 
 
 class _Canvas:
@@ -288,6 +293,21 @@ class _Canvas:
 
     def mpl_disconnect(self, cid):
         pass
+
+    def pack_forget(self):
+        pass
+
+    def pack(self, **kw):
+        pass
+
+    def destroy(self):
+        pass
+
+    def mpl_connect(self, event, cb):
+        self.ids = getattr(self, "ids", 0) + 1
+        self.connected = getattr(self, "connected", [])
+        self.connected.append((event, cb))
+        return self.ids
 
 
 class _Stub:
@@ -522,3 +542,95 @@ def test_motion_drives_the_preview_without_a_full_redraw():
     assert st.redraws == 0                  # preview artists, not a rebuild
     _ax, line, _l, right, _a = st._area_cursors[0]
     assert list(right.get_xdata()) == [4, 4]
+
+
+class _Var:
+    """Stands in for a tk.BooleanVar: .get() reports the current flag."""
+
+    def __init__(self):
+        self.v = False
+
+    def set(self, value):
+        self.v = bool(value)
+
+    def get(self):
+        return self.v
+
+
+def _mode_stub():
+    """Bind the real mode handlers to a stub carrying the few attributes they
+    touch, so the menu indicators can be watched across real transitions."""
+    s = _Stub(HUMP, area_mode=False, active=False)
+    s._mode_pick = _Var()
+    s._mode_area = _Var()
+    s.seq_hdr = _Status()
+    s.seq_text = _Canvas()
+    s.selected = [RUN]          # the "pick some wells first" guard
+    s.pick_table = None
+    s._build_pick_table = lambda area=False: None
+    for name in ("enter_genotyping_picking", "enter_area_picking",
+                 "exit_genotyping_picking", "toggle_genotyping_picking",
+                 "toggle_area_picking", "_on_gen_pick", "_on_gen_motion",
+                 "_on_area_release"):
+        setattr(s, name, getattr(sa.LimoncelloAnalyzerApp, name).__get__(s))
+    return s
+
+
+def _indicators(s):
+    return s._mode_pick.get(), s._mode_area.get()
+
+
+def test_neither_mode_is_active_before_anything_is_chosen():
+    assert _indicators(_mode_stub()) == (False, False)
+
+
+def test_entering_peak_picking_ticks_only_its_own_box():
+    s = _mode_stub()
+    s.enter_genotyping_picking()
+    assert _indicators(s) == (True, False)
+    assert s.area_mode is False
+
+
+def test_entering_drag_mode_ticks_only_its_own_box():
+    s = _mode_stub()
+    s.enter_area_picking()
+    assert _indicators(s) == (False, True)
+    assert s.area_mode is True
+
+
+def test_the_two_modes_can_never_both_be_ticked():
+    s = _mode_stub()
+    for step in (s.toggle_genotyping_picking, s.toggle_area_picking,
+                 s.toggle_area_picking, s.toggle_genotyping_picking,
+                 s.toggle_genotyping_picking, s.toggle_area_picking,
+                 s.exit_genotyping_picking):
+        step()
+        assert sum(_indicators(s)) <= 1, (step, _indicators(s))
+
+
+def test_switching_modes_leaves_the_old_one_unticked():
+    s = _mode_stub()
+    s.toggle_genotyping_picking()
+    assert _indicators(s) == (True, False)
+    s.toggle_area_picking()          # ask for drag while picking
+    assert _indicators(s) == (False, True)
+    assert s.seq_hdr.text == "Measured areas"   # the mode really did switch
+    s.toggle_genotyping_picking()    # and back again
+    assert _indicators(s) == (True, False)
+    assert s.seq_hdr.text == "Picked peaks"
+
+
+def test_unticking_the_live_mode_returns_to_the_plain_viewer():
+    s = _mode_stub()
+    s.toggle_area_picking()
+    assert _indicators(s) == (False, True)
+    s.toggle_area_picking()          # same one clicked a second time
+    assert _indicators(s) == (False, False)
+    assert s.genotyping_active is False and s.area_mode is False
+
+
+def test_exiting_clears_both_boxes():
+    s = _mode_stub()
+    s.toggle_genotyping_picking()
+    s.exit_genotyping_picking()
+    assert _indicators(s) == (False, False)
