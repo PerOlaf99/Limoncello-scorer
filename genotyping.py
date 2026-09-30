@@ -374,6 +374,17 @@ class PeakPicker:
         b = min(n, imin + pad + 1)
         return a + int(np.argmin(y[a:b]))    # snap onto the raw samples
 
+    def _sat_height(self, y, x, r):
+        """Height of the candidate satellite at scan x above its own two
+        local minima, matching how ``_numeric_peak`` measures a main peak's
+        height.  Comparing this against ``main["height"]`` puts both numbers on
+        the same scale, unlike the raw window value."""
+        left = int(np.argmin(y[max(0, x - r): x + 1])) + max(0, x - r)
+        right = int(np.argmin(y[x: min(y.size, x + r + 1)])) + x
+        if right <= left:
+            return 0.0
+        return float(y[x] - max(y[left], y[right]))
+
     def _shoulders(self, main, radius):
         """Tag the strongest TRAILING satellite: the +A polymerase A-addition
         product, found within ~(0.4–1.6) x one repeat (~one base) after the
@@ -390,7 +401,15 @@ class PeakPicker:
         out = []
         a, b = (main["apex"] + sp * 0.4, main["apex"] + sp * 1.6)
         lo, hi = (int(min(a, b)), int(max(a, b)))
+        r = max(2, int(round(sp * 0.20)))
         cands = self._window_peaks(main["col"], lo, hi)
+        # Compare like with like: a satellite's height has to be measured above
+        # its own local baseline, the same way ``main["height"]`` is.  The raw
+        # window value is an absolute voltage, so on a trace whose baseline sits
+        # well above zero it reads far taller than it is -- the old filter then
+        # rejected almost every real satellite (their ratio came out > 1) while
+        # letting a genuine minor allele through as if it were a +A tail.
+        cands = [(x, self._sat_height(y, x, r)) for x, _h in cands]
         cands = [(x, h) for x, h in cands
                  if SATELLITE_FRAC * main["height"] <= h
                  <= 0.9 * main["height"]]
@@ -399,7 +418,6 @@ class PeakPicker:
         x, h = max(cands, key=lambda c: c[1])
         if x <= main["apex"] + 2:                  # must trail the main
             return out
-        r = max(2, int(round(sp * 0.20)))
         left = int(np.argmin(y[max(0, x - r): x + 1])) + max(0, x - r)
         right = int(np.argmin(y[x: min(n, x + r + 1)])) + x
         if right <= left:
