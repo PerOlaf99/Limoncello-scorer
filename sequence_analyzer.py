@@ -659,7 +659,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
             command=lambda: (self._sync_current_btn(), self.redraw()))
         self._cur_btn.pack(side=tk.LEFT, padx=(8, 2))
         self._sync_current_btn()
-        ttk.Label(chan_bar, text="   Signal: Volts").pack(side=tk.LEFT, padx=4)
         self._time_btn = tk.Checkbutton(
             chan_bar, text="  Time (min)  ", variable=self.x_time,
             bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
