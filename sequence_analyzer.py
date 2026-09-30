@@ -637,8 +637,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         chan_bar.pack(fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(chan_bar, text="Channels:").pack(side=tk.LEFT)
         self._chan_cbs = []
-        self._chan_cb_cols = []
         for i in range(len(CHANNEL_ORDER)):
+            # widget i drives chan_show[i], and chan_show is indexed by
+            # physical channel -- so widget i IS Ch i+1 and the widgets are
+            # already in order.  Only the label needs the dye order.
             cb = tk.Checkbutton(
                 chan_bar, text=f"  Ch{i + 1} {CHANNEL_ORDER[i]}  ", variable=self.chan_show[i],
                 command=self._chan_changed, bg="#F2F4F7",
@@ -646,7 +648,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
             self._chan_cbs.append(cb)
-            self._chan_cb_cols.append(i)
         # the bar starts out indexed A,C,G,T; relabel to the run's dye order
         self._refresh_channel_labels()
         self.base_order_var.trace_add("write", self._on_base_order_changed)
@@ -2036,29 +2037,32 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._gen_pickers = {}
         self.redraw()
 
+    def channel_bar_order(self, order=None):
+        """The channel checkboxes as (channel, label), left to right.
+
+        Widget k drives chan_show[k], and chan_show is indexed by *physical
+        channel*, so widget k is already Ch k+1 and the widgets are already in
+        the right order.  The only thing that was ever wrong is the label: it
+        was keyed off the matrix column the widget was born with rather than
+        off the channel, which is what put "Ch4" to the left of "Ch3".  So this
+        relabels in place and never re-packs -- the checkboxes share their
+        parent with side=RIGHT siblings, and re-packing them would move the
+        whole group to the end of the toolbar, away from its "Channels:"
+        label.  Free of Tk so it can be tested.
+        """
+        order = (order or self.base_order_var.get() or "ACTG").upper()[:4]
+        return [(ci, f"  Ch{ci + 1} {order[ci]}  ")
+                for ci in range(min(len(order), len(CHANNEL_ORDER)))]
+
     def _refresh_channel_labels(self):
-        """Relabel the channel checkboxes to the run's dye order and re-pack
-        them in physical order, so the bar reads Ch1..Ch4 left to right and
-        agrees with the legend (Ch1 = the first dye in base order, not A)."""
-        col2chan = self._col_to_chan()
-        items = list(zip(getattr(self, "_chan_cbs", []),
-                         getattr(self, "_chan_cb_cols", [])))
-        placed = []
-        for cb, col in items:
-            ci = col2chan.get(col)
-            if ci is None:
-                continue
-            try:
-                cb.config(text=f"  Ch{ci + 1} {CHANNEL_ORDER[col]}  ")
-                placed.append((ci, cb))
-            except Exception:
-                pass
-        for _ci, cb in sorted(placed, key=lambda t: t[0]):
-            try:
-                cb.pack_forget()
-                cb.pack(side=tk.LEFT, padx=2)
-            except Exception:
-                pass
+        """Relabel the channel checkboxes to match the run's dye order."""
+        cbs = getattr(self, "_chan_cbs", [])
+        for ci, text in self.channel_bar_order():
+            if ci < len(cbs):
+                try:
+                    cbs[ci].config(text=text)
+                except Exception:
+                    pass
 
     def _chan_changed(self):
         """Channel on/off toggles refresh the viewer (and the picked-peak
@@ -2172,7 +2176,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         add("Source", f"{doc.source} — {doc.meta}")
         add("Scans", f"{doc.n_scans}  ({doc.n_scans / SCAN_RATE_HZ / 60:.1f} min "
                      f"at {SCAN_RATE_HZ:.2f} Hz)")
-        add("Base order", doc.base_order)
+        add("Dye order (channels)", (self.base_order_var.get() or "ACTG").upper())
+        add("Column layout", doc.base_order)
         add("Basecaller", self.basecaller.get())
         if doc.sequence:
             n = len(doc.sequence)
@@ -2187,10 +2192,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
             add("Sequence", "not base-called yet")
         tr = doc.acgt
         if tr.size:
-            order = (doc.base_order or "ACTG").upper()
+            # Report per *channel*, not per matrix column: doc.base_order is
+            # the A,C,G,T matrix layout, so pairing it with tr[:, c] would
+            # label the columns as channels and disagree with the channel bar.
+            order = (self.base_order_var.get() or "ACTG").upper()[:4]
+            col2chan = self._col_to_chan(order)
             per = ", ".join(
-                f"Ch{c + 1} {b}={float(np.nanmax(tr[:, c])):.3f} V"
-                for c, b in enumerate(order[:4]))
+                f"Ch{ci + 1} {order[ci]}={float(np.nanmax(tr[:, col])):.3f} V"
+                for col, ci in sorted(col2chan.items(), key=lambda kv: kv[1]))
             add("Signal max (V)", per)
         cu = doc.current_ua
         if cu is not None and cu.size:
