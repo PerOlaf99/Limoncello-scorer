@@ -324,6 +324,9 @@ class _Stub:
         self._gen_active_path = None
         self._paths = [path]
         self.status_var = _Status()
+        self.chan_show = [_Var() for _ in range(4)]
+        for v in self.chan_show:
+            v.set(True)
         self.canvas = _Canvas()
         self.redraws = 0
         self.syncs = 0
@@ -336,7 +339,13 @@ class _Stub:
         key = str(Path(path).resolve())
         pk = self._area_pickers.get(key)
         if pk is None:
-            pk = g.DragAreaPicker(self._doc, path)
+            # Mirror the real app: the picker is handed the channel toggles, so
+            # a hidden channel is out of the measurement as well as the plot.
+            # Identity col->channel keeps the stub simple.
+            pk = g.DragAreaPicker(
+                self._doc, path,
+                show=lambda c: (self.chan_show[c].get()
+                                if c < len(self.chan_show) else True))
             self._area_pickers[key] = pk
         return pk
 
@@ -634,3 +643,33 @@ def test_exiting_clears_both_boxes():
     s.toggle_genotyping_picking()
     s.exit_genotyping_picking()
     assert _indicators(s) == (False, False)
+
+
+def test_all_channels_off_says_so_instead_of_blaming_the_baseline():
+    """With every channel hidden there is nothing to measure, and "nothing
+    rises above the baseline" would be a false explanation of that."""
+    acgt = _flat_trace([0, 0, 5, 5, 0, 0])
+    st = _Stub(acgt)
+    for v in st.chan_show:                          # every one off
+        v.set(False)
+    _driver(st)
+    st._on_gen_pick(_Ev(0))
+    st._on_area_release(_Ev(5))
+    assert st.records() == []
+    assert any("No channel is switched on" in m for m in st.status_var.msgs)
+    assert not any("Nothing rises" in m for m in st.status_var.msgs)
+
+
+def test_a_hidden_channel_cannot_be_measured():
+    """Hiding a channel removes it from the measurement as well as the plot,
+    so the drag falls back to the largest of the channels still switched on."""
+    acgt = _flat_trace([0, 0, 1, 1, 0, 0], col=1)      # C: small hump
+    acgt[:, 0] = [0, 0, 5, 5, 0, 0]                    # A: the big one
+    st = _Stub(acgt)
+    st.chan_show[0].set(False)                     # hide the tall one
+    _driver(st)
+    st._on_gen_pick(_Ev(0))
+    st._on_area_release(_Ev(5))
+    rows = st.records()
+    assert len(rows) == 1
+    assert rows[0]["base"] == "C", rows[0]   # column 1 is C in A,C,G,T

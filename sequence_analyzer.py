@@ -1642,9 +1642,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         rec = pk.add(a, b)
         if rec is None:
-            self.status_var.set(f"Nothing rises above the baseline between "
-                                f"those scans on {path.name} — try a wider or "
-                                f"better-placed span.")
+            # Two quite different reasons nothing came back, and "nothing rises
+            # above the baseline" is simply false when every channel is off.
+            if not any(v.get() for v in self.chan_show):
+                self.status_var.set(
+                    "No channel is switched on, so there is nothing to measure "
+                    f"on {path.name} — tick at least one in the Channels row.")
+            else:
+                self.status_var.set(f"Nothing rises above the baseline between "
+                                    f"those scans on {path.name} — try a wider "
+                                    f"or better-placed span.")
         else:
             self._gen_active_path = path
             self.status_var.set(
@@ -2984,6 +2991,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    when you want the area over a span the automatic valleys would\n"
                "    not choose.  Use Manual peak picking when the trace is clean and\n"
                "    you would rather not have to place anything by hand.\n"
+"  •  WHICH CHANNEL GETS MEASURED — the one carrying the largest area in\n"
+               "    your span, among the channels that are switched ON.  There is no\n"
+               "    channel picker: the peak you are pointing at is normally the big\n"
+               "    one, so the drag takes the big one.  The Channels row is how you\n"
+               "    choose -- switch off the internal standard and anything you are\n"
+               "    not measuring, and the drag takes the largest of what is left.\n"
+               "    Hiding a channel hides it from the picture AND from the\n"
+               "    measurement together, so what you can see is what gets measured.\n"
+               "    The channel used is named in the status line and written to the\n"
+               "    table's ch column.  Switching every channel off and then dragging\n"
+               "    says so, rather than pretending nothing rose above the baseline.\n"
+"  •  Typical use: a run has four channels but you only want the sample, so\n"
+               "    switch the standard off once and leave it off for the whole\n"
+               "    batch.  On the T9 DyeSet2 traces (Dye order ACTG) Ch3 is the T\n"
+               "    internal standard and Ch2 is the sample, so unticking Ch3 leaves\n"
+               "    you measuring sample peaks only.  Confirm what your run is --\n"
+               "    Comments ▸ Run info… prints the dye order and the per-channel\n"
+               "    signal, and the checkboxes are labelled Ch1..Ch4 in that order.\n"
 "  •  The two are radio buttons in effect — the tick in the Genotyping menu\n"
                "    shows which mode is live, ticking one switches to it, and\n"
                "    unticking returns to the normal trace viewer.  Both page the batch,\n"
