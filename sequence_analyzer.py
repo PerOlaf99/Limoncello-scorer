@@ -243,6 +243,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._area_drag = None
         self._area_cursors: list = []
         self._gen_active_path: Optional[Path] = None
+        # Auto-genotyping: which physical channel carries the internal
+        # standard and which carries the sample.  These are per-run assay
+        # roles, not dye names -- they start at the T9 kit's Ch3/Ch2 but the
+        # user can move them, and the pairing is checked before a single well
+        # is scored, because swapping them does not fail loudly: it scores the
+        # sample's own peaks as the standard and returns confident nonsense.
+        self._auto_is_channel = tk.IntVar(value=3)
+        self._auto_sample_channel = tk.IntVar(value=2)
+        self._auto_rows: list = []
+        self._auto_tree = None
         self._pick_cid = None
         self._gen_motion_cid = None
         self._area_release_cid = None
@@ -469,6 +479,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m.add_separator()
         genotyping_m.add_command(label="Exit peak picking",
                                  command=self.exit_genotyping_picking)
+
+        auto_m = tk.Menu(genotyping_m, tearoff=0)
+        auto_m.add_command(label="Auto-genotype selected wells…",
+                           command=self.auto_genotype_wells)
+        auto_m.add_command(label="Channel roles (standard / sample)…",
+                           command=self.auto_genotype_channels)
+        auto_m.add_separator()
+        auto_m.add_command(label="Save auto-genotype table…",
+                           command=self.auto_genotype_save)
+        genotyping_m.add_cascade(label="Auto-genotyping", menu=auto_m)
 
         help_m = tk.Menu(self, tearoff=0)
         help_m.add_command(label="User manual…", command=self.show_help)
@@ -1996,6 +2016,236 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_pick_table()
         self.redraw()
 
+    # ------------------------------------------------------- auto-genotyping
+    def _auto_targets(self):
+        """The wells to score: every selected well that has a file on disk."""
+        return [Path(p) for p in (self.selected or []) if Path(p).is_file()]
+
+    def auto_genotype_channels(self):
+        """Ask which physical channels carry the standard and the sample.
+
+        The engine needs to know which trace holds the internal-standard
+        quartet and which holds the sample's four duplexes.  That is a property
+        of the assay on the plate, not of the dye order, so it is asked for
+        explicitly rather than assumed.  The pairing is checked here, before
+        any well is scored: if the two land on the same acgt column the engine
+        would compare a channel against itself and every well would come back
+        "no standard quartet" for no visible reason.
+        """
+        win = tk.Toplevel(self)
+        win.title("Auto-genotyping — channel roles")
+        win.transient(self)
+        win.resizable(False, False)
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Which physical channel carries what on this run?\n"
+                 "The dye order only says which base sits on Ch1–Ch4; it "
+                 "does not\nsay which channel holds the standard.",
+            justify="left").grid(row=0, column=0, columnspan=2, sticky="w",
+                                 pady=(0, 10))
+        for row, (var, label) in enumerate(
+                ((self._auto_is_channel, "Internal-standard channel"),
+                 (self._auto_sample_channel, "Sample channel")), start=1):
+            text = f"{label} ({self._channel_label(var.get())}):"
+            ttk.Label(body, text=text).grid(row=row, column=0, sticky="w",
+                                             pady=3)
+            box = ttk.Combobox(body, textvariable=var, state="readonly",
+                               values=[1, 2, 3, 4], width=6)
+            box.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=3)
+            var.trace_add(
+                "write",
+                lambda var=var, row=row: self._auto_label_text(body, row, var))
+        self._auto_hint = ttk.Label(body, text="", foreground="#8A2A0A")
+        self._auto_hint.grid(row=3, column=0, columnspan=2, sticky="w",
+                             pady=(8, 0))
+        btns = ttk.Frame(body)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel",
+                   command=win.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="Save", command=self._auto_save_channels).pack(
+            side="right")
+
+        def check(*_a):
+            is_c = int(self._auto_is_channel.get())
+            sa_c = int(self._auto_sample_channel.get())
+            if is_c == sa_c:
+                self._auto_hint.config(
+                    text=f"Pick two different channels — Ch{is_c} cannot be "
+                         "both the standard and the sample.")
+            else:
+                self._auto_hint.config(text="")
+
+        self._auto_is_channel.trace_add("write", check)
+        self._auto_sample_channel.trace_add("write", check)
+        check()
+
+    def _auto_label_text(self, body, row, var):
+        """Keep each channel row's label showing the base that channel holds."""
+        labels = ("Internal-standard channel", "Sample channel")
+        name = labels[row - 1]
+        for w in body.winfo_children():
+            if isinstance(w, ttk.Label) and w.cget("text").startswith(name):
+                w.config(text=f"{name} ({self._channel_label(var.get())}):")
+                break
+
+    def _channel_label(self, channel):
+        """'Ch3 (T)' for the given physical channel, per the run's dye order."""
+        from genotyping import acgt_index_for_channel
+        try:
+            base = "ACGT"[acgt_index_for_channel(
+                self.base_order_var.get(), channel)]
+        except Exception:
+            base = "?"
+        return f"Ch{channel} ({base})"
+
+    def _auto_save_channels(self):
+        is_c = int(self._auto_is_channel.get())
+        sa_c = int(self._auto_sample_channel.get())
+        if is_c == sa_c:
+            messagebox.showerror(
+                "Auto-genotyping — channel roles",
+                f"Ch{is_c} is set as both the internal standard and the "
+                "sample.\n\nPick two different channels: the engine locates "
+                "the standard quartet\non one channel and measures the "
+                "sample's duplexes on another.")
+            return
+        for w in self.winfo_children():
+            if isinstance(w, tk.Toplevel) and w.title().startswith(
+                    "Auto-genotyping"):
+                w.destroy()
+        self.status_var.set(
+            f"Auto-genotyping: internal standard Ch{is_c}, sample Ch{sa_c} "
+            f"({self.base_order_var.get()}).")
+
+    def auto_genotype_wells(self):
+        """Score every selected well with no clicking, and show the results.
+
+        Progress goes to the status bar as it goes and the rows land in their
+        own table, separate from the manual pick/area table, so the two never
+        overwrite each other.
+        """
+        import genotyping
+        targets = self._auto_targets()
+        if not targets:
+            messagebox.showinfo(
+                "Auto-genotype selected wells",
+                "Select the wells to genotype in the list first.")
+            return
+        is_c = int(self._auto_is_channel.get())
+        sa_c = int(self._auto_sample_channel.get())
+        if is_c == sa_c:
+            messagebox.showerror(
+                "Auto-genotype selected wells",
+                f"Ch{is_c} is set as both the internal standard and the "
+                "sample.\n\nUse Genotyping ▸ Auto-genotyping ▸ Channel "
+                "roles to\npoint them at two different channels.")
+            return
+        base = self.base_order_var.get()
+        self._auto_rows = []
+        self.status_var.set(f"Auto-genotyping {len(targets)} wells…")
+        self.update_idletasks()
+        for i, path in enumerate(targets, start=1):
+            try:
+                doc = self._ensure_doc(path)
+            except Exception as e:            # unreadable file, not fatal
+                self._auto_rows.append(
+                    {"run": path.parent.name, "well": path.stem,
+                     "call": "no-call", "frac": 0.0, "flags": "load-error",
+                     "hom1": 0.0, "hom2": 0.0, "het1": 0.0, "het2": 0.0,
+                     "snr1": 0.0, "snr2": 0.0, "snr3": 0.0, "snr4": 0.0,
+                     "is_channel": is_c, "sample_channel": sa_c,
+                     "std_scans": "", "reason": str(e)})
+            else:
+                self._auto_rows.append(genotyping.auto_genotype(
+                    doc, is_channel=is_c, sample_channel=sa_c,
+                    base_order=base, cut=genotyping.DEFAULT_IS_CUT,
+                    run_name=path.parent.name))
+            if i % 8 == 0 or i == len(targets):
+                self.status_var.set(f"Auto-genotyping… {i}/{len(targets)}")
+                self.update_idletasks()
+        self._build_auto_table()
+        calls = {}
+        for r in self._auto_rows:
+            calls[r["call"]] = calls.get(r["call"], 0) + 1
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(calls.items()))
+        self.status_var.set(
+            f"Auto-genotyped {len(self._auto_rows)} wells "
+            f"(standard Ch{is_c}, sample Ch{sa_c}): {summary}.")
+        self.redraw()
+
+    def _build_auto_table(self):
+        """The auto-genotype results table, below the plot like the pick
+        table.  One row per well, no-call rows showing their reason."""
+        if self._auto_tree is not None:
+            try:
+                self._auto_tree.master.destroy()
+            except tk.TclError:
+                pass
+            self._auto_tree = None
+        cols = ("well", "call", "frac", "hom1", "hom2", "het1", "het2",
+                "snr1", "snr2", "snr3", "snr4", "flags", "reason")
+        tblf = ttk.Frame(self.center)
+        tblf.pack(fill=tk.X, padx=4, pady=2)
+        hdr = ttk.Label(self.center, text="Auto-genotype results")
+        hdr.pack(anchor="w", padx=4)
+        hdr.pack_forget()
+        self.pick_tree = None       # the pick table is not on screen in this mode
+        tree = ttk.Treeview(tblf, columns=cols, show="headings", height=8)
+        widths = {"well": 56, "call": 74, "frac": 48, "hom1": 56, "hom2": 56,
+                  "het1": 56, "het2": 56, "snr1": 46, "snr2": 46, "snr3": 46,
+                  "snr4": 46, "flags": 90, "reason": 200}
+        left = ("well", "call", "flags", "reason")
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=widths[c],
+                        anchor="w" if c in left else "e",
+                        stretch=(c in ("reason", "flags")))
+        for r in self._auto_rows:
+            tree.insert("", tk.END, values=(
+                r.get("well", ""), r.get("call", ""),
+                f"{r.get('frac', 0.0):.3f}",
+                f"{r.get('hom1', 0.0):.0f}", f"{r.get('hom2', 0.0):.0f}",
+                f"{r.get('het1', 0.0):.0f}", f"{r.get('het2', 0.0):.0f}",
+                f"{r.get('snr1', 0.0):.0f}", f"{r.get('snr2', 0.0):.0f}",
+                f"{r.get('snr3', 0.0):.0f}", f"{r.get('snr4', 0.0):.0f}",
+                r.get("flags", ""), r.get("reason", "")))
+        vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self._auto_tree = tree
+        self._auto_table = tblf
+
+    def auto_genotype_save(self):
+        """Write the auto-genotype rows out through the shared save_table, so
+        they land in the same CSV/XLSX/JSON shapes as the manual pick table."""
+        if not self._auto_rows:
+            messagebox.showinfo(
+                "Save auto-genotype table",
+                "Run Genotyping ▸ Auto-genotyping ▸ Auto-genotype selected "
+                "wells\nfirst.")
+            return
+        from genotyping import save_table
+        types = [("CSV (Excel-compatible)", "*.csv"), ("JSON (ML)", "*.json")]
+        try:
+            import openpyxl  # noqa: F401
+            types.insert(1, ("Excel workbook (.xlsx)", "*.xlsx"))
+        except ImportError:
+            pass
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv",
+                                            filetypes=types)
+        if not path:
+            return
+        try:
+            save_table(Path(path), self._auto_rows)
+        except Exception as e:
+            messagebox.showerror("Save auto-genotype table", str(e))
+            return
+        self.status_var.set(f"Saved {len(self._auto_rows)} auto-genotype "
+                            f"rows to {Path(path).name}.")
+
     def _gen_save(self):
         if not self.genotyping_active:
             return
@@ -3061,6 +3311,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    Both stay blank until a position is tagged.  The peak count\n"
                "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
                "    3 = 1 + 2, 2 = 2 + 0.\n"
+               "  •  Auto-genotyping  —  Genotyping ▸ Auto-genotyping ▸ Auto-genotype\n"
+               "    selected wells… calls every selected well with no clicking:\n"
+               "    it finds the internal-standard quartet, measures the four\n"
+               "    sample duplexes, and returns a call per well.  Its own\n"
+               "    results table (well, call, frac, the four areas and their\n"
+               "    significances, flags and the reason for a no-call) sits below\n"
+               "    the plot and stays separate from the manual pick table, so\n"
+               "    the two never overwrite each other.\n"
+               "  •  Channel roles  —  which channel carries the internal\n"
+               "    standard and which the sample is a property of the assay\n"
+               "    on the plate, not of the dye order, so it is asked for in\n"
+               "    Channel roles (standard / sample)… rather than assumed.  It\n"
+               "    starts at the T9 kit's Ch3/Ch2.  Getting the pair wrong does\n"
+               "    not fail loudly — it scores the sample's own peaks as the\n"
+               "    standard and returns confident nonsense — so setting both to\n"
+               "    the same channel is refused before a well is scored.\n"
                "  •  Channel identity follows the run's dye order everywhere:\n"
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"

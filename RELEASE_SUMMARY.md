@@ -99,11 +99,59 @@ auto-genotyping engine rather than being lost by the switch.
 - Tests: `tests/test_massaction.py` (27, incl. the real OY A01 well reading
   MF 0.1223) and `tests/test_duplex_ui.py` (3, menu → status → table → CSV).
 
+## Auto-genotyping in the GUI
+Done. **Genotyping ▸ Auto-genotyping** now carries three commands:
+
+- **Auto-genotype selected wells…** — scores every selected well, progress in
+  the status bar every 8 wells, and the rows land in their own results table
+  below the plot: well, call, frac, hom1/hom2/het1/het2, snr1‑4, flags and the
+  reason for a no-call. A well that fails to load gets a `load-error` row
+  rather than aborting the batch — one bad file must not take the other 95
+  down. The table is separate from the manual pick/area table, and
+  `self.pick_tree` is cleared so `_sync_pick_table` cannot paint over it.
+- **Channel roles (standard / sample)…** — a small dialog for the two roles,
+  each labelled with the base that channel holds under the run's dye order.
+  This is the *next* item below, done.
+- **Save auto-genotype table…** — writes the rows through the same
+  `genotyping.save_table` the manual pick table uses, so both land in the same
+  CSV/XLSX/JSON shapes.
+
+Tests: `tests/test_auto_genotype_ui.py` (6) drives all of it through the real
+window, including asserting the menu really offers the cascade, that the
+same-channel pair is refused before any well is scored, and that the A-row
+calls match `tests/data/rs1695_expected.csv`.
+
+## Channel roles, first step
+The standard/sample pair is now **asked for** rather than assumed, which is
+the first half of making the engine dye-agnostic. `DEFAULT_IS_CHANNEL = 3` /
+`DEFAULT_SAMPLE_CHANNEL = 2` are still the *initial* values in the dialog, and
+`auto_genotype()` still takes them as keyword defaults — so the API is
+unchanged and the 95/96 result is untouched — but a run on any other kit can
+now be pointed at the right channels from the GUI, and setting the same
+channel as both is refused before scoring (swapping them silently scores the
+sample's own peaks as the standard).
+
+What is **not** done yet, and is the reason the engine is still not general:
+- The roles are one pair for the whole run. The four-dye case wants a duplex
+  standard on *every* channel at once, which is a list of per-channel sets,
+  not two integers.
+- `PeakPicker.std` is a single flat `[(scan, name)]` set and `duplex_of()`
+  matches on scan alone, so tagging more than one channel can cross-label
+  peaks from different channels into one position. `length_bp` is likewise a
+  single scalar. This is the shared root of both the manual MF path and
+  `auto_genotype`, and it should become per-channel before either is trusted
+  on a multiplexed plate.
+- `DEFAULT_IS_CUT = 1900` is the T9 kit's injection-front offset.
+
 ## Next Move
-1. Add the **Genotyping ▸ Auto‑genotype selected wells** menu command in `sequence_analyzer.py` (near `genotyping_m`, line ~437‑480), calling `g.auto_genotype()` over `self.selected` wells.
-2. Add the results table and progress/status updates; columns are well, call, frac, hom1, hom2, het1, het2, snr1‑4, flags, reason, is_channel, sample_channel, std_scans. Reuse the existing `save_table` export path (`_gen_save`, `genotyping.save_table`).
-3. Keep auto results separate from the manual pick/area table so the two do not overwrite each other.
-4. Re‑run the 96‑well check, the full suite, rebuild `Limoncello scorer.zip` with a clean‑extract test, then commit and push **without force‑pushing**.
+1. Make `PeakPicker` hold a duplex set **per channel** (`std` keyed by column,
+   `duplex_of` matching column as well as scan, `length_bp` per channel), then
+   let `Tag duplex species for MF…` pick which channel it is tagging. This
+   unblocks the four-dye question and the multiplex `duplex_of` collision.
+2. Extend `auto_genotype()` to take a per-channel role list so one call can
+   call every channel's assay, and add a `std_scans`/reason per channel.
+3. Re‑run the 96‑well check, the full suite, rebuild `Limoncello scorer.zip`
+   with a clean‑extract test, then commit and push **without force‑pushing**.
 
 ## Known limitations to carry forward
 - `DEFAULT_IS_CUT = 1900` is T9‑specific; the trace‑derived `cut` was deferred by choice.

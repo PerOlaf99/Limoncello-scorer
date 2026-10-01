@@ -17,6 +17,8 @@ import tkinter as tk  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from tkinter import filedialog, messagebox  # noqa: E402
 
+RUN2 = Path("/media/per/78B0C7DE1FA7081C/OY/OY_rs1695_T9_270910Run01")
+
 import analyzer_core  # noqa: E402
 import genotyping  # noqa: E402
 from sequence_analyzer import LimoncelloAnalyzerApp  # noqa: E402
