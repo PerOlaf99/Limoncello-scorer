@@ -25,7 +25,7 @@
 - Channel bar corrected (`a7deb3f`); labels now read Ch1→Ch4 in physical order; Run info distinguishes “Dye order (channels)” from “Column layout.”
 - Redundant `Signal: Volts` toolbar label removed (`ee8536a`); existing figure‑level `Volt` Y‑label remains.
 - Drag channel‑selection help and all‑channels‑off status message completed (`6a8b6fc`).
-- Latest validation: 128 tests pass, compile and whitespace checks pass, 51‑file release zip clean‑extracts with 128 tests passing.
+- Latest validation on the merged line: **168 tests pass, 7 skipped**, compile and whitespace checks pass, and the release zip clean‑extracts with the full suite passing (see *Mass-action MF* below for what was added after the 128‑test snapshot).
 - GUI is running with the T9 trial folder (`/tmp/opencode/t9_trial/OY_rs1695_T9_270910Run01`), log clean.
 
 ### Active
@@ -62,9 +62,11 @@ het ai-flagged      : 2
 
 ### Reproduce without a display
 ```bash
-cd /home/tv/Limoncello-scorer
+cd Limoncello scorer          # the app directory of this repository
 python3 -m pytest tests/test_auto_genotype.py -q          # 17 passed
-python3 -m pytest -q                                      # full suite
+python3 -m pytest -q                                      # full suite: 168 passed, 7 skipped
+python3 -m pytest tests/test_massaction.py -q            # 27 passed, incl. real A01 well
+python3 -m pytest tests/test_duplex_ui.py -q             # 3 passed (needs DISPLAY)
 ```
 
 ### Pitfall to avoid on the next machine
@@ -74,6 +76,28 @@ the npz→acgt mapping is `[2, 3, 1, 0]`. Mixing these up silently points the
 detector at the sample channel; it was the cause of an hour of false leads here.
 Two earlier "detections" were also an artefact of passing an already-smoothed
 trace into `find_is_quartet()`, which smooths internally a second time.
+
+## Mass-action MF (CTCE)
+Ported onto this line from the pre-V3 branch, so it sits beside the
+auto-genotyping engine rather than being lost by the switch.
+
+- `PeakPicker.mark_duplex()` tags **one** allelic position (the last-picked
+  main's own cluster on its channel, so two positions in one well stay apart)
+  with the same `HOM1`/`HOM2`/`HET1`/`HET2` names the internal standard gets.
+- `PeakPicker.mass_action(rec)` returns
+  `MF = (A_MUT + ½ × A_HET) / (A_WT + A_MUT + A_HET)` plus `ai`, `a_wt`, `a_mut`,
+  `a_het`, `n_homoduplex`. The ½ term is what makes a clean heterozygote read
+  0.5 rather than 0.25, and it carries the whole fraction below ≈5 % MF, where
+  the mutant strands have all re-annealed and no mutant homoduplex is visible.
+- Peak count decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,
+  **3 = 1 + 2** (a homozygote), 2 = 2 + 0. Naming a 3-peak position as a
+  truncated standard would call a heteroduplex a homoduplex and halve a low MF.
+- GUI: **Genotyping ▸ Tag duplex species for MF…**, an **MF** column in the pick
+  table, and the MF formula in the Help text. Export gains `mf` and `ai`
+  columns; `fraction` keeps its plain meaning and both stay blank until a
+  position is tagged.
+- Tests: `tests/test_massaction.py` (27, incl. the real OY A01 well reading
+  MF 0.1223) and `tests/test_duplex_ui.py` (3, menu → status → table → CSV).
 
 ## Next Move
 1. Add the **Genotyping ▸ Auto‑genotype selected wells** menu command in `sequence_analyzer.py` (near `genotyping_m`, line ~437‑480), calling `g.auto_genotype()` over `self.selected` wells.
