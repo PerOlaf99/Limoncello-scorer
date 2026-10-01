@@ -392,7 +392,7 @@ def t9_allele_fraction(hom1, hom2, het1, het2) -> float:
     return (hom1 + 0.5 * (het1 + het2)) / total
 
 
-def t9_call(hom1, hom2, het1, het2, sigmas=None) -> tuple:
+def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     """Genotype for one rs1695 position -> ``(call, fraction, flags)``.
 
     *sigmas* is the optional ``(hom1, hom2, het1, het2)`` peak significance
@@ -402,12 +402,29 @@ def t9_call(hom1, hom2, het1, het2, sigmas=None) -> tuple:
 
     ``call`` is one of ``CALLS``.  ``flags`` is a set and may contain ``"ai"``
     for a heterozygote far off 50/50.
+
+    *het2* may be ``None``/omitted when the two heteroduplexes co-migrate and so
+    measure as a single band.  That band carries the area of both heteroduplex
+    strands together, so it is passed as *het1* and the het test falls back to
+    requiring that one merged band to be present above the noise floor.  This is
+    not a relaxation of the split-sample test, which is untouched: the separated
+    case still requires two comparable heteroduplex bands, because a single band
+    sitting where only one heteroduplex belongs is a shoulder, not a
+    heterozygote.
     """
+    # A merged heteroduplex is measured as one band holding both strands'
+    # area.  Keep that as a distinct state (it is what lets the het test relax
+    # below) while the arithmetic downstream still sees a plain number.
+    merged_het = het2 is None
+    het2 = 0.0 if merged_het else het2
+
     sigmas = tuple(sigmas or ())
-    dom = max(sigmas) if len(sigmas) == 4 else None
+    dom = max(sigmas) if sigmas else None
     total = hom1 + hom2 + het1 + het2
-    s3, s4 = (sigmas[2], sigmas[3]) if len(sigmas) == 4 else (None, None)
-    lo, hi = (min(s3, s4), max(s3, s4)) if s3 is not None else (None, None)
+    s3 = sigmas[2] if len(sigmas) > 2 else None
+    s4 = sigmas[3] if len(sigmas) > 3 else None
+    lo, hi = ((min(s3, s4), max(s3, s4))
+              if (s3 is not None and s4 is not None) else (None, None))
 
     # A well with no usable sample is a no-call, not a homozygote.
     if dom is not None and dom < T9_MIN_DOMINANT_SIGMA:
@@ -418,8 +435,14 @@ def t9_call(hom1, hom2, het1, het2, sigmas=None) -> tuple:
     frac = t9_allele_fraction(hom1, hom2, het1, het2)
     flags = set()
 
-    # Het needs both heteroduplexes, present and comparable.
-    if s3 is not None:
+    # Het needs both heteroduplexes, present and comparable.  When they
+    # co-migrate there is one merged band instead, which is equally conclusive
+    # that both alleles are present -- that band cannot form from a single
+    # allele, so its presence alone carries the evidence.
+    if merged_het:
+        both_present = (het1 > 0 and
+                        (s3 is None or s3 >= T9_MIN_HET_SIGMA))
+    elif s3 is not None:
         both_present = (lo >= T9_MIN_HET_SIGMA and hi > 0
                         and lo / hi >= T9_HET_RATIO_MIN)
     else:
