@@ -807,14 +807,30 @@ class PeakPicker:
         return "Standard set: " + ", ".join(f"{n}@{x}" for x, n in self.std) \
             + "  (auto)"
 
-    def mark_std(self, length_bp=None):
-        """Tag the standard mains (scan order) as the four CTC-CE duplexes:
-        HOM1, HOM2 (homoduplexes, one rs SNP base apart), HET1, HET2
-        (heteroduplexes, one mismatch base from Watson/Crick re-annealing).
-        All four are the same fragment, so a shared length (bp) is optional.
-        The standard channel is the one of the last main you picked.
+    # ------------------------------------- internal-standard CTC-CE duplexes
+    def _duplex_names(self, n):
+        """CTC-CE duplex names for `n` picked peaks, in migration order.
 
-        Raises ValueError with a plain-language reason, or returns a message."""
+        In migration order the homoduplexes come first — the two alleles of a
+        heterozygote one rs SNP base apart, or a single one for a homozygote —
+        then the heteroduplexes the re-annealed strands form.  So the number of
+        homoduplexes tells the two apart: 4 peaks = 2+2 (the internal standard,
+        and a heterozygote whose heteroduplexes are baseline-resolved), 3 peaks
+        = 1+2 (a homozygote, whose mutant strands have all re-annealed), 2
+        peaks = 2+0.  Naming a 3-peak position as a truncated standard would
+        call one of its heteroduplexes a homoduplex and halve a low MF.
+        """
+        n = min(n, 4)
+        n_hom = 1 if n == 3 else min(n, 2)
+        return (["HOM1", "HOM2"][:n_hom] + ["HET1", "HET2"][:n - n_hom])
+
+    def _standard_mains(self):
+        """The picked mains of the last-picked channel, in scan order.
+
+        The internal standard's four duplexes are one fragment separated by
+        cycling temperature, so they span many repeats of the migration axis —
+        the whole channel is the set, and that is the point of tagging them.
+        """
         mains = [r for r in self.records if r["kind"] == "main"]
         if not mains:
             raise ValueError("Pick the standard main peaks first.")
@@ -823,13 +839,67 @@ class PeakPicker:
                            key=lambda m: m["scan"])
         if len(col_mains) < 2:
             raise ValueError("Need ≥ 2 standard main peaks on the same channel.")
-        names = ["HOM1", "HOM2", "HET1", "HET2"][:min(len(col_mains), 4)]
-        self.std = [(m["scan"], n) for m, n in zip(col_mains[:4], names)]
+        return col_mains[:4]
+
+    def _position_mains(self):
+        """The picked mains of ONE allelic position on the last-picked channel.
+
+        A sample's duplex species sit within a few repeats of each other, so
+        the set is the last-picked main's own cluster, grown outward one repeat
+        at a time.  A separate position tens of repeats away stops the growth,
+        which keeps two heterozygous positions in one well apart.
+        """
+        mains = [r for r in self.records if r["kind"] == "main"]
+        if not mains:
+            raise ValueError("Pick the main peaks first.")
+        last = mains[-1]
+        col_mains = sorted((m for m in mains if m["col"] == last["col"]),
+                           key=lambda m: m["scan"])
+        if len(col_mains) < 2:
+            raise ValueError("Need ≥ 2 main peaks on the same channel — a "
+                             "single peak cannot be told apart from a missed "
+                             "pick.")
+        win = self._het_window()
+        i = col_mains.index(last)
+        lo = hi = i
+        while lo > 0 and col_mains[lo]["scan"] - col_mains[lo - 1]["scan"] <= win:
+            lo -= 1
+        while hi < len(col_mains) - 1 and \
+                col_mains[hi + 1]["scan"] - col_mains[hi]["scan"] <= win:
+            hi += 1
+        pos = col_mains[lo:hi + 1]
+        if len(pos) < 2:
+            raise ValueError("Need ≥ 2 main peaks within one repeat of each "
+                             "other to read a duplex position.")
+        return pos[:4]
+
+    def mark_std(self, length_bp=None):
+        """Tag the standard mains (scan order) as the four CTC-CE duplexes:
+        HOM1, HOM2 (homoduplexes, one rs SNP base apart), HET1, HET2
+        (heteroduplexes, one mismatch base from Watson/Crick re-annealing).
+        All four are the same fragment, so a shared length (bp) is optional.
+        The standard channel is the one of the last main you picked.
+
+        Raises ValueError with a plain-language reason, or returns a message."""
+        col_mains = self._standard_mains()
+        names = self._duplex_names(len(col_mains))
+        self.std = [(m["scan"], n) for m, n in zip(col_mains, names)]
         self.length_bp = length_bp
         msg = "Standard set: " + ", ".join(f"{n}@{x}" for x, n in self.std)
         if self.length_bp is not None:
             msg += f"  (len {self.length_bp:g} bp)"
         return msg
+
+    def mark_duplex(self):
+        """Tag ONE allelic position's picked mains as its duplex species, in
+        migration order — the same HOM1/HOM2/HET1/HET2 reading the internal
+        standard gets, so a sample position can carry the mass-action MF.
+
+        Raises ValueError with a plain-language reason, or returns a message."""
+        pos = self._position_mains()
+        names = self._duplex_names(len(pos))
+        self.std = [(m["scan"], n) for m, n in zip(pos, names)]
+        return "Duplex species: " + ", ".join(f"{n}@{x}" for x, n in self.std)
 
     def clear_std(self):
         self.std = None
@@ -852,6 +922,70 @@ class PeakPicker:
     def _clust_frac(self, rec):
         """Back-compat alias for clust_frac (used by the editor table/tests)."""
         return self.clust_frac(rec)
+
+    def labelled_species(self):
+        """The picked mains that carry a duplex label, in migration order.
+        Tagging a well's position puts them in one list — two peaks for a
+        homozygote, four when the heteroduplexes are baseline-resolved."""
+        return sorted((m for m in self.records
+                       if m["kind"] == "main" and self.duplex_of(m)),
+                      key=lambda m: m["scan"])
+
+    def mass_action(self, rec):
+        """PCR mass-action mutant fraction of the duplex position `rec` is in:
+
+            MF = (A_MUT + ½ × A_HET) / (A_WT + A_MUT + A_HET)
+
+        A_WT and A_MUT are the homoduplex areas — with both alleles present the
+        larger is taken as wild type, the right reading for a rare mutation,
+        and a true heterozygote is symmetric either way; with one homoduplex
+        (a homozygous WT allele) it is all wild type, and the mutant fraction
+        lives entirely in the heteroduplex.  A_HET is the combined area of the
+        labelled heteroduplex peaks.
+
+        The half-heteroduplex term is the point of the formula: it makes a clean
+        heterozygote read 0.5 instead of the 0.25 a plain area ratio of the two
+        homoduplexes gives, and it is what carries a low mutant fraction, where
+        the mutant strands are essentially all in heteroduplex and no mutant
+        homoduplex is visible at all.
+
+        Also returns the allelic imbalance of the two homoduplexes,
+        AI = A_HOMO1 / (A_HOMO1 + A_HOMO2), which needs no wild-type choice
+        and is None unless both are present.
+
+        Returns None unless the position carries duplex labels (see
+        mark_duplex / mark_std), so an unlabelled two-peak position keeps
+        reporting the plain small/(small+large) fraction."""
+        if rec is None or rec.get("kind") != "main":
+            return None
+        species = self.labelled_species()
+        if not any(m is rec or m.get("gid") == rec.get("gid") for m in species):
+            return None
+        hom, het = {}, 0.0
+        for m in species:
+            name = self.duplex_of(m)
+            if name in ("HOM1", "HOM2"):
+                hom[name] = float(m["area"])
+            elif name in ("HET1", "HET2"):
+                het += float(m["area"])
+        if not hom:
+            return None
+        # A single homoduplex is a homozygous WT allele: its mutant strands are
+        # all in heteroduplex, which is exactly the low-MF case where no mutant
+        # homoduplex is visible at all.
+        a_wt = float(hom.get("HOM1", 0.0))
+        a_mut = float(hom.get("HOM2", 0.0))
+        if a_wt < a_mut:
+            a_wt, a_mut = a_mut, a_wt
+        total = a_wt + a_mut + het
+        if total <= 0:
+            return None
+        h1, h2 = hom.get("HOM1"), hom.get("HOM2")
+        ai = (h1 / (h1 + h2)
+              if (h1 is not None and h2 is not None and (h1 + h2) > 0) else None)
+        return {"mf": (a_mut + 0.5 * het) / total,
+                "a_wt": a_wt, "a_mut": a_mut, "a_het": het, "ai": ai,
+                "n_homoduplex": len(hom)}
 
     def _het_window(self):
         """How many scans count as one allelic position: a repeat (~ one base,
@@ -911,6 +1045,7 @@ class PeakPicker:
         for r in sorted(self.records,
                         key=lambda r: (int(r["scan"]), int(r["col"]),
                                        int(r.get("gid", 0)))):
+            mf = self.mass_action(r) if r["kind"] == "main" else None
             rows.append({
                 "file": r["file"], "well": r["well"], "scan": r["scan"],
                 "channel": r["channel"], "base": r["base"], "kind": r["kind"],
@@ -924,6 +1059,8 @@ class PeakPicker:
                 "height_frac": r.get("height_frac", ""),
                 "fraction": round(self.clust_frac(r), 4)
                 if r["kind"] == "main" else "",
+                "mf": round(mf["mf"], 4) if mf else "",
+                "ai": round(mf["ai"], 4) if mf and mf["ai"] is not None else "",
             })
         return rows
 

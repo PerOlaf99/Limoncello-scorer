@@ -29,6 +29,7 @@ wired to the plate-validated **best basecaller** configs.
 | Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
+| Batch auto-genotyping — find the internal-standard quartet and call every well | Library only — `genotyping.auto_genotype()`; **no menu item yet** |
 
 ## Requirements
 
@@ -212,12 +213,14 @@ letters, peak marks and quality curve look confusing), undo it with
 the `.rsd`/`.scf` data files are never modified.
 
 The **Genotyping** menu is an independent top-level heading (between *Base
-calling* and *Comments*). It holds **Manual peak picking…**, which needs no
-second window and no pop-up: the main window stays exactly as it is — the same
-stacked viewer, zoom bars, Reset view, µA overlay and **Channels** row — but
-clicking a peak now records it for that well, and the *Called sequence* box
-below the plot becomes the *Picked peaks* table. **Peak picking is built from
-scratch:**
+calling* and *Comments*). It holds two modes, **Manual peak picking…** and
+**Peak area by drag…**, neither of which needs a second window or a pop-up:
+the main window stays exactly as it is — the same stacked viewer, zoom bars,
+Reset view, µA overlay and **Channels** row — but clicking a peak now records
+it for that well, and the *Called sequence* box below the plot becomes the
+*Picked peaks* or *Measured areas* table. The two are radio buttons in effect:
+at most one owns the canvas, the menu shows which is live, and ticking one
+switches to it. **Peak picking is built from scratch:**
 
 - Show several wells at once with the **Graphs** spinbox (4–6 at a time is
   the intended workflow), zoom in with the axis bars / mouse wheel, and click
@@ -291,15 +294,39 @@ scratch:**
 - **Mutant/variant fraction** is computed for two main peaks of the *same
   channel* within one repeat (~one base): small/(small+large), shown in the
   table. The grouping window scales with the run's own peak spacing.
+- **Mass-action MF** (CTCE) — **Genotyping → Tag duplex species for MF…** tags
+  *one allelic position* (the last-picked main's own cluster on its channel, so
+  two positions in one well stay apart) with the same `HOM1`/`HOM2`/`HET1`/`HET2`
+  names the internal standard gets, and that position then reports the PCR
+  mass-action mutant fraction in the **MF** column:
+
+  ```
+  MF = (A_MUT + ½ × A_HET) / (A_WT + A_MUT + A_HET)
+  ```
+
+  where `A_WT`/`A_MUT` are the homoduplex areas and `A_HET` the combined
+  heteroduplex area. The ½ term is the point of the formula: a clean
+  heterozygote reads **0.5**, not the 0.25 a plain area ratio of the two
+  homoduplexes gives, and below ≈5 % MF — where the mutant strands have all
+  re-annealed and *no mutant homoduplex is visible at all* — the whole low
+  fraction is carried by `A_HET`. The **ai** column adds the allelic imbalance
+  `A_HOMO1 / (A_HOMO1 + A_HOMO2)`, which needs no wild-type choice. Both are
+  blank until a position is tagged; `fraction` keeps its plain meaning. The
+  peak count decides the homoduplex/heteroduplex split: 4 = 2+2, 3 = 1+2, 2 = 2+0.
 - **Undo last pick / Clear picks** manage the picks (`Ctrl+Z` undoes the last
   pick while peak picking is active); an already-picked **area
   cannot be picked again** (the click is refused with a status-bar message —
   undo it first to re-pick). Neighbouring peaks such as the two alleles of a
-  heterozygote remain pickable; **Save peaks table…**
+  heterozygote remain pickable. **Peak area by drag…** instead measures the
+  area above the straight line between two points you drag, in the same window
+  and with the same mode plumbing — handy when a peak's detected bounds look
+  wrong and you would rather bracket it by eye than argue with the algorithm.
+  Undo / Clear / Save work the same way in either mode. **Save peaks table…**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
   channel, base, kind (`main`/`+A`), start/end scan (2nd derivative),
-  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and
-  fraction. Rows are written **grouped by sample** (run folder, then well name)
+  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp),
+  fraction, and the mass-action `mf` and `ai`. Rows are written **grouped by
+  sample** (run folder, then well name)
   and **in scan order inside each sample**, never in click order, so one
   sample's peaks are never interleaved with another's. That table is a
   labelled **training library for ML** — picking
@@ -334,6 +361,17 @@ matplotlib. It does two jobs:
   `call` (`het` / `hom-major` / `no-call`), the minor-allele `fraction` and a
   0–100 `confidence`, plus a one-line genotype per well.
 
+There is also a third job, still library-only:
+
+- **Batch auto-genotyping** — `genotyping.auto_genotype(doc, ...)` locates the
+  internal-standard quartet with `find_is_quartet()`, measures the sample's
+  four duplexes, and returns a call per well with a human-readable *reason*
+  when it cannot call one. It reproduces 95 of the 96 wells of the T9 plate
+  against the manual ground truth. It has **no menu item yet** and its
+  channel roles are still the T9 defaults (`DEFAULT_IS_CHANNEL = 3`,
+  `DEFAULT_SAMPLE_CHANNEL = 2`), so it is not trustworthy on another kit until
+  those become explicit configuration — see `RELEASE_SUMMARY.md`.
+
 ```bash
 # QC every well in a folder and write a self-contained HTML report
 python scorer.py qc example_data/M13/*.rsd --report run.html
@@ -365,10 +403,13 @@ pip install -e ".[all]" pytest
 python -m pytest -q
 ```
 
-The suite covers the trace loaders, the vendored basecaller, the scorer logic
-and the genotyping picker engine; genotyping tests skip automatically where
-tkinter/matplotlib are unavailable. CI (`.github/workflows/ci.yml`) runs the
-same command on Python 3.9, 3.11 and 3.12.
+The suite covers the trace loaders, the vendored basecaller, the scorer logic,
+the auto-genotyping engine, drag-area measuring and the genotyping picker
+engine; genotyping tests skip automatically where tkinter/matplotlib are
+unavailable, and the GUI test `tests/test_duplex_ui.py` additionally skips
+without a `DISPLAY`. Current state: **168 passed, 7 skipped**. CI
+(`.github/workflows/ci.yml`) runs the same command on Python 3.9, 3.11 and
+3.12.
 
 ## Note on environment
 

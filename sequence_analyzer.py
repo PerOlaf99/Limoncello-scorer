@@ -458,6 +458,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                  command=self._gen_clear)
         genotyping_m.add_command(label="Mark peaks as standard…",
                                  command=self._gen_mark_std)
+        genotyping_m.add_command(label="Tag duplex species for MF…",
+                                 command=self._gen_mark_duplex)
         genotyping_m.add_separator()
         genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
         genotyping_m.add_command(label="Next batch →",
@@ -1395,9 +1397,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
             left_anchor = ("run", "well")
             stretch = ("run", "well")
         else:
-            cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac")
+            cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area",
+                    "frac", "MF")
             widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34,
-                      "kind": 62, "h V": 66, "area": 66, "frac": 50}
+                      "kind": 62, "h V": 66, "area": 66, "frac": 50,
+                      "MF": 52}
             left_anchor = ("well", "kind")
             stretch = ("scan", "kind")
         self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings",
@@ -1864,10 +1868,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                             key=lambda r: (int(r["scan"]), int(r["col"]),
                                            int(r.get("gid", 0)))):
                 fr = pk.clust_frac(r) if r["kind"] == "main" else None
+                ma = pk.mass_action(r) if r["kind"] == "main" else None
                 self.pick_tree.insert("", tk.END, values=(
                     pk.doc.well, r["scan"], pk.duplex_of(r), r["base"],
                     r["kind"], f"{r['height']:.3f}", f"{r['area']:.1f}",
-                    f"{fr:.3f}" if fr else ""))
+                    f"{fr:.3f}" if fr else "",
+                    f"{ma['mf']:.3f}" if ma else ""))
 
     def _gen_picker_active(self):
         """The picker to act on: the well of the last click, else the first
@@ -1967,6 +1973,28 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._gen_active_path = Path(pk.path)
         self.status_var.set(f"Well {pk.doc.well}: {msg}")
         self._sync_pick_table()
+
+    def _gen_mark_duplex(self):
+        """Tag the active well's picked mains as the duplex species of one
+        allelic position, so it reports the CTCE mass-action MF."""
+        if not self.genotyping_active:
+            return
+        pk = self._gen_picker_active()
+        if pk is None:
+            self.status_var.set("Select wells first.")
+            return
+        try:
+            msg = pk.mark_duplex()
+        except ValueError as e:
+            messagebox.showwarning("Duplex species", str(e))
+            return
+        self._gen_active_path = Path(pk.path)
+        ma = next((pk.mass_action(m) for m in pk.labelled_species()), None)
+        if ma:
+            msg += f"   MF {ma['mf']:.3f}"
+        self.status_var.set(f"Well {pk.doc.well}: {msg}")
+        self._sync_pick_table()
+        self.redraw()
 
     def _gen_save(self):
         if not self.genotyping_active:
@@ -3016,6 +3044,23 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "  •  The picked-peaks table is sorted by scan (then channel) per\n"
                "    well, whatever order you clicked in; Undo last pick still\n"
                "    removes the most recent click.\n"
+               "  •  Mass-action MF (CTCE)  —  Tag duplex species for MF…\n"
+               "    (Genotyping menu) tags ONE allelic position (the last-picked\n"
+               "    main's own cluster, so two positions in a well stay apart) with\n"
+               "    the same HOM1/HOM2/HET1/HET2 names, and that position then\n"
+               "    reports the PCR mass-action fraction in the MF column:\n"
+               "        MF = (A_MUT + 1/2 A_HET) / (A_WT + A_MUT + A_HET)\n"
+               "    A_WT/A_MUT are the homoduplex areas, A_HET the combined\n"
+               "    heteroduplex area.  The 1/2 term is the point: a clean\n"
+               "    heterozygote reads 0.5, not the 0.25 a plain area ratio of\n"
+               "    the two homoduplexes gives, and below ~5% MF, where all the\n"
+               "    mutant strands have re-annealed and no mutant homoduplex is\n"
+               "    visible at all, the whole low fraction is carried by A_HET.\n"
+               "    The ai column adds the allelic imbalance\n"
+               "    A_HOMO1/(A_HOMO1+A_HOMO2), which needs no wild-type choice.\n"
+               "    Both stay blank until a position is tagged.  The peak count\n"
+               "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
+               "    3 = 1 + 2, 2 = 2 + 0.\n"
                "  •  Channel identity follows the run's dye order everywhere:\n"
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"
