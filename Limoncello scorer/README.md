@@ -28,47 +28,68 @@ wired to the plate-validated **best basecaller** configs.
 | Sequencing trace (ESD peaks) view | Yes — Base calling menu + View menu |
 | Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
+| Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
+| Batch auto-genotyping — find the internal-standard quartet and call every well | Library only — `genotyping.auto_genotype()`; **no menu item yet** |
 
 ## Requirements
 
 ```bash
-pip install numpy scipy matplotlib pillow   # pillow only for backgrounds
-pip install openpyxl                        # optional: Excel .xlsx peak export
-# tkinter: included on Windows/macOS Python installers
-# Ubuntu/Debian: sudo apt install python3-tk
+# Core runtime (base caller + scorer): numpy and scipy only
+pip install numpy scipy
+
+# Desktop viewer (the GUI) also needs matplotlib; tkinter ships with
+# Windows/macOS Python. On Ubuntu/Debian: sudo apt install python3-tk
+pip install matplotlib pillow      # pillow only for empty-view backgrounds
+
+# Optional file formats
+pip install openpyxl               # Excel .xlsx peak export
+pip install biopython              # .scf reading
 ```
 
-The basecaller package is **bundled** in the zip (see the folder tree below),
-so `.rsd`/`.scf` files work on any machine out of the box. `.ab1` and text
-traces don't need it at all.
+Or install the package with extras (from a clone):
+
+```bash
+pip install -e ".[gui]"    # viewer + base caller + scorer
+pip install -e ".[all]"    # everything (gui + xlsx + scf)
+```
+
+The basecaller package is **vendored in this repository** (`cimarron_basecaller/`
+plus `configs.py` at the repo root), so `.rsd`/`.scf` files work on any machine
+out of the box. `.ab1` and text traces don't need it at all. If you keep the
+caller elsewhere, point `BEST_BASECALLER_RELEASE` at the folder that contains
+`cimarron_basecaller/`; `python scorer.py check` tells you what was found.
 
 ```
-Limoncello scorer.zip
-├── Limoncello scorer/
-│   ├── sequence_analyzer.py
-│   ├── analyzer_core.py
-│   ├── README.md
-│   ├── requirements.txt
-│   ├── Background.jpg            # empty-view pictures (bundled)
-│   ├── BG2.jpg, BG3.jpg, BG4.jpg
-│   └── example_data/M13/         # 8 M13 wells (A01–A08.rsd)
-└── BEST_BASECALLER_RELEASE/
-    └── cimarron_basecaller/      # base caller (imported by the app)
+Limoncello-scorer/
+├── sequence_analyzer.py       # Tk desktop viewer / basecaller GUI
+├── analyzer_core.py           # loaders + basecaller wrapper (vendor discovery, --check)
+├── genotyping.py              # headless PeakPicker engine + Tk picker dialog
+├── scorer.py                  # genotype calls, confidence, read QC, HTML report
+├── basecall.py                # standalone FASTA/FASTQ basecaller CLI
+├── configs.py                 # basecaller presets (GOLDEN / PRECISION / SOFT)
+├── cimarron_basecaller/       # vendored base caller package (numpy/scipy)
+├── pyproject.toml             # packaging + console scripts
+├── LICENSE                    # MIT
+├── tests/                     # pytest suite (loaders, scorer, genotyping)
+├── Background.jpg             # empty-view pictures (bundled)
+├── BG2.jpg, BG3.jpg, BG4.jpg
+└── example_data/M13/          # 8 M13 wells (A01–A08.rsd)
 ```
 
 ## Run
 
 ```bash
-cd "Limoncello scorer"
 python3 sequence_analyzer.py
 
 # Or open with a folder already loaded
-python3 sequence_analyzer.py --folder "/path/to/Limoncello scorer/example_data/M13"
+python3 sequence_analyzer.py --folder example_data/M13
+
+# Check that the basecaller, tkinter and optional bits are present, then exit
+python3 sequence_analyzer.py --check
 ```
 
 To try it immediately: **File → Add data folder** →
-`example_data/M13`. These are `.rsd` files, so the basecaller package is
-required to view them (place `BEST_BASECALLER_RELEASE` beside this folder).
+`example_data/M13`. These are `.rsd` files, handled by the vendored basecaller.
 
 ## Typical workflow
 
@@ -111,7 +132,7 @@ required to view them (place `BEST_BASECALLER_RELEASE` beside this folder).
 `pos_bonus07` and `pos_profile` are now aliases of the unified
 **instrument × mode** presets (`*_accuracy` / `*_length`). The list lives in
 `analyzer_core.BASECALLER_VERSIONS`; the underlying parameters come from the
-bundled `BEST_BASECALLER_RELEASE/configs.py`.
+vendored `configs.py`.
 
 | Name | Role |
 |------|------|
@@ -192,12 +213,14 @@ letters, peak marks and quality curve look confusing), undo it with
 the `.rsd`/`.scf` data files are never modified.
 
 The **Genotyping** menu is an independent top-level heading (between *Base
-calling* and *Comments*). It holds **Manual peak picking…**, which needs no
-second window and no pop-up: the main window stays exactly as it is — the same
-stacked viewer, zoom bars, Reset view, µA overlay and **Channels** row — but
-clicking a peak now records it for that well, and the *Called sequence* box
-below the plot becomes the *Picked peaks* table. **Peak picking is built from
-scratch:**
+calling* and *Comments*). It holds two modes, **Manual peak picking…** and
+**Peak area by drag…**, neither of which needs a second window or a pop-up:
+the main window stays exactly as it is — the same stacked viewer, zoom bars,
+Reset view, µA overlay and **Channels** row — but clicking a peak now records
+it for that well, and the *Called sequence* box below the plot becomes the
+*Picked peaks* or *Measured areas* table. The two are radio buttons in effect:
+at most one owns the canvas, the menu shows which is live, and ticking one
+switches to it. **Peak picking is built from scratch:**
 
 - Show several wells at once with the **Graphs** spinbox (4–6 at a time is
   the intended workflow), zoom in with the axis bars / mouse wheel, and click
@@ -294,7 +317,11 @@ scratch:**
   pick while peak picking is active); an already-picked **area
   cannot be picked again** (the click is refused with a status-bar message —
   undo it first to re-pick). Neighbouring peaks such as the two alleles of a
-  heterozygote remain pickable; **Save peaks table…**
+  heterozygote remain pickable. **Peak area by drag…** instead measures the
+  area above the straight line between two points you drag, in the same window
+  and with the same mode plumbing — handy when a peak's detected bounds look
+  wrong and you would rather bracket it by eye than argue with the algorithm.
+  Undo / Clear / Save work the same way in either mode. **Save peaks table…**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
   channel, base, kind (`main`/`+A`), start/end scan (2nd derivative),
   height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp),
@@ -320,7 +347,72 @@ The **Comments** menu sits between *Genotyping* and *Help*:
   (length, Qmean/Qmin, N, peak spacing), per-channel signal maxima and the
   instrument current.
 
+## Scoring, QC and reports (`scorer.py`)
+
+`scorer.py` is the headless half of the tool and needs neither tkinter nor
+matplotlib. It does two jobs:
+
+- **Read QC** — base-call a trace and report length, Qmean/Qmin, the fraction of
+  weak calls, N count, peak spacing (mean and CV), per-channel signal maxima and
+  a pass/fail flag. Quality values from the bundled caller are *signal heights*
+  on a per-preset scale (not PHRED), so only scale-free measures gate pass/fail.
+- **Genotype calls** — turn picked-peak rows (the CSV/XLSX/JSON table the
+  genotyping picker exports, and the ML training library) into a per-position
+  `call` (`het` / `hom-major` / `no-call`), the minor-allele `fraction` and a
+  0–100 `confidence`, plus a one-line genotype per well.
+
+There is also a third job, still library-only:
+
+- **Batch auto-genotyping** — `genotyping.auto_genotype(doc, ...)` locates the
+  internal-standard quartet with `find_is_quartet()`, measures the sample's
+  four duplexes, and returns a call per well with a human-readable *reason*
+  when it cannot call one. It reproduces 95 of the 96 wells of the T9 plate
+  against the manual ground truth. It has **no menu item yet** and its
+  channel roles are still the T9 defaults (`DEFAULT_IS_CHANNEL = 3`,
+  `DEFAULT_SAMPLE_CHANNEL = 2`), so it is not trustworthy on another kit until
+  those become explicit configuration — see `RELEASE_SUMMARY.md`.
+
+```bash
+# QC every well in a folder and write a self-contained HTML report
+python scorer.py qc example_data/M13/*.rsd --report run.html
+
+# Score an exported peaks table and write the scored rows back out
+python scorer.py peaks picks.csv --out scored.csv --report genotypes.html
+
+# Report which dependencies / presets are available
+python scorer.py check
+```
+
+Console scripts are installed by `pip install -e .`:
+
+```bash
+limoncello            # the desktop viewer
+limoncello-scorer     # the scorer/QC CLI above
+limoncello-basecall   # standalone FASTA/FASTQ basecaller
+```
+
+Confidence is a documented **heuristic**, not a calibrated probability: 70% of
+the score is how far the minor-allele fraction sits from the call boundary, 30%
+is how well the two alleles stand clear of the noise, and an internal-standard
+(HOM/HET duplex) match pins it to at least 80.
+
+## Development
+
+```bash
+pip install -e ".[all]" pytest
+python -m pytest -q
+```
+
+The suite covers the trace loaders, the vendored basecaller, the scorer logic,
+the auto-genotyping engine, drag-area measuring and the genotyping picker
+engine; genotyping tests skip automatically where tkinter/matplotlib are
+unavailable, and the GUI test `tests/test_duplex_ui.py` additionally skips
+without a `DISPLAY`. Current state: **168 passed, 7 skipped**. CI
+(`.github/workflows/ci.yml`) runs the same command on Python 3.9, 3.11 and
+3.12.
+
 ## Note on environment
 
 This sandbox may not have `tkinter`; run the app on your **local** Windows/macOS/Linux
-desktop.
+desktop. To see what is available without starting the GUI, run
+`python sequence_analyzer.py --check` (or `python scorer.py check`).
