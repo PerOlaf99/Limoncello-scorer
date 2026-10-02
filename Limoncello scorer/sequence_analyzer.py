@@ -255,7 +255,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._auto_tree = None
         self._pick_cid = None
         self._gen_motion_cid = None
+<<<<<<< HEAD
         self._area_release_cid = None
+=======
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
         self._gen_cursors: list = []
         self.pick_table = None
         self.pick_tree = None
@@ -659,6 +662,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         chan_bar.pack(fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(chan_bar, text="Channels:").pack(side=tk.LEFT)
         self._chan_cbs = []
+        self._chan_cb_cols = []
         for i in range(len(CHANNEL_ORDER)):
             # widget i drives chan_show[i], and chan_show is indexed by
             # physical channel -- so widget i IS Ch i+1 and the widgets are
@@ -670,6 +674,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
             self._chan_cbs.append(cb)
+<<<<<<< HEAD
+=======
+            self._chan_cb_cols.append(i)
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
         # the bar starts out indexed A,C,G,T; relabel to the run's dye order
         self._refresh_channel_labels()
         self.base_order_var.trace_add("write", self._on_base_order_changed)
@@ -1380,6 +1388,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def exit_genotyping_picking(self):
         if not self.genotyping_active:
             return
+<<<<<<< HEAD
         for attr in ("_pick_cid", "_gen_motion_cid", "_area_release_cid"):
             cid = getattr(self, attr, None)
             if cid is not None:
@@ -1391,6 +1400,21 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._gen_cursors = []
         self._area_cursors = []
         self._area_drag = None
+=======
+        if self._pick_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._pick_cid)
+            except Exception:
+                pass
+            self._pick_cid = None
+        if self._gen_motion_cid is not None:
+            try:
+                self.canvas.mpl_disconnect(self._gen_motion_cid)
+            except Exception:
+                pass
+            self._gen_motion_cid = None
+        self._gen_cursors = []
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
         if self.pick_table is not None:
             try:
                 self.pick_table.destroy()
@@ -1565,6 +1589,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
+<<<<<<< HEAD
     def _make_area_markers(self, ax):
         """Live preview artists for the span being dragged on one subplot.
 
@@ -1686,6 +1711,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
+=======
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
     def _make_gen_cursor(self, ax):
         """Readout + crosshair for one stacked subplot: shows the scan under the
         pointer, its voltage, and the nearest real peak (picked or not) so the
@@ -1737,6 +1764,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 + ("  [picked]" if picked else ""))
 
     def _on_gen_motion(self, event):
+<<<<<<< HEAD
         if not self.genotyping_active:
             return
         if self.area_mode:
@@ -1746,6 +1774,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._area_preview(event)
             return
         if not self._gen_cursors:
+=======
+        if not self.genotyping_active or not self._gen_cursors:
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
             return
         hit = self._gen_axes_hit(event)
         if hit is None:
@@ -1789,7 +1820,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.fig.clear()
         self._plot_axes = []
         self._gen_cursors = []
+<<<<<<< HEAD
         self._area_cursors = []
+=======
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
         self._full_xlim = None
         self._full_ylim = None
         paths = self._gen_paths()
@@ -1850,8 +1884,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                     transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#333", zorder=6)
+<<<<<<< HEAD
             if not self.area_mode:
                 self._gen_cursors.append(self._make_gen_cursor(ax))
+=======
+            self._gen_cursors.append(self._make_gen_cursor(ax))
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
             self._style_x_axis(ax, i == len(paths) - 1)
         if gx1 is not None and gy0 is not None and gx1 > gx0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -2321,6 +2359,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._gen_pickers = {}
         self.redraw()
 
+<<<<<<< HEAD
     def channel_bar_order(self, order=None):
         """The channel checkboxes as (channel, label), left to right.
 
@@ -2347,6 +2386,31 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     cbs[ci].config(text=text)
                 except Exception:
                     pass
+=======
+    def _refresh_channel_labels(self):
+        """Relabel the channel checkboxes to the run's dye order and re-pack
+        them in physical order, so the bar reads Ch1..Ch4 left to right and
+        agrees with the legend (Ch1 = the first dye in base order, not A)."""
+        col2chan = self._col_to_chan()
+        items = list(zip(getattr(self, "_chan_cbs", []),
+                         getattr(self, "_chan_cb_cols", [])))
+        placed = []
+        for cb, col in items:
+            ci = col2chan.get(col)
+            if ci is None:
+                continue
+            try:
+                cb.config(text=f"  Ch{ci + 1} {CHANNEL_ORDER[col]}  ")
+                placed.append((ci, cb))
+            except Exception:
+                pass
+        for _ci, cb in sorted(placed, key=lambda t: t[0]):
+            try:
+                cb.pack_forget()
+                cb.pack(side=tk.LEFT, padx=2)
+            except Exception:
+                pass
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
 
     def _chan_changed(self):
         """Channel on/off toggles refresh the viewer (and the picked-peak
@@ -3255,6 +3319,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    that subplot's corner: the scan under the pointer, its\n"
                "    voltage, and the dominant peak within one base on any visible\n"
                "    channel, marked [picked] once you have it.\n"
+<<<<<<< HEAD
 "  Peak area by drag…  is the same mode with the automation switched off,\n"
                "  for when you want to say where a peak starts and ends yourself.\n"
                "  Hold the left button and drag between the two points, and the\n"
@@ -3327,6 +3392,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    not fail loudly — it scores the sample's own peaks as the\n"
                "    standard and returns confident nonsense — so setting both to\n"
                "    the same channel is refused before a well is scored.\n"
+=======
+               "  •  The picked-peaks table is sorted by scan (then channel) per\n"
+               "    well, whatever order you clicked in; Undo last pick still\n"
+               "    removes the most recent click.\n"
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
                "  •  Channel identity follows the run's dye order everywhere:\n"
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"
@@ -3367,10 +3437,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
                 "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
                 "    (main/+A), height (V), area (V·scan), duplex label\n"
+<<<<<<< HEAD
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
                 "    grouped by sample (run folder, then well name) and ordered by\n"
                 "    scan inside each sample, never by click order, so one sample's\n"
                 "    peaks are never interleaved with another's.  That table is\n"
+=======
+                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  That table is\n"
+>>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
                 "    your labelled training library for ML — peak picking works with\n"
                 "    or without an internal standard.\n"
               "7. EXPORT  (File menu)\n"

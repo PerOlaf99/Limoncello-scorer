@@ -26,7 +26,7 @@ wired to the plate-validated **best basecaller** configs.
 | Run info panel | Yes — Comments menu |
 | Undo a mistaken base call (clear overlay) | Yes — Base calling → Clear base calls (undo) |
 | Sequencing trace (ESD peaks) view | Yes — Base calling menu + View menu |
-| Genotyping — manual peak picking (click/area, stutter & +A, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
+| Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 
 ## Requirements
@@ -210,15 +210,40 @@ scratch:**
   (V·scan). Clicking nearer the peak's actual height separates two channels
   that share a scan. The recognition method is selectable: Best prominence,
   Simple local maxima, or Gaussian fit.
+- **A peak's area is measured between its own two valleys.** The click radius
+  stays generous so the peak is found reliably, but the baseline for height,
+  area, onset/end and the variant fraction is only ever drawn between the
+  nearest valley *on each side of that peak* (capped at 0.95 × the run's own
+  peak spacing). A tight pair of alleles therefore no longer borrows each
+  other's area — the small allele of a het pair used to report a nearly equal
+  area, and a fake ~50/50 fraction with it. The fractions in the table are
+  always `small/(small+large)` of the picked areas, never of the raw window.
+- **Hovering a subplot shows a crosshair and a live readout** in that
+  subplot's corner: the scan under the pointer, its voltage, and the dominant
+  peak within one base on any visible channel, marked `[picked]` once you have
+  it — so you can line up on the exact hump before clicking. The reported peak
+  is the tallest nearby one, not merely the closest, so a flat-channel wobble
+  cannot win over the real peak.
+- **The picked-peaks table is sorted by scan** (then channel) inside each well,
+  so the order you clicked in never scrambles the listing; **Undo last pick**
+  still removes the most recent click.
+- **Channel identity follows the run's dye order, everywhere.** `Base order
+  (instrument)` (ACTG, TGCA, GATC, CTAG) decides which dye sits on Ch1–Ch4;
+  the channel checkboxes, both legends and the exported `Ch` column all use
+  that same mapping, so hiding Ch1 hides the same trace in the viewer and while
+  picking. Changing the dye order with picks already on screen keeps them and
+  says so in the status bar.
 - **Mark start/end from the 2nd derivative** (on by default): square ticks
   show where each picked peak lifts off its baseline. The 2nd derivative of
   the smoothed trace crosses the noise floor from flat to concave-up at the
   true start, and concave-up again on the return at the end. Uncheck for a
   clean look. The start/end scans are also written to the exported table.
-- **Add stutter & +A** (on by default) also tags the strongest satellite on
-  each side of the main peak — the stutter peak (~1 repeat shorter) and the
-  Taq A-addition (+A shoulder a few scans later). Turn it off when clicking
-  allele peaks so a second allele is not swallowed by the +A tag.
+- **Add +A** (on by default) tags the strongest satellite *trailing* the main
+  peak — the Taq A-addition a few scans later. Nothing is tagged in front of
+  the main peak: for a single-base-extension product that leading shoulder is
+  another A-addition on the GC-clamp side, not stutter, so it is left unmarked
+  rather than mislabelled. Turn the option off when clicking allele peaks so a
+  second allele is not swallowed by the +A tag.
 - **Internal standard** (CTC-CE duplex pattern): the four standard peaks are
   all **one** fragment (the same number of base pairs) — cycling-temperature
   capillary electrophoresis separates them by *sequence*: peaks 1–2 are the two
@@ -238,7 +263,7 @@ scratch:**
   undo it first to re-pick). Neighbouring peaks such as the two alleles of a
   heterozygote remain pickable; **Save peaks table…**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
-  channel, base, kind (`main`/`stutter`/`+A`), start/end scan (2nd derivative),
+  channel, base, kind (`main`/`+A`), start/end scan (2nd derivative),
   height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and
   fraction. That table is a labelled **training library for ML** — picking
   works with or without an internal standard.
