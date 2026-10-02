@@ -1434,6 +1434,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _build_pick_table(self, area=False):
         tblf = ttk.Frame(self.center)
         tblf.pack(fill=tk.X, padx=4, pady=2)
+<<<<<<< HEAD
         if area:
             cols = ("run", "well", "ch", "start", "stop", "mid", "h V", "area")
             widths = {"run": 90, "well": 58, "ch": 34, "start": 48, "stop": 48,
@@ -1450,6 +1451,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             stretch = ("scan", "kind")
         self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings",
                                       height=4)
+=======
+        cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac",
+                "MF")
+        self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings", height=4)
+        widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34, "kind": 62,
+                  "h V": 66, "area": 66, "frac": 50, "MF": 52}
+>>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
         for c in cols:
             self.pick_tree.heading(c, text=c)
             self.pick_tree.column(c, width=widths[c],
@@ -2054,6 +2062,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_pick_table()
         self.redraw()
 
+<<<<<<< HEAD
     # ------------------------------------------------------- auto-genotyping
     def _auto_targets(self):
         """The wells to score: every selected well that has a file on disk."""
@@ -2284,6 +2293,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"Saved {len(self._auto_rows)} auto-genotype "
                             f"rows to {Path(path).name}.")
 
+=======
+>>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
     def _gen_save(self):
         if not self.genotyping_active:
             return
@@ -3436,7 +3447,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    Variant ratios come from the RELATIVE areas of these duplex peaks,\n"
                 "    so no bp ladder is involved.\n"
                 "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
-                "    8 scans (classic heterozygote): small/(small+large).\n"
+                "    one repeat (~one base) of each other: small/(small+large).\n"
+                "  • Mass-action MF (CTCE)  —  Tag duplex species for MF…\n"
+                "    (Genotyping menu) tags ONE allelic position (the last-picked\n"
+                "    main's own cluster, so two positions in a well stay apart) with\n"
+                "    the same HOM1/HOM2/HET1/HET2 names, and that position then\n"
+                "    reports the PCR mass-action fraction in the MF column:\n"
+                "        MF = (A_MUT + 1/2 A_HET) / (A_WT + A_MUT + A_HET)\n"
+                "    A_WT/A_MUT are the homoduplex areas, A_HET the combined\n"
+                "    heteroduplex area.  The 1/2 term is the point: a clean\n"
+                "    heterozygote reads 0.5, not the 0.25 a plain area ratio of\n"
+                "    the two homoduplexes gives, and below ~5% MF, where all the\n"
+                "    mutant strands have re-annealed and no mutant homoduplex is\n"
+                "    visible at all, the whole low fraction is carried by A_HET.\n"
+                "    The ai column adds the allelic imbalance\n"
+                "    A_HOMO1/(A_HOMO1+A_HOMO2), which needs no wild-type choice.\n"
+                "    Both stay blank until a position is tagged.  The peak count\n"
+                "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
+                "    3 = 1 + 2, 2 = 2 + 0.\n"
 "  • Undo last pick removes the most recent pick (with its +A\n"
                  "    tags); Clear picks empties the whole table.  An area that is\n"
                  "    already picked cannot be picked again: the click is refused and\n"
@@ -3448,9 +3476,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    (main/+A), height (V), area (V·scan), duplex label\n"
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 >>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
+=======
+                "    (HOM1/HOM2/HET1/HET2), length (bp), fraction, and the\n"
+                "    mass-action mf and ai.  Rows are\n"
+>>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
                 "    grouped by sample (run folder, then well name) and ordered by\n"
                 "    scan inside each sample, never by click order, so one sample's\n"
                 "    peaks are never interleaved with another's.  That table is\n"

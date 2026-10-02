@@ -271,6 +271,25 @@ scratch:**
 - **Mutant/variant fraction** is computed for two main peaks of the *same
   channel* within one repeat (~one base): small/(small+large), shown in the
   table. The grouping window scales with the run's own peak spacing.
+- **Mass-action MF** (CTCE) — **Genotyping → Tag duplex species for MF…** tags
+  *one allelic position* (the last-picked main's own cluster on its channel, so
+  two positions in one well stay apart) with the same `HOM1`/`HOM2`/`HET1`/`HET2`
+  names the internal standard gets, and that position then reports the PCR
+  mass-action mutant fraction in the **MF** column:
+
+  ```
+  MF = (A_MUT + ½ × A_HET) / (A_WT + A_MUT + A_HET)
+  ```
+
+  where `A_WT`/`A_MUT` are the homoduplex areas and `A_HET` the combined
+  heteroduplex area. The ½ term is the point of the formula: a clean
+  heterozygote reads **0.5**, not the 0.25 a plain area ratio of the two
+  homoduplexes gives, and below ≈5 % MF — where the mutant strands have all
+  re-annealed and *no mutant homoduplex is visible at all* — the whole low
+  fraction is carried by `A_HET`. The **ai** column adds the allelic imbalance
+  `A_HOMO1 / (A_HOMO1 + A_HOMO2)`, which needs no wild-type choice. Both are
+  blank until a position is tagged; `fraction` keeps its plain meaning. The
+  peak count decides the homoduplex/heteroduplex split: 4 = 2+2, 3 = 1+2, 2 = 2+0.
 - **Undo last pick / Clear picks** manage the picks (`Ctrl+Z` undoes the last
   pick while peak picking is active); an already-picked **area
   cannot be picked again** (the click is refused with a status-bar message —
@@ -278,8 +297,9 @@ scratch:**
   heterozygote remain pickable; **Save peaks table…**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
   channel, base, kind (`main`/`+A`), start/end scan (2nd derivative),
-  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and
-  fraction. Rows are written **grouped by sample** (run folder, then well name)
+  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp),
+  fraction, and the mass-action `mf` and `ai`. Rows are written **grouped by
+  sample** (run folder, then well name)
   and **in scan order inside each sample**, never in click order, so one
   sample's peaks are never interleaved with another's. That table is a
   labelled **training library for ML** — picking
