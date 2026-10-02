@@ -29,7 +29,7 @@ wired to the plate-validated **best basecaller** configs.
 | Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
-| Batch auto-genotyping — find the internal-standard quartet and call every well | Library only — `genotyping.auto_genotype()`; **no menu item yet** |
+| Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Genotyping ▸ Auto-genotyping |
 
 ## Requirements
 
@@ -363,14 +363,21 @@ matplotlib. It does two jobs:
 
 There is also a third job, still library-only:
 
-- **Batch auto-genotyping** — `genotyping.auto_genotype(doc, ...)` locates the
-  internal-standard quartet with `find_is_quartet()`, measures the sample's
-  four duplexes, and returns a call per well with a human-readable *reason*
-  when it cannot call one. It reproduces 95 of the 96 wells of the T9 plate
-  against the manual ground truth. It has **no menu item yet** and its
-  channel roles are still the T9 defaults (`DEFAULT_IS_CHANNEL = 3`,
-  `DEFAULT_SAMPLE_CHANNEL = 2`), so it is not trustworthy on another kit until
-  those become explicit configuration — see `RELEASE_SUMMARY.md`.
+- **Batch auto-genotyping** — **Genotyping ▸ Auto-genotyping ▸ Auto-genotype
+  selected wells…** calls every selected well with no clicking:
+  `auto_genotype()` locates the internal-standard quartet with
+  `find_is_quartet()`, measures the sample's four duplexes, and returns a call
+  per well with a human-readable *reason* when it cannot call one. It
+  reproduces 95 of the 96 wells of the T9 plate against the manual ground
+  truth. Results land in their own table below the plot — well, call, frac,
+  the four duplex areas and their significances, flags and reason — which
+  never overwrites the manual pick table, and **Save auto-genotype table…**
+  writes them out as CSV/XLSX/JSON.
+  Which channel carries the standard and which the sample is a property of the
+  assay, not of the dye order, so **Channel roles (standard / sample)…** asks
+  for it rather than assuming the T9 defaults. Swapping the pair does not fail
+  loudly — it scores the sample's own peaks as the standard and returns
+  confident nonsense — so the same channel cannot be set as both.
 
 ```bash
 # QC every well in a folder and write a self-contained HTML report
@@ -406,10 +413,10 @@ python -m pytest -q
 The suite covers the trace loaders, the vendored basecaller, the scorer logic,
 the auto-genotyping engine, drag-area measuring and the genotyping picker
 engine; genotyping tests skip automatically where tkinter/matplotlib are
-unavailable, and the GUI test `tests/test_duplex_ui.py` additionally skips
-without a `DISPLAY`. Current state: **168 passed, 7 skipped**. CI
-(`.github/workflows/ci.yml`) runs the same command on Python 3.9, 3.11 and
-3.12.
+unavailable, and the GUI tests (`tests/test_duplex_ui.py`,
+`tests/test_auto_genotype_ui.py`) additionally skip without a `DISPLAY`.
+Current state: **174 passed, 7 skipped**. CI (`.github/workflows/ci.yml`) runs
+the same command on Python 3.9, 3.11 and 3.12.
 
 ## Note on environment
 

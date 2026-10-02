@@ -2105,6 +2105,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
     # ------------------------------------------------------- auto-genotyping
     def _auto_targets(self):
         """The wells to score: every selected well that has a file on disk."""
@@ -2335,8 +2338,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"Saved {len(self._auto_rows)} auto-genotype "
                             f"rows to {Path(path).name}.")
 
+<<<<<<< HEAD
 =======
 >>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
+=======
+>>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
     def _gen_save(self):
         if not self.genotyping_active:
             return
@@ -3463,6 +3469,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
                "    3 = 1 + 2, 2 = 2 + 0.\n"
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
                "  •  Auto-genotyping  —  Genotyping ▸ Auto-genotyping ▸ Auto-genotype\n"
                "    selected wells… calls every selected well with no clicking:\n"
                "    it finds the internal-standard quartet, measures the four\n"
@@ -3479,6 +3488,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    not fail loudly — it scores the sample's own peaks as the\n"
                "    standard and returns confident nonsense — so setting both to\n"
                "    the same channel is refused before a well is scored.\n"
+<<<<<<< HEAD
 =======
                "  •  The picked-peaks table is sorted by scan (then channel) per\n"
                "    well, whatever order you clicked in; Undo last pick still\n"
@@ -3486,6 +3496,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
 =======
 >>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
+=======
+>>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
                "  •  Channel identity follows the run's dye order everywhere:\n"
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"
