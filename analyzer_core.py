@@ -346,6 +346,23 @@ def discover_rsd(folders: List[Path]) -> List[Path]:
     return out
 
 
+def acgt_index_for_channel(base_order: str, channel: int) -> int:
+    """Column of a ``TraceDocument.acgt`` array holding a 1-based *channel*.
+
+    ``acgt`` is always in A,C,G,T order, but the physical channel order is the
+    plate's dye order -- "ACTG" on a MegaBACE, so Ch1=A, Ch2=C, Ch3=T, Ch4=G.
+    Getting this backwards silently swaps the sample and standard channels, so
+    route every channel lookup through here.  Kept here (headless) so the GUI
+    and the scorer share one implementation.
+    """
+    order = (base_order or "ACTG").upper()
+    if len(order) != 4 or set(order) != set("ACGT"):
+        raise ValueError(f"Unexpected base_order {base_order!r}")
+    if not 1 <= channel <= 4:
+        raise ValueError(f"Channel must be 1..4, got {channel!r}")
+    return "ACGT".index(order[channel - 1])
+
+
 def _reorder(ch: np.ndarray, base_order: str) -> np.ndarray:
     """Reorder columns from instrument order string -> A,C,G,T."""
     order = base_order.upper()

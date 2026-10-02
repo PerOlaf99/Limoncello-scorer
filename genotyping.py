@@ -37,7 +37,11 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from analyzer_core import load_trace
+from analyzer_core import acgt_index_for_channel, load_trace  # noqa: F401  (re-export)
+
+# numpy dropped ``trapz`` in 2.0 (renamed ``trapezoid``); accept both so peak
+# areas keep working on the whole supported numpy range (>=1.20).
+_trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
 
 CHANNEL_ORDER = "ACGT"
 CLICK_RADIUS = 30          # scans searched around a click
@@ -112,20 +116,10 @@ IS_SAT_RATIO = 1.15
 IS_MAX_CANDIDATES = 60       # keep the O(n^4) search bounded
 
 
-def acgt_index_for_channel(base_order: str, channel: int) -> int:
-    """Column of ``doc.acgt`` holding MegaBACE *channel* (1-based).
-
-    ``doc.acgt`` is always in ACGT order, but the physical channel order is the
-    plate's dye order -- "ACTG" on a MegaBACE, so Ch1=A, Ch2=C, Ch3=T, Ch4=G.
-    Getting this backwards is easy and silently swaps the sample and standard
-    channels, so route every channel lookup through here.
-    """
-    order = (base_order or "ACTG").upper()
-    if len(order) != 4 or set(order) != set("ACGT"):
-        raise ValueError(f"Unexpected base_order {base_order!r}")
-    if not 1 <= channel <= 4:
-        raise ValueError(f"Channel must be 1..4, got {channel!r}")
-    return "ACGT".index(order[channel - 1])
+# ``acgt_index_for_channel`` is re-exported from analyzer_core (imported at the
+# top of this module) so tests and the GUI can keep calling
+# ``genotyping.acgt_index_for_channel`` while the headless scorer uses the same
+# implementation without pulling in Tk/matplotlib.
 
 
 def _is_candidates(trace, cut=1900):
@@ -338,7 +332,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
         b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
         apex = float(y[a:b].max()) if b > a else 0.0
-        areas.append(max(0.0, float(np.trapz(y[lo:hi] - base, dx=1.0))))
+        areas.append(max(0.0, float(_trapz(y[lo:hi] - base, dx=1.0))))
         snrs.append((apex - base) / sigma if sigma > 0 else 0.0)
 
     for i, name in enumerate(("hom1", "hom2", "het1", "het2")):
