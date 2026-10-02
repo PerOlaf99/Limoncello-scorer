@@ -22,6 +22,8 @@ CLI::
 
     python scorer.py qc    example_data/M13/*.rsd --report run.html
     python scorer.py peaks picks.csv --out scored.csv
+    python scorer.py ladders
+    python scorer.py size  well.rsd --ladder geneflo1000_rox --out sizes.csv
     python scorer.py check
 """
 from __future__ import annotations
@@ -392,7 +394,7 @@ def t9_allele_fraction(hom1, hom2, het1, het2) -> float:
     return (hom1 + 0.5 * (het1 + het2)) / total
 
 
-def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
+def t9_call(hom1, hom2, het1, het2, sigmas=None) -> tuple:
     """Genotype for one rs1695 position -> ``(call, fraction, flags)``.
 
     *sigmas* is the optional ``(hom1, hom2, het1, het2)`` peak significance
@@ -402,35 +404,12 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
 
     ``call`` is one of ``CALLS``.  ``flags`` is a set and may contain ``"ai"``
     for a heterozygote far off 50/50.
-
-    *het2* may be ``None``/omitted when the two heteroduplexes co-migrate and so
-    measure as a single band.  That band carries the area of both heteroduplex
-    strands together, so it is passed as *het1* and the het test falls back to
-    requiring that one merged band to be present above the noise floor.  This is
-    not a relaxation of the split-sample test, which is untouched: the separated
-    case still requires two comparable heteroduplex bands, because a single band
-    sitting where only one heteroduplex belongs is a shoulder, not a
-    heterozygote.
     """
-    # A merged heteroduplex is measured as one band holding both strands'
-    # area.  Keep that as a distinct state (it is what lets the het test relax
-    # below) while the arithmetic downstream still sees a plain number.
-    merged_het = het2 is None
-    het2 = 0.0 if merged_het else het2
-
-    sigmas = tuple(x for x in (sigmas or ()) if x is not None)
-    # For global dominance, only consider homoduplex sigmas - het bands shouldn't
-    # make a weak homoduplex sample appear dominant (prevents het bands standing
-    # in for missing homs).
-    hom_sigmas = tuple(s for i, s in enumerate(sigmas) if i < 2 and s is not None)
-    dom = max(hom_sigmas) if hom_sigmas else (max(sigmas) if sigmas else None)
+    sigmas = tuple(sigmas or ())
+    dom = max(sigmas) if len(sigmas) == 4 else None
     total = hom1 + hom2 + het1 + het2
-    s1 = sigmas[0] if len(sigmas) > 0 else None
-    s2 = sigmas[1] if len(sigmas) > 1 else None
-    s3 = sigmas[2] if len(sigmas) > 2 else None
-    s4 = sigmas[3] if len(sigmas) > 3 else None
-    lo, hi = ((min(s3, s4), max(s3, s4))
-              if (s3 is not None and s4 is not None) else (None, None))
+    s3, s4 = (sigmas[2], sigmas[3]) if len(sigmas) == 4 else (None, None)
+    lo, hi = (min(s3, s4), max(s3, s4)) if s3 is not None else (None, None)
 
     # A well with no usable sample is a no-call, not a homozygote.
     if dom is not None and dom < T9_MIN_DOMINANT_SIGMA:
@@ -441,14 +420,8 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     frac = t9_allele_fraction(hom1, hom2, het1, het2)
     flags = set()
 
-    # Het needs both heteroduplexes, present and comparable.  When they
-    # co-migrate there is one merged band instead, which is equally conclusive
-    # that both alleles are present -- that band cannot form from a single
-    # allele, so its presence alone carries the evidence.
-    if merged_het:
-        both_present = (het1 > 0 and
-                        (s3 is None or s3 >= T9_MIN_HET_SIGMA))
-    elif s3 is not None:
+    # Het needs both heteroduplexes, present and comparable.
+    if s3 is not None:
         both_present = (lo >= T9_MIN_HET_SIGMA and hi > 0
                         and lo / hi >= T9_HET_RATIO_MIN)
     else:
@@ -458,45 +431,17 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
         both_present = het1 > 0 and het2 > 0 and min(het1, het2) / max(het1, het2) \
             >= T9_HET_RATIO_MIN
 
-    # A heterozygote builds *both* homoduplexes -- one per allele -- so the
-    # second homoduplex band has to carry area.  Without that requirement a het
-    # can rest entirely on a band in the heteroduplex neighbourhood while no
-    # second allele exists, which is exactly what the Taq A conformers do on
-    # CYBA: they are a second sub-peak beside the one real allele, not a second
-    # allele.  Measured across every het call carrying a reference genotype,
-    # 0 of 31 genuine hets have an empty second homoduplex while 5 of 11 false
-    # ones do, so this costs no true call and rejects half the false ones.
-    # Also require at least one homoduplex to be significant when sigma info
-    # is available; a strong het band should not create a het call when both
-    # homs are below threshold.
-    hom1_ok_sig = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
-    hom2_ok_sig = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
-    if both_present and hom2 > 0 and (s1 is None or hom1_ok_sig or hom2_ok_sig):
+    if both_present:
         if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
             flags.add("ai")
         return "het", frac, flags
 
     # Homozygote: the labelled homoduplex says which allele, so unlike the
     # generic path this can distinguish the two homozygotes.
-    #
-    # A hom allele has to be *there*.  ``dom`` above only proves that *some*
-    # band is strong, and the two are not the same claim: a strong
-    # heteroduplex will happily carry a homozygous call that its own homoduplex
-    # does not support.  ABCC2 H12 reads hom1 at 8.5 sigma against het1 at 44,
-    # and was called hom-1 on the strength of a band belonging to a different
-    # molecule.  And H01 read hom-2 from area2 25282 carrying only 16.9 sigma --
-    # a segment-width artefact, since D07 has the same shape (area2 29354 at
-    # 13.0 sigma) and is a hom-1 purely because its real allele happened to be
-    # the larger area.  Ordering by area alone is not a substitute for asking
-    # whether the allele is present.
-    hom1_ok = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
-    hom2_ok = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
-    if hom1_ok and (not hom2_ok or hom1 >= hom2):
+    if hom1 > 0 and (hom2 <= 0 or hom1 >= hom2):
         return "hom-1", frac, flags
-    if hom2_ok:
+    if hom2 > 0:
         return "hom-2", frac, flags
-    if hom1_ok:
-        return "hom-1", frac, flags
     return "no-call", 0.0, flags
 
 
@@ -603,6 +548,54 @@ def html_report(qc_rows: List[dict] = (), summary_rows: List[dict] = (),
     return "\n".join(parts)
 
 
+def sizing_html(results, title: str = "Limoncello fragment sizing report") -> str:
+    """Self-contained HTML report for fragment-length sizing results.
+
+    *results* is an iterable of ``fragment_sizing.SizingResult``.  Each well
+    gets a fit summary (ladder, channels, anchors, leave-one-out error, any
+    warnings) followed by its sized peaks.
+    """
+    parts = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        f"<title>{html.escape(title)}</title>",
+        "<style>body{font-family:system-ui,Arial,sans-serif;margin:24px;"
+        "color:#1a1c22}h1,h2{color:#22350e}table{border-collapse:collapse;"
+        "margin:8px 0 24px;font-size:13px}th,td{border:1px solid #d7dbe0;"
+        "padding:4px 8px;text-align:left}th{background:#f2f4f7}"
+        ".note{color:#555;font-size:12px}.warn{color:#b3261e;font-size:12px}"
+        "</style></head><body>",
+        f"<h1>{html.escape(title)}</h1>",
+    ]
+    results = list(results)
+    if not results:
+        parts.append("<p>No results.</p>")
+    for res in results:
+        header = html.escape(res.well or res.file or "?")
+        parts.append(f"<h2>Well {header}</h2>")
+        q = res.quality
+        err = q.get("rms_error_bp")
+        err_txt = "n/a (need >=4 anchors)" if err is None else f"{err:.2f} bp"
+        fit = [
+            ["Ladder", f"{res.ladder.name} ({res.ladder.dye})"],
+            ["Channels", f"ladder Ch{res.ladder_channel}, sample Ch{res.sample_channel}"
+                         f" (order {res.base_order})"],
+            ["Ladder anchors matched", len(res.anchors)],
+            ["Leave-one-out RMS error", err_txt],
+            ["Sample peaks", len(res.rows)],
+        ]
+        parts.append(_table(["field", "value"], fit))
+        for warning in res.warnings:
+            parts.append(f"<p class='warn'>! {html.escape(warning)}</p>")
+        headers = ["scan", "length_bp", "height", "area", "in_range"]
+        parts.append(_table(
+            headers,
+            [[r.get(h) for h in headers] for r in res.rows]))
+    parts.append("<p class='note'>length_bp outside the ladder span is "
+                 "extrapolated (in_range = False) and less trustworthy.</p>")
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # persistence helpers
 # --------------------------------------------------------------------------- #
@@ -681,6 +674,62 @@ def _cmd_peaks(args) -> int:
     return 0
 
 
+def _cmd_ladders(_args) -> int:
+    from fragment_sizing import (BUILTIN_LADDERS, KNOWN_MEGABACE_STANDARDS,
+                                 list_ladders)
+    print("Bundled ladders (use by name with `size --ladder`):")
+    for key in list_ladders():
+        data = BUILTIN_LADDERS[key]
+        lengths = data["lengths"]
+        span = f"{min(lengths)}-{max(lengths)} bp, {len(lengths)} fragments"
+        print(f"  {key:<18} {data['name']:<22} {data['dye']:<6} {span}")
+    print("\nMegaBACE-compatible standards (fill in lengths from your kit insert):")
+    for std in KNOWN_MEGABACE_STANDARDS:
+        res = "" if std["resolution_bp"] is None else f", {std['resolution_bp']} bp resolution"
+        print(f"  {std['name']}: {std['dye']}, {std['range_bp']}{res}")
+    print("\nA custom ladder is a comma-separated length list or a JSON file:")
+    print('  python scorer.py size well.rsd --lengths 50,100,150,200')
+    print('  python scorer.py size well.rsd --ladder my_ladder.json')
+    return 0
+
+
+def _cmd_size(args) -> int:
+    from analyzer_core import load_trace
+    from fragment_sizing import load_ladder, size_trace
+    try:
+        ladder = load_ladder(args.lengths or args.ladder)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:  # noqa: BLE001
+        print(f"ladder: {exc}", file=sys.stderr)
+        return 2
+
+    results = []
+    for path in args.inputs:
+        try:
+            doc = load_trace(Path(path))
+            res = size_trace(doc, ladder, ladder_channel=args.ladder_channel,
+                             sample_channel=args.sample_channel,
+                             base_order=args.base_order)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"{path}: {exc}", file=sys.stderr)
+            continue
+        results.append(res)
+        err = res.quality.get("rms_error_bp")
+        err_txt = "n/a" if err is None else f"{err:.2f} bp"
+        print(f"{res.well or res.file:<10} {len(res.rows):>3} peak(s)  "
+              f"anchors {len(res.anchors):>2}  LOO RMS {err_txt}")
+        for warning in res.warnings:
+            print(f"    ! {warning}", file=sys.stderr)
+
+    rows = [r for res in results for r in res.rows]
+    if args.out:
+        write_rows(args.out, rows)
+        print(f"wrote {args.out} ({len(rows)} row(s))")
+    if args.report:
+        Path(args.report).write_text(sizing_html(results), encoding="utf-8")
+        print(f"wrote {args.report}")
+    return 0 if results else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="limoncello-scorer",
                                  description=__doc__.splitlines()[0])
@@ -699,6 +748,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help="write the scored rows here (.csv or .json)")
     p.add_argument("--report", help="write an HTML genotype report here")
     p.set_defaults(func=_cmd_peaks)
+
+    s = sub.add_parser("size", help="size fragment peaks against a ladder")
+    s.add_argument("inputs", nargs="+", help=".rsd / .scf / .ab1 / text traces")
+    s.add_argument("--ladder", default="genescan500_rox",
+                   help="ladder name, JSON path or lengths (default genescan500_rox)")
+    s.add_argument("--lengths",
+                   help="comma-separated ladder lengths (overrides --ladder)")
+    s.add_argument("--ladder-channel", type=int, default=4,
+                   help="ladder channel 1..4 (default 4)")
+    s.add_argument("--sample-channel", type=int, default=2,
+                   help="sample channel 1..4 (default 2)")
+    s.add_argument("--base-order", default="ACTG",
+                   help="plate dye order, e.g. ACTG (default)")
+    s.add_argument("--out", help="write sized peak rows here (.csv or .json)")
+    s.add_argument("--report", help="write an HTML sizing report here")
+    s.set_defaults(func=_cmd_size)
+
+    ld = sub.add_parser("ladders", help="list ladders available to `size`")
+    ld.set_defaults(func=_cmd_ladders)
 
     c = sub.add_parser("check", help="report which parts are available")
     c.set_defaults(func=_cmd_check)

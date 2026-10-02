@@ -29,7 +29,7 @@ wired to the plate-validated **best basecaller** configs.
 | Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
-| Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Genotyping ▸ Auto-genotyping |
+| Fragment-length sizing — size PCR/ssDNA peaks against a ladder (bp), user-definable ladders | Yes — `scorer.py size` |
 
 ## Requirements
 
@@ -64,7 +64,8 @@ Limoncello-scorer/
 ├── sequence_analyzer.py       # Tk desktop viewer / basecaller GUI
 ├── analyzer_core.py           # loaders + basecaller wrapper (vendor discovery, --check)
 ├── genotyping.py              # headless PeakPicker engine + Tk picker dialog
-├── scorer.py                  # genotype calls, confidence, read QC, HTML report
+├── fragment_sizing.py         # ladder registry + fragment-length sizing (headless)
+├── scorer.py                  # genotype calls, read QC, fragment sizing, HTML report
 ├── basecall.py                # standalone FASTA/FASTQ basecaller CLI
 ├── configs.py                 # basecaller presets (GOLDEN / PRECISION / SOFT)
 ├── cimarron_basecaller/       # vendored base caller package (numpy/scipy)
@@ -213,14 +214,12 @@ letters, peak marks and quality curve look confusing), undo it with
 the `.rsd`/`.scf` data files are never modified.
 
 The **Genotyping** menu is an independent top-level heading (between *Base
-calling* and *Comments*). It holds two modes, **Manual peak picking…** and
-**Peak area by drag…**, neither of which needs a second window or a pop-up:
-the main window stays exactly as it is — the same stacked viewer, zoom bars,
-Reset view, µA overlay and **Channels** row — but clicking a peak now records
-it for that well, and the *Called sequence* box below the plot becomes the
-*Picked peaks* or *Measured areas* table. The two are radio buttons in effect:
-at most one owns the canvas, the menu shows which is live, and ticking one
-switches to it. **Peak picking is built from scratch:**
+calling* and *Comments*). It holds **Manual peak picking…**, which needs no
+second window and no pop-up: the main window stays exactly as it is — the same
+stacked viewer, zoom bars, Reset view, µA overlay and **Channels** row — but
+clicking a peak now records it for that well, and the *Called sequence* box
+below the plot becomes the *Picked peaks* table. **Peak picking is built from
+scratch:**
 
 - Show several wells at once with the **Graphs** spinbox (4–6 at a time is
   the intended workflow), zoom in with the axis bars / mouse wheel, and click
@@ -294,39 +293,15 @@ switches to it. **Peak picking is built from scratch:**
 - **Mutant/variant fraction** is computed for two main peaks of the *same
   channel* within one repeat (~one base): small/(small+large), shown in the
   table. The grouping window scales with the run's own peak spacing.
-- **Mass-action MF** (CTCE) — **Genotyping → Tag duplex species for MF…** tags
-  *one allelic position* (the last-picked main's own cluster on its channel, so
-  two positions in one well stay apart) with the same `HOM1`/`HOM2`/`HET1`/`HET2`
-  names the internal standard gets, and that position then reports the PCR
-  mass-action mutant fraction in the **MF** column:
-
-  ```
-  MF = (A_MUT + ½ × A_HET) / (A_WT + A_MUT + A_HET)
-  ```
-
-  where `A_WT`/`A_MUT` are the homoduplex areas and `A_HET` the combined
-  heteroduplex area. The ½ term is the point of the formula: a clean
-  heterozygote reads **0.5**, not the 0.25 a plain area ratio of the two
-  homoduplexes gives, and below ≈5 % MF — where the mutant strands have all
-  re-annealed and *no mutant homoduplex is visible at all* — the whole low
-  fraction is carried by `A_HET`. The **ai** column adds the allelic imbalance
-  `A_HOMO1 / (A_HOMO1 + A_HOMO2)`, which needs no wild-type choice. Both are
-  blank until a position is tagged; `fraction` keeps its plain meaning. The
-  peak count decides the homoduplex/heteroduplex split: 4 = 2+2, 3 = 1+2, 2 = 2+0.
 - **Undo last pick / Clear picks** manage the picks (`Ctrl+Z` undoes the last
   pick while peak picking is active); an already-picked **area
   cannot be picked again** (the click is refused with a status-bar message —
   undo it first to re-pick). Neighbouring peaks such as the two alleles of a
-  heterozygote remain pickable. **Peak area by drag…** instead measures the
-  area above the straight line between two points you drag, in the same window
-  and with the same mode plumbing — handy when a peak's detected bounds look
-  wrong and you would rather bracket it by eye than argue with the algorithm.
-  Undo / Clear / Save work the same way in either mode. **Save peaks table…**
+  heterozygote remain pickable; **Save peaks table…**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
   channel, base, kind (`main`/`+A`), start/end scan (2nd derivative),
-  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp),
-  fraction, and the mass-action `mf` and `ai`. Rows are written **grouped by
-  sample** (run folder, then well name)
+  height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and
+  fraction. Rows are written **grouped by sample** (run folder, then well name)
   and **in scan order inside each sample**, never in click order, so one
   sample's peaks are never interleaved with another's. That table is a
   labelled **training library for ML** — picking
@@ -350,7 +325,7 @@ The **Comments** menu sits between *Genotyping* and *Help*:
 ## Scoring, QC and reports (`scorer.py`)
 
 `scorer.py` is the headless half of the tool and needs neither tkinter nor
-matplotlib. It does two jobs:
+matplotlib. It does three jobs:
 
 - **Read QC** — base-call a trace and report length, Qmean/Qmin, the fraction of
   weak calls, N count, peak spacing (mean and CV), per-channel signal maxima and
@@ -360,24 +335,9 @@ matplotlib. It does two jobs:
   genotyping picker exports, and the ML training library) into a per-position
   `call` (`het` / `hom-major` / `no-call`), the minor-allele `fraction` and a
   0–100 `confidence`, plus a one-line genotype per well.
-
-There is also a third job, still library-only:
-
-- **Batch auto-genotyping** — **Genotyping ▸ Auto-genotyping ▸ Auto-genotype
-  selected wells…** calls every selected well with no clicking:
-  `auto_genotype()` locates the internal-standard quartet with
-  `find_is_quartet()`, measures the sample's four duplexes, and returns a call
-  per well with a human-readable *reason* when it cannot call one. It
-  reproduces 95 of the 96 wells of the T9 plate against the manual ground
-  truth. Results land in their own table below the plot — well, call, frac,
-  the four duplex areas and their significances, flags and reason — which
-  never overwrites the manual pick table, and **Save auto-genotype table…**
-  writes them out as CSV/XLSX/JSON.
-  Which channel carries the standard and which the sample is a property of the
-  assay, not of the dye order, so **Channel roles (standard / sample)…** asks
-  for it rather than assuming the T9 defaults. Swapping the pair does not fail
-  loudly — it scores the sample's own peaks as the standard and returns
-  confident nonsense — so the same channel cannot be set as both.
+- **Fragment-length sizing** — find a ladder's peaks, match them to the kit's
+  known lengths, and read every sample peak back through the resulting
+  `scan -> bp` curve. See the next section.
 
 ```bash
 # QC every well in a folder and write a self-contained HTML report
@@ -403,6 +363,87 @@ the score is how far the minor-allele fraction sits from the call boundary, 30%
 is how well the two alleles stand clear of the noise, and an internal-standard
 (HOM/HET duplex) match pins it to at least 80.
 
+## Fragment-length sizing (`scorer.py size`)
+
+The other half of genotyping: a PCR/ssDNA sample is co-run with a **size
+standard** (ladder) labelled with a different fluorophore, and every sample
+peak's length in bp is read off the ladder. This is *sizing*, not allele
+calling — it needs no internal standard and no prior knowledge of the sample.
+
+```bash
+# what ladders are built in, and which MegaBACE kits are compatible
+python scorer.py ladders
+
+# size a lane against the bundled 400-1000 bp ROX ladder
+python scorer.py size well.rsd --ladder geneflo1000_rox \
+    --ladder-channel 4 --sample-channel 2 --out sizes.csv --report sizes.html
+
+# a ladder that is not bundled: inline lengths or a JSON file
+python scorer.py size well.rsd --lengths 50,100,150,200,250,300
+python scorer.py size well.rsd --ladder my_ladder.json
+```
+
+How it works, and what to watch:
+
+- **Channels are physical.** Ladder and sample live on different channels of
+  the same well. They are given as 1–4 in the plate's dye order (`--base-order`,
+  default `ACTG`), the *same* convention as the basecaller and the picker. The
+  default is sample on Ch2 and ladder on Ch4, which is the common
+  FAM-sample / ROX-ladder layout, but the pair is a property of the **kit** —
+  it cannot be guessed from the trace, so a run whose channels differ must say
+  so. `python scorer.py ladders` and `size` print the channels used.
+- **Matching is order-based.** Ladder peaks and the kit's lengths are aligned
+  monotonically (a Needleman–Wunsch alignment), so a missing or extra band is
+  skipped instead of shifting every length. The fit is a shape-preserving PCHIP
+  curve through the matched anchors — the classic `scan -> bp` size-call curve.
+- **Accuracy is reported honestly.** A residual on the fit is always zero, so
+  the tool reports the **leave-one-out RMS error** in bp (each anchor predicted
+  from the others). Below four anchors it reports `n/a` rather than a falsely
+  precise zero, and `size` warns when too few ladder peaks matched (usually a
+  wrong ladder channel or a wrong length table).
+- **Out-of-range peaks are flagged.** A peak whose scan falls outside the
+  ladder's span is extrapolated linearly and written with `in_range = False`;
+  those bp values are the least trustworthy.
+
+### Ladders: built in, or your own
+
+Two ROX standards are bundled by name (`python scorer.py ladders` lists them):
+**GeneScan 500 ROX** and **Geneflo 1000 ROX** (400–1000 bp, 25 bp steps). Any
+other kit is a JSON file:
+
+```json
+{"name": "My FAM ladder", "dye": "FAM",
+ "lengths": [50, 100, 150, 200, 250], "notes": "home-made"}
+```
+
+`dye` is free text (it only labels the report), so a lab can use a ladder with
+a fluorophore of its choice. The `lengths` are the only thing that matters.
+
+### MegaBACE-compatible standards
+
+The MegaBACE genotyping chemistry uses an **ET ROX** size standard (FAM donor /
+ROX acceptor) that is excited by the blue 488 nm laser; the recommended
+standards are **ET400-R, ET550-R and ET900-R**, and single-ROX standards also
+work but need more label. The validated genotyping dye sets are
+
+| Set | Channels (sample dyes) | Size standard |
+|-----|------------------------|---------------|
+| Genotyping filter set 1 | FAM · TET · HEX | ET ROX |
+| Genotyping filter set 2 | FAM · HEX · NED/TAMRA (or JOE · TAMRA) | ET ROX |
+
+(`MegaBACE Instrument Administrator's Guide`, Appendix A.) **The exact
+fragment tables of ET400-R / ET550-R / ET900-R are printed on the kit inserts
+and are not bundled here** — a half-remembered ladder sizes every peak wrongly,
+which is worse than none. Enter them once from your insert:
+
+```bash
+python scorer.py size well.rsd --lengths <your insert's sizes> \
+    --ladder-channel <ET-ROX channel> --sample-channel <FAM channel>
+```
+
+Then save them as a JSON file so the same plate can be sized repeatably. No
+single vendor ladder is required — the tool is ladder-agnostic by design.
+
 ## Development
 
 ```bash
@@ -410,13 +451,10 @@ pip install -e ".[all]" pytest
 python -m pytest -q
 ```
 
-The suite covers the trace loaders, the vendored basecaller, the scorer logic,
-the auto-genotyping engine, drag-area measuring and the genotyping picker
-engine; genotyping tests skip automatically where tkinter/matplotlib are
-unavailable, and the GUI tests (`tests/test_duplex_ui.py`,
-`tests/test_auto_genotype_ui.py`) additionally skip without a `DISPLAY`.
-Current state: **174 passed, 7 skipped**. CI (`.github/workflows/ci.yml`) runs
-the same command on Python 3.9, 3.11 and 3.12.
+The suite covers the trace loaders, the vendored basecaller, the scorer logic
+and the genotyping picker engine; genotyping tests skip automatically where
+tkinter/matplotlib are unavailable. CI (`.github/workflows/ci.yml`) runs the
+same command on Python 3.9, 3.11 and 3.12.
 
 ## Note on environment
 

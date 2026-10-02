@@ -243,26 +243,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._area_drag = None
         self._area_cursors: list = []
         self._gen_active_path: Optional[Path] = None
-        # Auto-genotyping: which physical channel carries the internal
-        # standard and which carries the sample.  These are per-run assay
-        # roles, not dye names -- they start at the T9 kit's Ch3/Ch2 but the
-        # user can move them, and the pairing is checked before a single well
-        # is scored, because swapping them does not fail loudly: it scores the
-        # sample's own peaks as the standard and returns confident nonsense.
-        self._auto_is_channel = tk.IntVar(value=3)
-        self._auto_sample_channel = tk.IntVar(value=2)
-        self._auto_rows: list = []
-        self._auto_tree = None
         self._pick_cid = None
         self._gen_motion_cid = None
-<<<<<<< HEAD
-<<<<<<< HEAD
         self._area_release_cid = None
-=======
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
-        self._area_release_cid = None
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         self._gen_cursors: list = []
         self.pick_table = None
         self.pick_tree = None
@@ -272,7 +255,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # the canvas, and the menu shows which one is live.
         self._mode_pick = tk.BooleanVar(value=False)
         self._mode_area = tk.BooleanVar(value=False)
-        self._gen_lock_var = tk.StringVar(value="any")
 
         # Shared X/Y view, stored as [first, last] fractions of the full data
         # range. One model drives every visible graph plus the axis bars.
@@ -470,31 +452,18 @@ class LimoncelloAnalyzerApp(tk.Tk):
             label="Mark start/end from the 2nd derivative",
             variable=self._gen_d2, command=self._sync_gen_opts)
         genotyping_m.add_separator()
-        # All channels are overlaid in one axes, so a click cannot say which
-        # trace it meant. When the standard shows on two channels a few scans
-        # apart this silently picks the wrong one, so offer an explicit lock.
-        genotyping_m.add_radiobutton(
-            label="Pick on any channel (auto)",
-            variable=self._gen_lock_var, value="any",
-            command=self._sync_gen_opts)
-        for _ci in (1, 2, 3, 4):
-            genotyping_m.add_radiobutton(
-                label=f"Lock picks to Ch{_ci}",
-                variable=self._gen_lock_var, value=str(_ci),
-                command=self._sync_gen_opts)
-        genotyping_m.add_separator()
         genotyping_m.add_command(label="Undo last pick / measurement",
                                  command=self._gen_undo)
         genotyping_m.add_command(label="Clear picks / measurements",
                                  command=self._gen_clear)
         genotyping_m.add_command(label="Mark peaks as standard…",
                                  command=self._gen_mark_std)
-        genotyping_m.add_command(label="Mark IS in all shown wells",
-                                 command=self._gen_mark_std_batch)
-        genotyping_m.add_command(label="Tag duplex species for MF…",
-                                 command=self._gen_mark_duplex)
         genotyping_m.add_separator()
         genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Fragment-length sizing (ladder)…",
+                                 command=self.size_selected_fragments)
+        genotyping_m.add_separator()
         genotyping_m.add_command(label="Next batch →",
                                  command=lambda: self._page_by(1))
         genotyping_m.add_command(label="← Previous batch",
@@ -502,16 +471,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m.add_separator()
         genotyping_m.add_command(label="Exit peak picking",
                                  command=self.exit_genotyping_picking)
-
-        auto_m = tk.Menu(genotyping_m, tearoff=0)
-        auto_m.add_command(label="Auto-genotype selected wells…",
-                           command=self.auto_genotype_wells)
-        auto_m.add_command(label="Channel roles (standard / sample)…",
-                           command=self.auto_genotype_channels)
-        auto_m.add_separator()
-        auto_m.add_command(label="Save auto-genotype table…",
-                           command=self.auto_genotype_save)
-        genotyping_m.add_cascade(label="Auto-genotyping", menu=auto_m)
 
         help_m = tk.Menu(self, tearoff=0)
         help_m.add_command(label="User manual…", command=self.show_help)
@@ -693,13 +652,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
             self._chan_cbs.append(cb)
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-            self._chan_cb_cols.append(i)
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         # the bar starts out indexed A,C,G,T; relabel to the run's dye order
         self._refresh_channel_labels()
         self.base_order_var.trace_add("write", self._on_base_order_changed)
@@ -1410,10 +1362,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def exit_genotyping_picking(self):
         if not self.genotyping_active:
             return
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         for attr in ("_pick_cid", "_gen_motion_cid", "_area_release_cid"):
             cid = getattr(self, attr, None)
             if cid is not None:
@@ -1422,30 +1370,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 except Exception:
                     pass
                 setattr(self, attr, None)
-<<<<<<< HEAD
         self._gen_cursors = []
         self._area_cursors = []
         self._area_drag = None
-=======
-        if self._pick_cid is not None:
-            try:
-                self.canvas.mpl_disconnect(self._pick_cid)
-            except Exception:
-                pass
-            self._pick_cid = None
-        if self._gen_motion_cid is not None:
-            try:
-                self.canvas.mpl_disconnect(self._gen_motion_cid)
-            except Exception:
-                pass
-            self._gen_motion_cid = None
-        self._gen_cursors = []
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
-        self._gen_cursors = []
-        self._area_cursors = []
-        self._area_drag = None
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if self.pick_table is not None:
             try:
                 self.pick_table.destroy()
@@ -1465,10 +1392,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _build_pick_table(self, area=False):
         tblf = ttk.Frame(self.center)
         tblf.pack(fill=tk.X, padx=4, pady=2)
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if area:
             cols = ("run", "well", "ch", "start", "stop", "mid", "h V", "area")
             widths = {"run": 90, "well": 58, "ch": 34, "start": 48, "stop": 48,
@@ -1476,25 +1399,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             left_anchor = ("run", "well")
             stretch = ("run", "well")
         else:
-            cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area",
-                    "frac", "MF")
+            cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac")
             widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34,
-                      "kind": 62, "h V": 66, "area": 66, "frac": 50,
-                      "MF": 52}
+                      "kind": 62, "h V": 66, "area": 66, "frac": 50}
             left_anchor = ("well", "kind")
             stretch = ("scan", "kind")
         self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings",
                                       height=4)
-<<<<<<< HEAD
-=======
-        cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac",
-                "MF")
-        self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings", height=4)
-        widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34, "kind": 62,
-                  "h V": 66, "area": 66, "frac": 50, "MF": 52}
->>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         for c in cols:
             self.pick_tree.heading(c, text=c)
             self.pick_tree.column(c, width=widths[c],
@@ -1618,7 +1529,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except Exception as e:
             self.status_var.set(f"Could not load {path.name}: {e}")
             return
-        rec = pk.pick(xs, vol=vs, only_col=self._gen_lock_col())
+        rec = pk.pick(xs, vol=vs)
         if rec is None:
             if getattr(pk, "_reject", None) == "area":
                 self.status_var.set(f"That area is already picked on {path.name} "
@@ -1634,10 +1545,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
     def _make_area_markers(self, ax):
         """Live preview artists for the span being dragged on one subplot.
 
@@ -1759,11 +1666,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
-<<<<<<< HEAD
-=======
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
     def _make_gen_cursor(self, ax):
         """Readout + crosshair for one stacked subplot: shows the scan under the
         pointer, its voltage, and the nearest real peak (picked or not) so the
@@ -1815,10 +1717,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 + ("  [picked]" if picked else ""))
 
     def _on_gen_motion(self, event):
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if not self.genotyping_active:
             return
         if self.area_mode:
@@ -1828,12 +1726,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._area_preview(event)
             return
         if not self._gen_cursors:
-<<<<<<< HEAD
-=======
-        if not self.genotyping_active or not self._gen_cursors:
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
             return
         hit = self._gen_axes_hit(event)
         if hit is None:
@@ -1877,14 +1769,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.fig.clear()
         self._plot_axes = []
         self._gen_cursors = []
-<<<<<<< HEAD
-<<<<<<< HEAD
         self._area_cursors = []
-=======
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
-        self._area_cursors = []
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         self._full_xlim = None
         self._full_ylim = None
         paths = self._gen_paths()
@@ -1945,17 +1830,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
                     transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#333", zorder=6)
-<<<<<<< HEAD
-<<<<<<< HEAD
             if not self.area_mode:
                 self._gen_cursors.append(self._make_gen_cursor(ax))
-=======
-            self._gen_cursors.append(self._make_gen_cursor(ax))
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
-            if not self.area_mode:
-                self._gen_cursors.append(self._make_gen_cursor(ax))
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
             self._style_x_axis(ax, i == len(paths) - 1)
         if gx1 is not None and gy0 is not None and gx1 > gx0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -1992,12 +1868,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                             key=lambda r: (int(r["scan"]), int(r["col"]),
                                            int(r.get("gid", 0)))):
                 fr = pk.clust_frac(r) if r["kind"] == "main" else None
-                ma = pk.mass_action(r) if r["kind"] == "main" else None
                 self.pick_tree.insert("", tk.END, values=(
                     pk.doc.well, r["scan"], pk.duplex_of(r), r["base"],
                     r["kind"], f"{r['height']:.3f}", f"{r['area']:.1f}",
-                    f"{fr:.3f}" if fr else "",
-                    f"{ma['mf']:.3f}" if ma else ""))
+                    f"{fr:.3f}" if fr else ""))
 
     def _gen_picker_active(self):
         """The picker to act on: the well of the last click, else the first
@@ -2023,7 +1897,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
 
     def _gen_undo(self):
-        if not self._require_picking("Undo last pick"):
+        if not self.genotyping_active:
             return
         if self.area_mode:
             rec = None
@@ -2055,7 +1929,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_pick_table()
 
     def _gen_clear(self):
-        if not self._require_picking("Clear picks"):
+        if not self.genotyping_active:
             return
         store = self._area_pickers if self.area_mode else self._gen_pickers
         if store:
@@ -2066,93 +1940,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
-    def _gen_mark_std_batch(self):
-        """Auto-mark the IS quartet in every displayed well, then let the
-        operator fix outliers by hand.
-
-        96 wells is 384 clicks; nobody does that twice.  Detection is only a
-        starting point -- on the ABCC2 plate it locks onto noise in a third of
-        the wells -- so every result is marked with an "(auto)" label and the
-        table shows which wells came from detection, so a wrong one is obvious
-        and re-markable rather than silently trusted.
-        """
-        if not self._require_picking("Mark IS in all shown wells"):
-            return
-        paths = self._gen_paths()
-        if not paths:
-            self.status_var.set("Select the wells to mark first.")
-            return
-        channel = simpledialog.askinteger(
-            "Standard channel",
-            "Which physical channel carries the internal standard?\n\n"
-            "(ACTG plate: Ch1=A, Ch2=C, Ch3=G, Ch4=T)",
-            initialvalue=genotyping.DEFAULT_IS_CHANNEL,
-            minvalue=1, maxvalue=4, parent=self)
-        if channel is None:
-            return
-        marked, failed, skipped = [], [], []
-        self._gen_std_batch_progress = (0, len(paths))
-        for path in paths:
-            try:
-                pk = self._ensure_picker(path)
-            except Exception as e:
-                failed.append((path.stem, str(e)))
-                continue
-            if pk.std:
-                skipped.append(path.stem)
-                continue
-            try:
-                pk.auto_mark_std(channel=channel,
-                                 cut=genotyping.DEFAULT_IS_CUT)
-                marked.append(path.stem)
-            except ValueError as e:
-                failed.append((path.stem, str(e)))
-            self._gen_std_batch_progress = (len(marked) + len(failed),
-                                            len(paths))
-            self.update_idletasks()
-        self._build_pick_table()
-        self.redraw()
-        msg = (f"Marked {len(marked)} of {len(paths)} wells from Ch{channel}"
-               f" detection.")
-        if skipped:
-            msg += f"  {len(skipped)} already had an IS set (left alone)."
-        if failed:
-            msg += f"  {len(failed)} had no quartet found — click those by hand."
-            messagebox.showwarning(
-                "Mark IS in all shown wells",
-                msg + "\n\nNo quartet detected in:\n"
-                + ", ".join(w for w, _ in failed[:24])
-                + ("\n…" if len(failed) > 24 else "")
-                + "\n\nTurn on Manual peak picking… and click the four IS peaks "
-                  "on the standard channel, then Mark peaks as standard…")
-        else:
-            messagebox.showinfo("Mark IS in all shown wells", msg)
-
-    def _gen_lock_col(self):
-        """The locked acgt column for picking, or None to let the picker guess."""
-        v = (self._gen_lock_var.get() or "any").strip()
-        if not v.isdigit():
-            return None
-        return self._col_to_chan().get(int(v) - 1)
-
-    def _require_picking(self, what):
-        """Guard for the manual picking commands.
-
-        These all used to ``return`` silently when picking was off, so the menu
-        item looked dead with no explanation -- worst right after a restart,
-        where picking starts off and every manual command silently no-ops.
-        """
-        if self.genotyping_active:
-            return True
-        messagebox.showinfo(
-            what,
-            "Turn on Genotyping ▸ Manual peak picking… first.\n\n"
-            "Then click each of the four IS peaks on the standard channel,\n"
-            "then Genotyping ▸ Mark peaks as standard…")
-        return False
-
     def _gen_mark_std(self):
-        if not self._require_picking("Mark peaks as standard"):
+        if not self.genotyping_active:
             return
         pk = self._gen_picker_active()
         if pk is None:
@@ -2183,294 +1972,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"Well {pk.doc.well}: {msg}")
         self._sync_pick_table()
 
-    def _gen_mark_duplex(self):
-        """Tag the active well's picked mains as the duplex species of one
-        allelic position, so it reports the CTCE mass-action MF."""
-        if not self._require_picking("Tag duplex species for MF"):
-            return
-        pk = self._gen_picker_active()
-        if pk is None:
-            self.status_var.set("Select wells first.")
-            return
-        try:
-            msg = pk.mark_duplex()
-        except ValueError as e:
-            messagebox.showwarning("Duplex species", str(e))
-            return
-        self._gen_active_path = Path(pk.path)
-        ma = next((pk.mass_action(m) for m in pk.labelled_species()), None)
-        if ma:
-            msg += f"   MF {ma['mf']:.3f}"
-        self.status_var.set(f"Well {pk.doc.well}: {msg}")
-        self._sync_pick_table()
-        self.redraw()
-
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
-    # ------------------------------------------------------- auto-genotyping
-    def _auto_targets(self):
-        """The wells to score: every selected well that has a file on disk."""
-        return [Path(p) for p in (self.selected or []) if Path(p).is_file()]
-
-    def auto_genotype_channels(self):
-        """Ask which physical channels carry the standard and the sample.
-
-        The engine needs to know which trace holds the internal-standard
-        quartet and which holds the sample's four duplexes.  That is a property
-        of the assay on the plate, not of the dye order, so it is asked for
-        explicitly rather than assumed.  The pairing is checked here, before
-        any well is scored: if the two land on the same acgt column the engine
-        would compare a channel against itself and every well would come back
-        "no standard quartet" for no visible reason.
-        """
-        win = tk.Toplevel(self)
-        win.title("Auto-genotyping — channel roles")
-        win.transient(self)
-        win.resizable(False, False)
-        body = ttk.Frame(win, padding=12)
-        body.pack(fill="both", expand=True)
-        ttk.Label(
-            body,
-            text="Which physical channel carries what on this run?\n"
-                 "The dye order only says which base sits on Ch1–Ch4; it "
-                 "does not\nsay which channel holds the standard.",
-            justify="left").grid(row=0, column=0, columnspan=2, sticky="w",
-                                 pady=(0, 10))
-        for row, (var, label) in enumerate(
-                ((self._auto_is_channel, "Internal-standard channel"),
-                 (self._auto_sample_channel, "Sample channel")), start=1):
-            text = f"{label} ({self._channel_label(var.get())}):"
-            ttk.Label(body, text=text).grid(row=row, column=0, sticky="w",
-                                             pady=3)
-            box = ttk.Combobox(body, textvariable=var, state="readonly",
-                               values=[1, 2, 3, 4], width=6)
-            box.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=3)
-            var.trace_add(
-                "write",
-                lambda var=var, row=row: self._auto_label_text(body, row, var))
-        self._auto_hint = ttk.Label(body, text="", foreground="#8A2A0A")
-        self._auto_hint.grid(row=3, column=0, columnspan=2, sticky="w",
-                             pady=(8, 0))
-        btns = ttk.Frame(body)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(btns, text="Cancel",
-                   command=win.destroy).pack(side="right", padx=(6, 0))
-        ttk.Button(btns, text="Save", command=self._auto_save_channels).pack(
-            side="right")
-
-        def check(*_a):
-            is_c = int(self._auto_is_channel.get())
-            sa_c = int(self._auto_sample_channel.get())
-            if is_c == sa_c:
-                self._auto_hint.config(
-                    text=f"Pick two different channels — Ch{is_c} cannot be "
-                         "both the standard and the sample.")
-            else:
-                self._auto_hint.config(text="")
-
-        self._auto_is_channel.trace_add("write", check)
-        self._auto_sample_channel.trace_add("write", check)
-        check()
-
-    def _auto_label_text(self, body, row, var):
-        """Keep each channel row's label showing the base that channel holds."""
-        labels = ("Internal-standard channel", "Sample channel")
-        name = labels[row - 1]
-        for w in body.winfo_children():
-            if isinstance(w, ttk.Label) and w.cget("text").startswith(name):
-                w.config(text=f"{name} ({self._channel_label(var.get())}):")
-                break
-
-    def _channel_label(self, channel):
-        """'Ch3 (T)' for the given physical channel, per the run's dye order."""
-        from genotyping import acgt_index_for_channel
-        try:
-            base = "ACGT"[acgt_index_for_channel(
-                self.base_order_var.get(), channel)]
-        except Exception:
-            base = "?"
-        return f"Ch{channel} ({base})"
-
-    def _auto_save_channels(self):
-        is_c = int(self._auto_is_channel.get())
-        sa_c = int(self._auto_sample_channel.get())
-        if is_c == sa_c:
-            messagebox.showerror(
-                "Auto-genotyping — channel roles",
-                f"Ch{is_c} is set as both the internal standard and the "
-                "sample.\n\nPick two different channels: the engine locates "
-                "the standard quartet\non one channel and measures the "
-                "sample's duplexes on another.")
-            return
-        for w in self.winfo_children():
-            if isinstance(w, tk.Toplevel) and w.title().startswith(
-                    "Auto-genotyping"):
-                w.destroy()
-        self.status_var.set(
-            f"Auto-genotyping: internal standard Ch{is_c}, sample Ch{sa_c} "
-            f"({self.base_order_var.get()}).")
-
-    def auto_genotype_wells(self):
-        """Score every selected well with no clicking, and show the results.
-
-        Progress goes to the status bar as it goes and the rows land in their
-        own table, separate from the manual pick/area table, so the two never
-        overwrite each other.
-        """
-        import genotyping
-        targets = self._auto_targets()
-        if not targets:
-            messagebox.showinfo(
-                "Auto-genotype selected wells",
-                "Select the wells to genotype in the list first.")
-            return
-        is_c = int(self._auto_is_channel.get())
-        sa_c = int(self._auto_sample_channel.get())
-        if is_c == sa_c:
-            messagebox.showerror(
-                "Auto-genotype selected wells",
-                f"Ch{is_c} is set as both the internal standard and the "
-                "sample.\n\nUse Genotyping ▸ Auto-genotyping ▸ Channel "
-                "roles to\npoint them at two different channels.")
-            return
-        base = self.base_order_var.get()
-        self._auto_rows = []
-        self.status_var.set(f"Auto-genotyping {len(targets)} wells…")
-        self.update_idletasks()
-        for i, path in enumerate(targets, start=1):
-            try:
-                doc = self._ensure_doc(path)
-            except Exception as e:            # unreadable file, not fatal
-                self._auto_rows.append(
-                    {"run": path.parent.name, "well": path.stem,
-                     "call": "no-call", "frac": 0.0, "flags": "load-error",
-                     "hom1": 0.0, "hom2": 0.0, "het1": 0.0, "het2": 0.0,
-                     "snr1": 0.0, "snr2": 0.0, "snr3": 0.0, "snr4": 0.0,
-                     "is_channel": is_c, "sample_channel": sa_c,
-                     "std_scans": "", "reason": str(e)})
-            else:
-                # Hand over the operator's own STD picks for this well when they
-                # exist.  find_is_quartet accepts any equimolar set, so on a
-                # weak-IS plate it can prefer four equal noise ripples to the
-                # real standard; the operator's marks are authoritative.
-                manual_std = None
-                try:
-                    pk = self._ensure_picker(path)
-                    if pk.std:
-                        # pk.std is [(scan, name), ...]; the engine wants scans.
-                        manual_std = [int(pair[0]) for pair in pk.std]
-                except Exception:
-                    manual_std = None
-                self._auto_rows.append(genotyping.auto_genotype(
-                    doc, is_channel=is_c, sample_channel=sa_c,
-                    base_order=base, cut=genotyping.DEFAULT_IS_CUT,
-                    run_name=path.parent.name,
-                    std_scans_manual=manual_std))
-            if i % 8 == 0 or i == len(targets):
-                self.status_var.set(f"Auto-genotyping… {i}/{len(targets)}")
-                self.update_idletasks()
-        self._build_auto_table()
-        calls = {}
-        for r in self._auto_rows:
-            calls[r["call"]] = calls.get(r["call"], 0) + 1
-        summary = ", ".join(f"{v} {k}" for k, v in sorted(calls.items()))
-        self.status_var.set(
-            f"Auto-genotyped {len(self._auto_rows)} wells "
-            f"(standard Ch{is_c}, sample Ch{sa_c}): {summary}.")
-        self.redraw()
-
-    def _build_auto_table(self):
-        """The auto-genotype results table, stacked below the pick table.
-
-        It must not replace the pick table.  Manual STD picks are the ground
-        truth for this assay -- auto-genotyping defers to them -- and the pick
-        table is what ``_gen_save`` writes, so hiding it makes manual work
-        unsavable the moment auto-genotyping runs.
-        """
-        if self._auto_tree is not None:
-            try:
-                self._auto_tree.master.destroy()
-            except tk.TclError:
-                pass
-            self._auto_tree = None
-        cols = ("well", "call", "frac", "hom1", "hom2", "het1", "het2",
-                "snr1", "snr2", "snr3", "snr4", "flags", "reason")
-        tblf = ttk.Frame(self.center)
-        tblf.pack(fill=tk.X, padx=4, pady=2)
-        hdr = ttk.Label(self.center, text="Auto-genotype results")
-        hdr.pack(anchor="w", padx=4)
-        # The pick table has to exist and be visible for manual picks to stay
-        # saveable, so build it if auto-genotyping is the first thing run.
-        if self.pick_tree is None and self.genotyping_active and not self.area_mode:
-            self._build_pick_table()
-        tree = ttk.Treeview(tblf, columns=cols, show="headings", height=8)
-        widths = {"well": 56, "call": 74, "frac": 48, "hom1": 56, "hom2": 56,
-                  "het1": 56, "het2": 56, "snr1": 46, "snr2": 46, "snr3": 46,
-                  "snr4": 46, "flags": 90, "reason": 200}
-        left = ("well", "call", "flags", "reason")
-        for c in cols:
-            tree.heading(c, text=c)
-            tree.column(c, width=widths[c],
-                        anchor="w" if c in left else "e",
-                        stretch=(c in ("reason", "flags")))
-        for r in self._auto_rows:
-            tree.insert("", tk.END, values=(
-                r.get("well", ""), r.get("call", ""),
-                f"{r.get('frac', 0.0):.3f}",
-                f"{r.get('hom1', 0.0):.0f}", f"{r.get('hom2', 0.0):.0f}",
-                f"{r.get('het1', 0.0):.0f}", f"{r.get('het2', 0.0):.0f}",
-                f"{r.get('snr1', 0.0):.0f}", f"{r.get('snr2', 0.0):.0f}",
-                f"{r.get('snr3', 0.0):.0f}", f"{r.get('snr4', 0.0):.0f}",
-                r.get("flags", ""), r.get("reason", "")))
-        vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=vs.set)
-        tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        vs.pack(side=tk.RIGHT, fill=tk.Y)
-        self._auto_tree = tree
-        self._auto_table = tblf
-
-    def auto_genotype_save(self):
-        """Write the auto-genotype rows out through the shared save_table, so
-        they land in the same CSV/XLSX/JSON shapes as the manual pick table."""
-        if not self._auto_rows:
-            messagebox.showinfo(
-                "Save auto-genotype table",
-                "Run Genotyping ▸ Auto-genotyping ▸ Auto-genotype selected "
-                "wells\nfirst.")
-            return
-        from genotyping import save_table
-        types = [("CSV (Excel-compatible)", "*.csv"), ("JSON (ML)", "*.json")]
-        try:
-            import openpyxl  # noqa: F401
-            types.insert(1, ("Excel workbook (.xlsx)", "*.xlsx"))
-        except ImportError:
-            pass
-        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv",
-                                            filetypes=types)
-        if not path:
-            return
-        try:
-            save_table(Path(path), self._auto_rows)
-        except Exception as e:
-            messagebox.showerror("Save auto-genotype table", str(e))
-            return
-        self.status_var.set(f"Saved {len(self._auto_rows)} auto-genotype "
-                            f"rows to {Path(path).name}.")
-
-<<<<<<< HEAD
-=======
->>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
-=======
->>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
     def _gen_save(self):
+        if not self.genotyping_active:
+            return
         from genotyping import save_table
         rows = []
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if self.area_mode:
             # run folder first, then well, then left-to-right along the trace
             for key, pk in sorted(self._area_pickers.items(),
@@ -2486,17 +1992,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                   key=lambda kv: str(kv[1].path)):
                 if pk.records:
                     rows.extend(pk.export_rows())
-<<<<<<< HEAD
-=======
-        # group by sample first (run folder, then well name) so one sample's
-        # peaks are never interleaved with another's, then scan order inside
-        for key, pk in sorted(self._gen_pickers.items(),
-                              key=lambda kv: str(kv[1].path)):
-            if pk.records:
-                rows.extend(pk.export_rows())
->>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if not rows:
             messagebox.showinfo(
                 "Save peaks table" if not self.area_mode else "Save areas",
@@ -2523,6 +2018,94 @@ class LimoncelloAnalyzerApp(tk.Tk):
         unit = "area" if self.area_mode else "peak"
         self.status_var.set(f"Saved {len(rows)} {unit} rows ({len(wells)} well"
                             f"{'s' if len(wells) != 1 else ''}) to {path}")
+
+    def size_selected_fragments(self):
+        """Size the selected wells against a size-standard ladder.
+
+        Sizing is a *different* analysis from peak picking -- no internal
+        standard, no prior sample knowledge -- so it works on any selection
+        and writes a fresh sized-peak table (CSV/JSON) or an HTML report.  The
+        channels are physical (1-4 in the run's dye order) and are asked for
+        explicitly because the ladder/sample pair is a property of the kit.
+        """
+        if not self.selected:
+            messagebox.showinfo("Fragment sizing",
+                                "Select one or more wells first.")
+            return
+        from fragment_sizing import list_ladders, load_ladder, size_trace
+
+        names = ", ".join(list_ladders())
+        spec = simpledialog.askstring(
+            "Fragment-length sizing",
+            "Ladder: a built-in name,\n"
+            f"  {names},\n"
+            "a comma-separated length list, or a path to a ladder JSON file.\n"
+            "Run `python scorer.py ladders` for the MegaBACE ET standards.",
+            initialvalue="genescan500_rox", parent=self)
+        if spec is None:
+            return
+        try:
+            ladder = load_ladder(spec.strip())
+        except (ValueError, OSError) as e:                 # noqa: BLE001
+            messagebox.showerror("Fragment sizing", f"Ladder:\n{e}")
+            return
+        ladder_channel = simpledialog.askinteger(
+            "Fragment sizing", "Ladder channel (1-4, physical):",
+            initialvalue=4, minvalue=1, maxvalue=4, parent=self)
+        if ladder_channel is None:
+            return
+        sample_channel = simpledialog.askinteger(
+            "Fragment sizing", "Sample channel (1-4, physical):",
+            initialvalue=2, minvalue=1, maxvalue=4, parent=self)
+        if sample_channel is None:
+            return
+        out = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv",
+            filetypes=[("CSV (sized peaks)", "*.csv"), ("JSON", "*.json"),
+                       ("HTML report", "*.html")])
+        if not out:
+            return
+
+        from scorer import sizing_html, write_rows
+
+        results, failures = [], []
+        for path in list(self.selected):
+            try:
+                doc = self._ensure_doc(Path(path))
+                results.append(size_trace(
+                    doc, ladder, ladder_channel=ladder_channel,
+                    sample_channel=sample_channel,
+                    base_order=self.base_order_var.get()))
+            except Exception as e:                          # noqa: BLE001
+                failures.append(f"{Path(path).name}: {e}")
+        if not results:
+            messagebox.showerror(
+                "Fragment sizing",
+                "No wells could be sized." +
+                ("\n" + "\n".join(failures) if failures else ""))
+            return
+        try:
+            if out.lower().endswith((".html", ".htm")):
+                Path(out).write_text(sizing_html(results), encoding="utf-8")
+            else:
+                write_rows(out, [r for res in results for r in res.rows])
+        except Exception as e:                              # noqa: BLE001
+            messagebox.showerror("Fragment sizing",
+                                 f"Could not write file:\n{e}")
+            return
+
+        n_peaks = sum(len(res.rows) for res in results)
+        n_warn = sum(len(res.warnings) for res in results)
+        self.status_var.set(
+            f"Sized {n_peaks} peak(s) in {len(results)} well(s) → {out}")
+        messagebox.showinfo(
+            "Fragment sizing",
+            f"Sized {n_peaks} peak(s) across {len(results)} well(s) "
+            f"against {ladder.name}.\n" +
+            (f"{n_warn} warning(s) — open the report or run the sizing CLI "
+             "for details.\n" if n_warn else "") +
+            (f"{len(failures)} well(s) skipped.\n" if failures else "") +
+            f"Written to {out}")
 
     def _col_to_chan(self, order=None):
         """acgt matrix column -> physical channel index of that trace.
@@ -2552,10 +2135,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._gen_pickers = {}
         self.redraw()
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
     def channel_bar_order(self, order=None):
         """The channel checkboxes as (channel, label), left to right.
 
@@ -2573,7 +2152,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return [(ci, f"  Ch{ci + 1} {order[ci]}  ")
                 for ci in range(min(len(order), len(CHANNEL_ORDER)))]
 
-<<<<<<< HEAD
     def _refresh_channel_labels(self):
         """Relabel the channel checkboxes to match the run's dye order."""
         cbs = getattr(self, "_chan_cbs", [])
@@ -2583,42 +2161,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     cbs[ci].config(text=text)
                 except Exception:
                     pass
-=======
-    def _refresh_channel_labels(self):
-        """Relabel the channel checkboxes to the run's dye order and re-pack
-        them in physical order, so the bar reads Ch1..Ch4 left to right and
-        agrees with the legend (Ch1 = the first dye in base order, not A)."""
-        col2chan = self._col_to_chan()
-        items = list(zip(getattr(self, "_chan_cbs", []),
-                         getattr(self, "_chan_cb_cols", [])))
-        placed = []
-        for cb, col in items:
-            ci = col2chan.get(col)
-            if ci is None:
-                continue
-            try:
-                cb.config(text=f"  Ch{ci + 1} {CHANNEL_ORDER[col]}  ")
-                placed.append((ci, cb))
-            except Exception:
-                pass
-        for _ci, cb in sorted(placed, key=lambda t: t[0]):
-            try:
-                cb.pack_forget()
-                cb.pack(side=tk.LEFT, padx=2)
-            except Exception:
-                pass
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
-    def _refresh_channel_labels(self):
-        """Relabel the channel checkboxes to match the run's dye order."""
-        cbs = getattr(self, "_chan_cbs", [])
-        for ci, text in self.channel_bar_order():
-            if ci < len(cbs):
-                try:
-                    cbs[ci].config(text=text)
-                except Exception:
-                    pass
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
 
     def _chan_changed(self):
         """Channel on/off toggles refresh the viewer (and the picked-peak
@@ -3527,10 +3069,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    that subplot's corner: the scan under the pointer, its\n"
                "    voltage, and the dominant peak within one base on any visible\n"
                "    channel, marked [picked] once you have it.\n"
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
 "  Peak area by drag…  is the same mode with the automation switched off,\n"
                "  for when you want to say where a peak starts and ends yourself.\n"
                "  Hold the left button and drag between the two points, and the\n"
@@ -3570,53 +3108,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "  •  The picked-peaks table is sorted by scan (then channel) per\n"
                "    well, whatever order you clicked in; Undo last pick still\n"
                "    removes the most recent click.\n"
-               "  •  Mass-action MF (CTCE)  —  Tag duplex species for MF…\n"
-               "    (Genotyping menu) tags ONE allelic position (the last-picked\n"
-               "    main's own cluster, so two positions in a well stay apart) with\n"
-               "    the same HOM1/HOM2/HET1/HET2 names, and that position then\n"
-               "    reports the PCR mass-action fraction in the MF column:\n"
-               "        MF = (A_MUT + 1/2 A_HET) / (A_WT + A_MUT + A_HET)\n"
-               "    A_WT/A_MUT are the homoduplex areas, A_HET the combined\n"
-               "    heteroduplex area.  The 1/2 term is the point: a clean\n"
-               "    heterozygote reads 0.5, not the 0.25 a plain area ratio of\n"
-               "    the two homoduplexes gives, and below ~5% MF, where all the\n"
-               "    mutant strands have re-annealed and no mutant homoduplex is\n"
-               "    visible at all, the whole low fraction is carried by A_HET.\n"
-               "    The ai column adds the allelic imbalance\n"
-               "    A_HOMO1/(A_HOMO1+A_HOMO2), which needs no wild-type choice.\n"
-               "    Both stay blank until a position is tagged.  The peak count\n"
-               "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
-               "    3 = 1 + 2, 2 = 2 + 0.\n"
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
-               "  •  Auto-genotyping  —  Genotyping ▸ Auto-genotyping ▸ Auto-genotype\n"
-               "    selected wells… calls every selected well with no clicking:\n"
-               "    it finds the internal-standard quartet, measures the four\n"
-               "    sample duplexes, and returns a call per well.  Its own\n"
-               "    results table (well, call, frac, the four areas and their\n"
-               "    significances, flags and the reason for a no-call) sits below\n"
-               "    the plot and stays separate from the manual pick table, so\n"
-               "    the two never overwrite each other.\n"
-               "  •  Channel roles  —  which channel carries the internal\n"
-               "    standard and which the sample is a property of the assay\n"
-               "    on the plate, not of the dye order, so it is asked for in\n"
-               "    Channel roles (standard / sample)… rather than assumed.  It\n"
-               "    starts at the T9 kit's Ch3/Ch2.  Getting the pair wrong does\n"
-               "    not fail loudly — it scores the sample's own peaks as the\n"
-               "    standard and returns confident nonsense — so setting both to\n"
-               "    the same channel is refused before a well is scored.\n"
-<<<<<<< HEAD
-=======
-               "  •  The picked-peaks table is sorted by scan (then channel) per\n"
-               "    well, whatever order you clicked in; Undo last pick still\n"
-               "    removes the most recent click.\n"
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
-=======
->>>>>>> cd2724e1 (Wire the auto-genotyping engine into the GUI)
                "  •  Channel identity follows the run's dye order everywhere:\n"
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"
@@ -3657,29 +3148,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
                 "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
                 "    (main/+A), height (V), area (V·scan), duplex label\n"
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
->>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
-=======
-                "    (HOM1/HOM2/HET1/HET2), length (bp), fraction, and the\n"
-                "    mass-action mf and ai.  Rows are\n"
->>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
-=======
-                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
->>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
                 "    grouped by sample (run folder, then well name) and ordered by\n"
                 "    scan inside each sample, never by click order, so one sample's\n"
                 "    peaks are never interleaved with another's.  That table is\n"
-<<<<<<< HEAD
-=======
-                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  That table is\n"
->>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
-=======
->>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
                 "    your labelled training library for ML — peak picking works with\n"
                 "    or without an internal standard.\n"
               "7. EXPORT  (File menu)\n"
