@@ -454,7 +454,15 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
         both_present = het1 > 0 and het2 > 0 and min(het1, het2) / max(het1, het2) \
             >= T9_HET_RATIO_MIN
 
-    if both_present:
+    # A heterozygote builds *both* homoduplexes -- one per allele -- so the
+    # second homoduplex band has to carry area.  Without that requirement a het
+    # can rest entirely on a band in the heteroduplex neighbourhood while no
+    # second allele exists, which is exactly what the Taq A conformers do on
+    # CYBA: they are a second sub-peak beside the one real allele, not a second
+    # allele.  Measured across every het call carrying a reference genotype,
+    # 0 of 31 genuine hets have an empty second homoduplex while 5 of 11 false
+    # ones do, so this costs no true call and rejects half the false ones.
+    if both_present and hom2 > 0:
         if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
             flags.add("ai")
         return "het", frac, flags

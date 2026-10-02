@@ -165,3 +165,45 @@ class TestHomRequiresItsOwnSignal:
                                             (2714.3, 185.7, 100.9, 107.1))
         assert call == "het"
         assert "ai" in flags
+
+class TestHetRequiresTheSecondAllele:
+    """A heterozygote makes both homoduplexes, so one of them must be there.
+
+    Taq A splits CYBA's product into two sub-peaks a near-constant distance
+    apart.  The second one is a conformer of the same allele, not a second
+    allele, but it sits in the heteroduplex neighbourhood and reads as one.
+    Five wells were called ``het`` this way -- CYBA_N1 B01 plus CYBA_N2 59C
+    A04, C05, D03 and F03 -- every one of them with the second homoduplex
+    reading exactly zero area while a reference genotype says homozygous.
+
+    Across every het call carrying a reference genotype, 0 of 31 genuine
+    heterozygotes had an empty second homoduplex against 5 of 11 false ones, so
+    requiring that area costs no true call.
+    """
+
+    def test_taq_conformer_is_not_a_second_allele(self):
+        # CYBA_N2 59C A04: one strong homoduplex, a merged heteroduplex band
+        # well above the floor, and no second homoduplex at all.
+        call, _frac, _flags = scorer.t9_call(200546, 0, 46340, None,
+                                             (1180.0, 0.0, 96.4))
+        assert call == "hom-1"
+
+    def test_split_heteroduplex_still_needs_the_second_homoduplex(self):
+        # The separated form of the same trap: both heteroduplexes present and
+        # comparable, but still only one allele's homoduplex.
+        call, _frac, _flags = scorer.t9_call(145988, 0, 30011, 31002,
+                                             (742.1, 0.0, 88.0, 91.4))
+        assert call == "hom-1"
+
+    def test_genuine_heterozygote_still_calls(self):
+        # Both homoduplexes present, heteroduplexes merged: unchanged.
+        call, _frac, _flags = scorer.t9_call(190067, 39272, 10722, None,
+                                             (2714.3, 185.7, 100.9))
+        assert call == "het"
+
+    def test_requirement_is_presence_not_magnitude(self):
+        # A second homoduplex any area at all still counts; only an empty one
+        # disqualifies the call.  Real hets carry tens of thousands.
+        call, _frac, _flags = scorer.t9_call(190067, 1, 10722, None,
+                                             (2714.3, 0.4, 100.9))
+        assert call == "het"
