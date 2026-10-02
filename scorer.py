@@ -22,6 +22,8 @@ CLI::
 
     python scorer.py qc    example_data/M13/*.rsd --report run.html
     python scorer.py peaks picks.csv --out scored.csv
+    python scorer.py ladders
+    python scorer.py size  well.rsd --ladder geneflo1000_rox --out sizes.csv
     python scorer.py check
 """
 from __future__ import annotations
@@ -546,6 +548,54 @@ def html_report(qc_rows: List[dict] = (), summary_rows: List[dict] = (),
     return "\n".join(parts)
 
 
+def sizing_html(results, title: str = "Limoncello fragment sizing report") -> str:
+    """Self-contained HTML report for fragment-length sizing results.
+
+    *results* is an iterable of ``fragment_sizing.SizingResult``.  Each well
+    gets a fit summary (ladder, channels, anchors, leave-one-out error, any
+    warnings) followed by its sized peaks.
+    """
+    parts = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        f"<title>{html.escape(title)}</title>",
+        "<style>body{font-family:system-ui,Arial,sans-serif;margin:24px;"
+        "color:#1a1c22}h1,h2{color:#22350e}table{border-collapse:collapse;"
+        "margin:8px 0 24px;font-size:13px}th,td{border:1px solid #d7dbe0;"
+        "padding:4px 8px;text-align:left}th{background:#f2f4f7}"
+        ".note{color:#555;font-size:12px}.warn{color:#b3261e;font-size:12px}"
+        "</style></head><body>",
+        f"<h1>{html.escape(title)}</h1>",
+    ]
+    results = list(results)
+    if not results:
+        parts.append("<p>No results.</p>")
+    for res in results:
+        header = html.escape(res.well or res.file or "?")
+        parts.append(f"<h2>Well {header}</h2>")
+        q = res.quality
+        err = q.get("rms_error_bp")
+        err_txt = "n/a (need >=4 anchors)" if err is None else f"{err:.2f} bp"
+        fit = [
+            ["Ladder", f"{res.ladder.name} ({res.ladder.dye})"],
+            ["Channels", f"ladder Ch{res.ladder_channel}, sample Ch{res.sample_channel}"
+                         f" (order {res.base_order})"],
+            ["Ladder anchors matched", len(res.anchors)],
+            ["Leave-one-out RMS error", err_txt],
+            ["Sample peaks", len(res.rows)],
+        ]
+        parts.append(_table(["field", "value"], fit))
+        for warning in res.warnings:
+            parts.append(f"<p class='warn'>! {html.escape(warning)}</p>")
+        headers = ["scan", "length_bp", "height", "area", "in_range"]
+        parts.append(_table(
+            headers,
+            [[r.get(h) for h in headers] for r in res.rows]))
+    parts.append("<p class='note'>length_bp outside the ladder span is "
+                 "extrapolated (in_range = False) and less trustworthy.</p>")
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # persistence helpers
 # --------------------------------------------------------------------------- #
@@ -624,6 +674,62 @@ def _cmd_peaks(args) -> int:
     return 0
 
 
+def _cmd_ladders(_args) -> int:
+    from fragment_sizing import (BUILTIN_LADDERS, KNOWN_MEGABACE_STANDARDS,
+                                 list_ladders)
+    print("Bundled ladders (use by name with `size --ladder`):")
+    for key in list_ladders():
+        data = BUILTIN_LADDERS[key]
+        lengths = data["lengths"]
+        span = f"{min(lengths)}-{max(lengths)} bp, {len(lengths)} fragments"
+        print(f"  {key:<18} {data['name']:<22} {data['dye']:<6} {span}")
+    print("\nMegaBACE-compatible standards (fill in lengths from your kit insert):")
+    for std in KNOWN_MEGABACE_STANDARDS:
+        res = "" if std["resolution_bp"] is None else f", {std['resolution_bp']} bp resolution"
+        print(f"  {std['name']}: {std['dye']}, {std['range_bp']}{res}")
+    print("\nA custom ladder is a comma-separated length list or a JSON file:")
+    print('  python scorer.py size well.rsd --lengths 50,100,150,200')
+    print('  python scorer.py size well.rsd --ladder my_ladder.json')
+    return 0
+
+
+def _cmd_size(args) -> int:
+    from analyzer_core import load_trace
+    from fragment_sizing import load_ladder, size_trace
+    try:
+        ladder = load_ladder(args.lengths or args.ladder)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:  # noqa: BLE001
+        print(f"ladder: {exc}", file=sys.stderr)
+        return 2
+
+    results = []
+    for path in args.inputs:
+        try:
+            doc = load_trace(Path(path))
+            res = size_trace(doc, ladder, ladder_channel=args.ladder_channel,
+                             sample_channel=args.sample_channel,
+                             base_order=args.base_order)
+        except Exception as exc:                            # noqa: BLE001
+            print(f"{path}: {exc}", file=sys.stderr)
+            continue
+        results.append(res)
+        err = res.quality.get("rms_error_bp")
+        err_txt = "n/a" if err is None else f"{err:.2f} bp"
+        print(f"{res.well or res.file:<10} {len(res.rows):>3} peak(s)  "
+              f"anchors {len(res.anchors):>2}  LOO RMS {err_txt}")
+        for warning in res.warnings:
+            print(f"    ! {warning}", file=sys.stderr)
+
+    rows = [r for res in results for r in res.rows]
+    if args.out:
+        write_rows(args.out, rows)
+        print(f"wrote {args.out} ({len(rows)} row(s))")
+    if args.report:
+        Path(args.report).write_text(sizing_html(results), encoding="utf-8")
+        print(f"wrote {args.report}")
+    return 0 if results else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="limoncello-scorer",
                                  description=__doc__.splitlines()[0])
@@ -642,6 +748,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help="write the scored rows here (.csv or .json)")
     p.add_argument("--report", help="write an HTML genotype report here")
     p.set_defaults(func=_cmd_peaks)
+
+    s = sub.add_parser("size", help="size fragment peaks against a ladder")
+    s.add_argument("inputs", nargs="+", help=".rsd / .scf / .ab1 / text traces")
+    s.add_argument("--ladder", default="genescan500_rox",
+                   help="ladder name, JSON path or lengths (default genescan500_rox)")
+    s.add_argument("--lengths",
+                   help="comma-separated ladder lengths (overrides --ladder)")
+    s.add_argument("--ladder-channel", type=int, default=4,
+                   help="ladder channel 1..4 (default 4)")
+    s.add_argument("--sample-channel", type=int, default=2,
+                   help="sample channel 1..4 (default 2)")
+    s.add_argument("--base-order", default="ACTG",
+                   help="plate dye order, e.g. ACTG (default)")
+    s.add_argument("--out", help="write sized peak rows here (.csv or .json)")
+    s.add_argument("--report", help="write an HTML sizing report here")
+    s.set_defaults(func=_cmd_size)
+
+    ld = sub.add_parser("ladders", help="list ladders available to `size`")
+    ld.set_defaults(func=_cmd_ladders)
 
     c = sub.add_parser("check", help="report which parts are available")
     c.set_defaults(func=_cmd_check)

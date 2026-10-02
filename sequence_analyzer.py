@@ -460,6 +460,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                  command=self._gen_mark_std)
         genotyping_m.add_separator()
         genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Fragment-length sizing (ladder)…",
+                                 command=self.size_selected_fragments)
+        genotyping_m.add_separator()
         genotyping_m.add_command(label="Next batch →",
                                  command=lambda: self._page_by(1))
         genotyping_m.add_command(label="← Previous batch",
@@ -2014,6 +2018,94 @@ class LimoncelloAnalyzerApp(tk.Tk):
         unit = "area" if self.area_mode else "peak"
         self.status_var.set(f"Saved {len(rows)} {unit} rows ({len(wells)} well"
                             f"{'s' if len(wells) != 1 else ''}) to {path}")
+
+    def size_selected_fragments(self):
+        """Size the selected wells against a size-standard ladder.
+
+        Sizing is a *different* analysis from peak picking -- no internal
+        standard, no prior sample knowledge -- so it works on any selection
+        and writes a fresh sized-peak table (CSV/JSON) or an HTML report.  The
+        channels are physical (1-4 in the run's dye order) and are asked for
+        explicitly because the ladder/sample pair is a property of the kit.
+        """
+        if not self.selected:
+            messagebox.showinfo("Fragment sizing",
+                                "Select one or more wells first.")
+            return
+        from fragment_sizing import list_ladders, load_ladder, size_trace
+
+        names = ", ".join(list_ladders())
+        spec = simpledialog.askstring(
+            "Fragment-length sizing",
+            "Ladder: a built-in name,\n"
+            f"  {names},\n"
+            "a comma-separated length list, or a path to a ladder JSON file.\n"
+            "Run `python scorer.py ladders` for the MegaBACE ET standards.",
+            initialvalue="genescan500_rox", parent=self)
+        if spec is None:
+            return
+        try:
+            ladder = load_ladder(spec.strip())
+        except (ValueError, OSError) as e:                 # noqa: BLE001
+            messagebox.showerror("Fragment sizing", f"Ladder:\n{e}")
+            return
+        ladder_channel = simpledialog.askinteger(
+            "Fragment sizing", "Ladder channel (1-4, physical):",
+            initialvalue=4, minvalue=1, maxvalue=4, parent=self)
+        if ladder_channel is None:
+            return
+        sample_channel = simpledialog.askinteger(
+            "Fragment sizing", "Sample channel (1-4, physical):",
+            initialvalue=2, minvalue=1, maxvalue=4, parent=self)
+        if sample_channel is None:
+            return
+        out = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv",
+            filetypes=[("CSV (sized peaks)", "*.csv"), ("JSON", "*.json"),
+                       ("HTML report", "*.html")])
+        if not out:
+            return
+
+        from scorer import sizing_html, write_rows
+
+        results, failures = [], []
+        for path in list(self.selected):
+            try:
+                doc = self._ensure_doc(Path(path))
+                results.append(size_trace(
+                    doc, ladder, ladder_channel=ladder_channel,
+                    sample_channel=sample_channel,
+                    base_order=self.base_order_var.get()))
+            except Exception as e:                          # noqa: BLE001
+                failures.append(f"{Path(path).name}: {e}")
+        if not results:
+            messagebox.showerror(
+                "Fragment sizing",
+                "No wells could be sized." +
+                ("\n" + "\n".join(failures) if failures else ""))
+            return
+        try:
+            if out.lower().endswith((".html", ".htm")):
+                Path(out).write_text(sizing_html(results), encoding="utf-8")
+            else:
+                write_rows(out, [r for res in results for r in res.rows])
+        except Exception as e:                              # noqa: BLE001
+            messagebox.showerror("Fragment sizing",
+                                 f"Could not write file:\n{e}")
+            return
+
+        n_peaks = sum(len(res.rows) for res in results)
+        n_warn = sum(len(res.warnings) for res in results)
+        self.status_var.set(
+            f"Sized {n_peaks} peak(s) in {len(results)} well(s) → {out}")
+        messagebox.showinfo(
+            "Fragment sizing",
+            f"Sized {n_peaks} peak(s) across {len(results)} well(s) "
+            f"against {ladder.name}.\n" +
+            (f"{n_warn} warning(s) — open the report or run the sizing CLI "
+             "for details.\n" if n_warn else "") +
+            (f"{len(failures)} well(s) skipped.\n" if failures else "") +
+            f"Written to {out}")
 
     def _col_to_chan(self, order=None):
         """acgt matrix column -> physical channel index of that trace.
