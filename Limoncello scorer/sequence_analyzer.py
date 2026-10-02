@@ -256,9 +256,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._pick_cid = None
         self._gen_motion_cid = None
 <<<<<<< HEAD
+<<<<<<< HEAD
         self._area_release_cid = None
 =======
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+        self._area_release_cid = None
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         self._gen_cursors: list = []
         self.pick_table = None
         self.pick_tree = None
@@ -662,7 +666,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         chan_bar.pack(fill=tk.X, padx=4, pady=(4, 0))
         ttk.Label(chan_bar, text="Channels:").pack(side=tk.LEFT)
         self._chan_cbs = []
-        self._chan_cb_cols = []
         for i in range(len(CHANNEL_ORDER)):
             # widget i drives chan_show[i], and chan_show is indexed by
             # physical channel -- so widget i IS Ch i+1 and the widgets are
@@ -675,9 +678,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
             cb.pack(side=tk.LEFT, padx=2)
             self._chan_cbs.append(cb)
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
             self._chan_cb_cols.append(i)
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         # the bar starts out indexed A,C,G,T; relabel to the run's dye order
         self._refresh_channel_labels()
         self.base_order_var.trace_add("write", self._on_base_order_changed)
@@ -1389,6 +1395,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if not self.genotyping_active:
             return
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         for attr in ("_pick_cid", "_gen_motion_cid", "_area_release_cid"):
             cid = getattr(self, attr, None)
             if cid is not None:
@@ -1397,6 +1406,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 except Exception:
                     pass
                 setattr(self, attr, None)
+<<<<<<< HEAD
         self._gen_cursors = []
         self._area_cursors = []
         self._area_drag = None
@@ -1415,6 +1425,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self._gen_motion_cid = None
         self._gen_cursors = []
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+        self._gen_cursors = []
+        self._area_cursors = []
+        self._area_drag = None
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if self.pick_table is not None:
             try:
                 self.pick_table.destroy()
@@ -1435,6 +1450,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         tblf = ttk.Frame(self.center)
         tblf.pack(fill=tk.X, padx=4, pady=2)
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if area:
             cols = ("run", "well", "ch", "start", "stop", "mid", "h V", "area")
             widths = {"run": 90, "well": 58, "ch": 34, "start": 48, "stop": 48,
@@ -1451,6 +1469,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             stretch = ("scan", "kind")
         self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings",
                                       height=4)
+<<<<<<< HEAD
 =======
         cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area", "frac",
                 "MF")
@@ -1458,6 +1477,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34, "kind": 62,
                   "h V": 66, "area": 66, "frac": 50, "MF": 52}
 >>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         for c in cols:
             self.pick_tree.heading(c, text=c)
             self.pick_tree.column(c, width=widths[c],
@@ -1598,6 +1619,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_pick_table()
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
     def _make_area_markers(self, ax):
         """Live preview artists for the span being dragged on one subplot.
 
@@ -1719,8 +1743,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
+<<<<<<< HEAD
 =======
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
     def _make_gen_cursor(self, ax):
         """Readout + crosshair for one stacked subplot: shows the scan under the
         pointer, its voltage, and the nearest real peak (picked or not) so the
@@ -1773,6 +1800,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
     def _on_gen_motion(self, event):
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if not self.genotyping_active:
             return
         if self.area_mode:
@@ -1782,9 +1812,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._area_preview(event)
             return
         if not self._gen_cursors:
+<<<<<<< HEAD
 =======
         if not self.genotyping_active or not self._gen_cursors:
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
             return
         hit = self._gen_axes_hit(event)
         if hit is None:
@@ -1829,9 +1862,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._plot_axes = []
         self._gen_cursors = []
 <<<<<<< HEAD
+<<<<<<< HEAD
         self._area_cursors = []
 =======
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+        self._area_cursors = []
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         self._full_xlim = None
         self._full_ylim = None
         paths = self._gen_paths()
@@ -1893,11 +1930,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     transform=ax.transAxes, ha="left", va="top",
                     fontsize=6, color="#333", zorder=6)
 <<<<<<< HEAD
+<<<<<<< HEAD
             if not self.area_mode:
                 self._gen_cursors.append(self._make_gen_cursor(ax))
 =======
             self._gen_cursors.append(self._make_gen_cursor(ax))
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+            if not self.area_mode:
+                self._gen_cursors.append(self._make_gen_cursor(ax))
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
             self._style_x_axis(ax, i == len(paths) - 1)
         if gx1 is not None and gy0 is not None and gx1 > gx0:
             pad = 0.02 * (gy1 - gy0) or 1.0
@@ -2301,6 +2343,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         from genotyping import save_table
         rows = []
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if self.area_mode:
             # run folder first, then well, then left-to-right along the trace
             for key, pk in sorted(self._area_pickers.items(),
@@ -2316,6 +2361,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                   key=lambda kv: str(kv[1].path)):
                 if pk.records:
                     rows.extend(pk.export_rows())
+<<<<<<< HEAD
 =======
         # group by sample first (run folder, then well name) so one sample's
         # peaks are never interleaved with another's, then scan order inside
@@ -2324,6 +2370,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if pk.records:
                 rows.extend(pk.export_rows())
 >>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
         if not rows:
             messagebox.showinfo(
                 "Save peaks table" if not self.area_mode else "Save areas",
@@ -2380,6 +2428,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
 
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
     def channel_bar_order(self, order=None):
         """The channel checkboxes as (channel, label), left to right.
 
@@ -2397,6 +2448,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return [(ci, f"  Ch{ci + 1} {order[ci]}  ")
                 for ci in range(min(len(order), len(CHANNEL_ORDER)))]
 
+<<<<<<< HEAD
     def _refresh_channel_labels(self):
         """Relabel the channel checkboxes to match the run's dye order."""
         cbs = getattr(self, "_chan_cbs", [])
@@ -2431,6 +2483,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
             except Exception:
                 pass
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+    def _refresh_channel_labels(self):
+        """Relabel the channel checkboxes to match the run's dye order."""
+        cbs = getattr(self, "_chan_cbs", [])
+        for ci, text in self.channel_bar_order():
+            if ci < len(cbs):
+                try:
+                    cbs[ci].config(text=text)
+                except Exception:
+                    pass
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
 
     def _chan_changed(self):
         """Channel on/off toggles refresh the viewer (and the picked-peak
@@ -3340,6 +3403,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    voltage, and the dominant peak within one base on any visible\n"
                "    channel, marked [picked] once you have it.\n"
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
 "  Peak area by drag…  is the same mode with the automation switched off,\n"
                "  for when you want to say where a peak starts and ends yourself.\n"
                "  Hold the left button and drag between the two points, and the\n"
@@ -3396,6 +3462,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    Both stay blank until a position is tagged.  The peak count\n"
                "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
                "    3 = 1 + 2, 2 = 2 + 0.\n"
+<<<<<<< HEAD
                "  •  Auto-genotyping  —  Genotyping ▸ Auto-genotyping ▸ Auto-genotype\n"
                "    selected wells… calls every selected well with no clicking:\n"
                "    it finds the internal-standard quartet, measures the four\n"
@@ -3417,6 +3484,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    well, whatever order you clicked in; Undo last pick still\n"
                "    removes the most recent click.\n"
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
                "  •  Channel identity follows the run's dye order everywhere:\n"
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"
@@ -3447,24 +3516,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    Variant ratios come from the RELATIVE areas of these duplex peaks,\n"
                 "    so no bp ladder is involved.\n"
                 "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
-                "    one repeat (~one base) of each other: small/(small+large).\n"
-                "  • Mass-action MF (CTCE)  —  Tag duplex species for MF…\n"
-                "    (Genotyping menu) tags ONE allelic position (the last-picked\n"
-                "    main's own cluster, so two positions in a well stay apart) with\n"
-                "    the same HOM1/HOM2/HET1/HET2 names, and that position then\n"
-                "    reports the PCR mass-action fraction in the MF column:\n"
-                "        MF = (A_MUT + 1/2 A_HET) / (A_WT + A_MUT + A_HET)\n"
-                "    A_WT/A_MUT are the homoduplex areas, A_HET the combined\n"
-                "    heteroduplex area.  The 1/2 term is the point: a clean\n"
-                "    heterozygote reads 0.5, not the 0.25 a plain area ratio of\n"
-                "    the two homoduplexes gives, and below ~5% MF, where all the\n"
-                "    mutant strands have re-annealed and no mutant homoduplex is\n"
-                "    visible at all, the whole low fraction is carried by A_HET.\n"
-                "    The ai column adds the allelic imbalance\n"
-                "    A_HOMO1/(A_HOMO1+A_HOMO2), which needs no wild-type choice.\n"
-                "    Both stay blank until a position is tagged.  The peak count\n"
-                "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
-                "    3 = 1 + 2, 2 = 2 + 0.\n"
+                "    8 scans (classic heterozygote): small/(small+large).\n"
 "  • Undo last pick removes the most recent pick (with its +A\n"
                  "    tags); Clear picks empties the whole table.  An area that is\n"
                  "    already picked cannot be picked again: the click is refused and\n"
@@ -3477,6 +3529,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 >>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
@@ -3484,6 +3537,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    (HOM1/HOM2/HET1/HET2), length (bp), fraction, and the\n"
                 "    mass-action mf and ai.  Rows are\n"
 >>>>>>> 101a7962 (Genotyping: CTCE mass-action MF and allelic imbalance)
+=======
+                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
+>>>>>>> 562f5837 (Adopt the V3 line: auto-genotyping, drag-area, tests; keep mass-action MF)
                 "    grouped by sample (run folder, then well name) and ordered by\n"
                 "    scan inside each sample, never by click order, so one sample's\n"
                 "    peaks are never interleaved with another's.  That table is\n"

@@ -43,6 +43,28 @@ CHANNEL_ORDER = "ACGT"
 CLICK_RADIUS = 30          # scans searched around a click
 HET_WINDOW = 8             # scans in which two mains count as heterozygote
 SATELLITE_FRAC = 0.05      # min height of a +A satellite vs the main peak
+# A +A product and a genuine minor allele one base downstream are close to
+# indistinguishable on position and height alone: _shoulders() must pick one,
+# and it currently always picks "+A", which drops the peak from clusters() and
+# makes clust_frac() report 0.0.  A heterozygote then reads as a homozygote
+# with no indication that anything was ambiguous -- the most damaging kind of
+# wrong.
+#
+# The honest fix is not a better threshold (that needs a plate of known
+# minor-allele hets to calibrate against, and a synthetic attempt regressed a
+# genuine +A case) but to stop hiding the ambiguity.  Above this height
+# fraction the tag is recorded as "could be a minor allele" so the caller can
+# raise an uncertain instead of reporting a confident 0.0.
+#
+# 0.15 is NOT calibrated against known minor alleles -- it has never been
+# tested against a plate of them, because none was available.  It is set from
+# two facts: a genuine 50% minor allele one spacing from its parent measures
+# only ~0.22 of that parent here, because the two peaks overlap badly and
+# _sat_height reads the local valley, not the apex; and typical +A tails run
+# 0.05-0.15.  So 0.15 sits above ordinary +A while still catching a minor allele
+# of roughly 30% or more.  Expect to revise it once real minor-allele samples
+# are available, and treat any flag it raises as "look at this", not as a call.
+SATELLITE_AMBIGUOUS_FRAC = 0.15
 MIN_PEAK_FRAC = 0.05       # peak candidates must stand off the segment floor
 VALLEY_CAP = 1.5           # hard bound on how far a peak's area may reach, in x
                            # spacings, and the same reach as the heterozygote
@@ -65,6 +87,297 @@ PEAK_FINDERS = [
 
 class _Record(dict):
     """One picked peak. Writable dict so rows feed straight into export."""
+
+
+# --------------------------------------------------------------------------- #
+# rs1695 internal-standard detection
+# --------------------------------------------------------------------------- #
+# On a CTC-CE run the internal standard is always present as four equimolar
+# peaks, so it can be found without the click-pick dance that ``mark_std``
+# otherwise needs.  The geometry is fixed by the chemistry: the two homoduplexes
+# are one SNP base apart, the heteroduplexes are one mismatch base from
+# Watson/Crick re-annealing, so d1 ~ d3 and d2 is roughly 2.5x either.
+#
+# The equimolar prior matters as much as the spacing.  Requiring the weakest of
+# the four to be at least 40% of the strongest is what keeps an arbitrary run of
+# four peaks from being read as a standard.
+IS_MIN_SPACING = 25.0        # scans; d1 and d3 (one SNP base)
+IS_OUTER_TOL = 0.75          # |d1 - d3| <= this * dm
+IS_MID_LO, IS_MID_HI = 1.7, 3.3   # d2, in units of dm
+IS_EQUIMOLAR_MIN = 0.40      # min(height) / max(height) across the four
+IS_PROMINENCE_FRAC = 0.010
+IS_HEIGHT_FRAC = 0.020
+IS_SAT_SKIP = (10, 32)       # a +A tail sits this many scans behind its parent
+IS_SAT_RATIO = 1.15
+IS_MAX_CANDIDATES = 60       # keep the O(n^4) search bounded
+
+
+def acgt_index_for_channel(base_order: str, channel: int) -> int:
+    """Column of ``doc.acgt`` holding MegaBACE *channel* (1-based).
+
+    ``doc.acgt`` is always in ACGT order, but the physical channel order is the
+    plate's dye order -- "ACTG" on a MegaBACE, so Ch1=A, Ch2=C, Ch3=T, Ch4=G.
+    Getting this backwards is easy and silently swaps the sample and standard
+    channels, so route every channel lookup through here.
+    """
+    order = (base_order or "ACTG").upper()
+    if len(order) != 4 or set(order) != set("ACGT"):
+        raise ValueError(f"Unexpected base_order {base_order!r}")
+    if not 1 <= channel <= 4:
+        raise ValueError(f"Channel must be 1..4, got {channel!r}")
+    return "ACGT".index(order[channel - 1])
+
+
+def _is_candidates(trace, cut=1900):
+    """Despiked, baseline-corrected peak candidates of the standard channel."""
+    from scipy.signal import find_peaks, medfilt, savgol_filter
+    y = savgol_filter(medfilt(np.asarray(trace, float), 5), 9, 2, mode="interp")
+    y = y - float(np.median(y[:400]))            # baseline before prominence
+    mx = float(y.max())
+    if mx <= 0:
+        return []
+    p, props = find_peaks(y, prominence=mx * IS_PROMINENCE_FRAC,
+                          height=mx * IS_HEIGHT_FRAC)
+    base = float(np.median(y[:400]))
+    cands = [(int(i), float(y[i] - base),
+              float(props["prominences"][k]))
+             for k, i in enumerate(p) if i >= cut]
+    # A +A tail is always shorter than and close behind its parent peak; drop it
+    # so it cannot stand in for a real member of the quartet.
+    kept = []
+    for x, h, prom in sorted(cands, key=lambda c: -c[1]):
+        if any(IS_SAT_SKIP[0] <= x - kx <= IS_SAT_SKIP[1] and kh > IS_SAT_RATIO * h
+               for kx, kh, _ in kept):
+            continue
+        kept.append((x, h, prom))
+    return sorted(kept, key=lambda c: c[0])[:IS_MAX_CANDIDATES]
+
+
+def find_is_quartet(trace, cut=1900):
+    """Locate the four internal-standard peaks, or ``None``.
+
+    *trace* is one channel's samples.  Returns ``(peaks, heights)`` where
+    *peaks* are the four scan positions in ascending order, chosen as the
+    highest-prominence candidate quartet that satisfies the geometry.  Found in
+    96/96 wells of the T9 rs1695 plate.
+    """
+    from itertools import combinations
+    pk = _is_candidates(trace, cut)
+    if len(pk) < 4:
+        return None
+    best = None
+    for combo in combinations(range(len(pk)), 4):
+        a, b, c, d = (pk[i] for i in combo)
+        d1, d2, d3 = b[0] - a[0], c[0] - b[0], d[0] - c[0]
+        if d1 < IS_MIN_SPACING or d3 < IS_MIN_SPACING:
+            continue
+        dm = (d1 + d3) / 2.0
+        if abs(d1 - d3) > IS_OUTER_TOL * dm or not (IS_MID_LO * dm <= d2 <= IS_MID_HI * dm):
+            continue
+        heights = [a[1], b[1], c[1], d[1]]
+        lo, hi = min(heights), max(heights)
+        if lo <= 0 or lo / hi < IS_EQUIMOLAR_MIN:
+            continue
+        score = sum((a[2], b[2], c[2], d[2]))
+        if best is None or score > best[0]:
+            best = (score, [a[0], b[0], c[0], d[0]], heights)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+# --------------------------------------------------------------------------- #
+# batch auto-genotyping: one well -> one call, plus the reason when it cannot
+# --------------------------------------------------------------------------- #
+# The manual path is ``auto_mark_std`` for the standard and four hand-measured
+# duplexes for the sample.  That is fine for one well and unusable for a plate,
+# so this measures the same thing with no clicks: find the standard quartet,
+# read the sample channel in the four windows it defines, and call the well.
+#
+# Which channel is which is a property of the KIT, not something a trace can be
+# asked to work out.  Measured over the 96 rs1695 T9 wells with this module's
+# own ``find_is_quartet``, per ``doc.acgt`` column (which is always A,C,G,T):
+#
+#     column 0 (A)  quartet in 62/96 wells, position spread 191 scans
+#     column 1 (C)  quartet in 59/96 wells, position spread 190 scans
+#     column 2 (G)  quartet in 96/96 wells, position spread 125 scans
+#     column 3 (T)  quartet in 96/96 wells, position spread 125 scans
+#
+# Columns 2 and 3 carry the same standard -- a clean equimolar quartet present
+# in every well at a consistent position is the signature, and it bleeds a
+# little into G.  Column 3 is the dye itself, so that is the one to read.  The
+# sample is column 1: reading it reproduces ``rs1695_measured.csv`` to within a
+# few percent and its sample-to-standard area ratio is constant across the
+# plate, which is what a real amplicon looks like and the standard never does.
+#
+# On this plate's "ACTG" dye order (Ch1=A, Ch2=C, Ch3=T, Ch4=G) that makes the
+# standard Ch3 and the sample Ch2, i.e. ``auto_mark_std``'s ``channel=3``
+# default.  Both constants stay explicit because getting this pair wrong does
+# not fail loudly -- it scores the standard's own peaks as the sample and
+# returns confident nonsense -- and every result row records the channels it
+# was measured on.
+#
+# Beware when comparing against the analysis cache: ``t9raw.npz`` stores wells
+# in the plate's physical channel order, not A,C,G,T, so a column index means
+# something different there.  On this plate npz->acgt is [2, 3, 1, 0].
+DEFAULT_IS_CHANNEL = 3
+DEFAULT_SAMPLE_CHANNEL = 2
+DEFAULT_IS_CUT = 1900        # scans; skip the injection front before looking
+
+# A duplex is measured between the midpoints to its neighbours -- the standard's
+# own spacing already says where one fragment stops and the next begins, which
+# is tighter than any per-peak valley search and cannot wander into a
+# neighbour's area.
+NOISE_SGOLAY_WINDOW = 9      # noise = scatter left over by a 9-scan SG fit
+SEGMENT_BASELINE_PAD = 80    # scans either side of a duplex to set its baseline
+SEGMENT_APEX_RADIUS = 13     # scans either side of the standard peak to look for
+                            # the sample apex: the two migrate close but not
+                            # identically, and the residual shift is what the
+                            # sample's own height must be read at
+MIN_SEGMENT_SPAN = 3         # narrower than this and it is not a peak at all
+
+
+def _noise_sigma(y):
+    """Robust per-scan noise as 1.4826 x the MAD of a Savitzky-Golay residual.
+
+    A plain standard deviation is wrong here: the four duplexes are large
+    enough to dominate it, which would make the noise read far too high and
+    every peak look insignificant.  The median absolute deviation of what the
+    smooth fit fails to explain is not.
+    """
+    from scipy.signal import savgol_filter
+    fit = savgol_filter(y, NOISE_SGOLAY_WINDOW, 2, mode="interp")
+    d = y - fit
+    return 1.4826 * float(np.median(np.abs(d - np.median(d))))
+
+
+def _quartet_segments(scans):
+    """Integration window per duplex, from the midpoints to its neighbours.
+
+    Extrapolated half a spacing beyond the outer peaks so the first and last
+    duplexes are measured over the same width as the inner two.
+    """
+    n = len(scans)
+    if n < 2:
+        return [(max(0, scans[0] - 1), min(len(scans), scans[0] + 1))] if n else []
+    edge = (scans[1] - scans[0]) / 2.0
+    bounds = [scans[0] - edge]
+    bounds += [(scans[i] + scans[i + 1]) / 2.0 for i in range(n - 1)]
+    bounds += [scans[-1] + edge]
+    return [(int(round(bounds[i])), int(round(bounds[i + 1])))
+            for i in range(n)]
+
+
+def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
+                  sample_channel=DEFAULT_SAMPLE_CHANNEL,
+                  base_order="ACTG", cut=DEFAULT_IS_CUT, run_name=""):
+    """Genotype one well without any clicking -> a result row.
+
+    Returns a plain dict (so it feeds straight into ``save_table``) with the
+    call, the four duplex areas, their significances, and -- when there is no
+    call -- a *reason* naming what was missing.  Never raises for a bad well:
+    a plate is 96 chances to hit a bad well and one of them must not take the
+    other 95 down with it.
+    """
+    import scorer
+
+    row = {
+        "run": run_name, "well": getattr(doc, "well", "") or "",
+        "call": "no-call", "frac": 0.0, "flags": "",
+        "hom1": 0.0, "hom2": 0.0, "het1": 0.0, "het2": 0.0,
+        "snr1": 0.0, "snr2": 0.0, "snr3": 0.0, "snr4": 0.0,
+        "is_channel": is_channel, "sample_channel": sample_channel,
+        "std_scans": "", "reason": "",
+    }
+
+    try:
+        is_col = acgt_index_for_channel(base_order, is_channel)
+        samp_col = acgt_index_for_channel(base_order, sample_channel)
+    except ValueError as e:
+        row["reason"] = str(e)
+        return row
+    if is_col == samp_col:
+        row["reason"] = (f"standard and sample are both on Ch{is_channel} "
+                         "(same acgt column)")
+        return row
+
+    acgt = np.asarray(getattr(doc, "acgt", None), dtype=float)
+    if acgt.ndim != 2 or acgt.shape[0] == 0 or acgt.shape[1] <= max(is_col, samp_col):
+        row["reason"] = "trace has no usable channels"
+        return row
+
+    found = find_is_quartet(acgt[:, is_col], cut=cut)
+    if found is None:
+        row["reason"] = f"no standard quartet on Ch{is_channel}"
+        return row
+
+    scans, _heights = found
+    row["std_scans"] = "/".join(str(x) for x in scans)
+    segs = _quartet_segments(scans)
+    if len(segs) != 4:
+        row["reason"] = "standard quartet too short to measure"
+        return row
+
+    y = np.asarray(acgt[:, samp_col], dtype=float)
+    n = y.size
+    sigma = _noise_sigma(y)
+    idx = np.arange(n)
+    areas, snrs = [], []
+    for k, (lo, hi) in enumerate(segs):
+        lo, hi = max(0, lo), min(n, hi)
+        if hi - lo < MIN_SEGMENT_SPAN:
+            areas.append(0.0)
+            snrs.append(0.0)
+            continue
+        # Baseline from the quiet trace either side of this duplex, not from its
+        # own peak: a peak sitting on a raised baseline would otherwise measure
+        # the step under it as signal.
+        m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
+            (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
+        base = float(np.median(y[m]))
+        a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
+        b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
+        apex = float(y[a:b].max()) if b > a else 0.0
+        areas.append(max(0.0, float(np.trapz(y[lo:hi] - base, dx=1.0))))
+        snrs.append((apex - base) / sigma if sigma > 0 else 0.0)
+
+    for i, name in enumerate(("hom1", "hom2", "het1", "het2")):
+        row[name] = round(areas[i], 1)
+        row["snr%d" % (i + 1)] = round(snrs[i], 1)
+
+    call, frac, flags = scorer.t9_call(areas[0], areas[1], areas[2], areas[3], snrs)
+    row["call"] = call
+    row["frac"] = round(frac, 4)
+    row["flags"] = ",".join(sorted(flags))
+    if call == "no-call":
+        if sigma <= 0:
+            row["reason"] = f"no signal on Ch{sample_channel}"
+        elif max(snrs) < scorer.T9_MIN_DOMINANT_SIGMA:
+            row["reason"] = (f"weakest sample duplex is only "
+                             f"{max(snrs):.0f}x the noise on Ch{sample_channel}")
+        else:
+            row["reason"] = "no standard quartet on Ch%d" % is_channel
+    return row
+
+
+DEFAULT_COLORS = {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"}
+
+
+def channel_colors(base_order, colors=None, theme_mode="base"):
+    """Map each ``doc.acgt`` column to its line colour.
+
+    Shared by every trace tool here so a colour can never mean one thing in the
+    picker and another in the area measure.  Keys are ACGT column indices; in
+    "channel" mode the dye a channel carries is ignored and the colour follows
+    the channel's position, which is what the genotyping themes want.
+    """
+    colors = dict(colors or DEFAULT_COLORS)
+    out = {}
+    for ci, base in enumerate((base_order or "ACTG").upper()[:4]):
+        if base in CHANNEL_ORDER:
+            key = CHANNEL_ORDER[ci] if theme_mode == "channel" else base
+            out[CHANNEL_ORDER.index(base)] = colors.get(key, "#444444")
+    return out
 
 
 class PeakPicker:
@@ -96,16 +409,9 @@ class PeakPicker:
         self._reject = None
         self.std = None
         self.length_bp = None
-        self.col_color = {}
+        self.col_color = channel_colors(self.base_order, self.colors,
+                                        theme_mode)
         self._d2_cache: dict[int, tuple] = {}
-        for ci, base in enumerate(self.base_order[:4]):
-            if base in CHANNEL_ORDER:
-                if self.theme_mode == "channel":
-                    self.col_color[CHANNEL_ORDER.index(base)] = \
-                        self.colors.get(CHANNEL_ORDER[ci], "#444444")
-                else:
-                    self.col_color[CHANNEL_ORDER.index(base)] = \
-                        self.colors.get(base, "#444444")
 
     # ------------------------------------------------------------- detection
     def pick(self, scan, vol=None):
@@ -163,14 +469,15 @@ class PeakPicker:
         )
         if self.include_sh:
             for sib in self._shoulders(best, radius):
-                rec2 = _Record(
+                # Copy the detector's fields wholesale, then add the picker's
+                # own.  Listing them one by one used to drop any field the
+                # detector added later, which silently discarded the
+                # satellite's ambiguity flag.
+                rec2 = _Record(sib)
+                rec2.update(
                     file=str(self.path), well=self.doc.well,
                     scan=sib["apex"], channel=sib["col"] + 1,
-                    base=CHANNEL_ORDER[sib["col"]], kind=sib["kind"],
-                    height=sib["height"], area=sib["area"],
-                    left=sib["left"], right=sib["right"], color=sib["color"],
-                    col=sib["col"], onset=sib.get("onset", sib["left"]),
-                    end=sib.get("end", sib["right"]),
+                    base=CHANNEL_ORDER[sib["col"]],
                     gid=self._gid,
                 )
                 self.records.append(rec2)
@@ -374,6 +681,17 @@ class PeakPicker:
         b = min(n, imin + pad + 1)
         return a + int(np.argmin(y[a:b]))    # snap onto the raw samples
 
+    def _sat_height(self, y, x, r):
+        """Height of the candidate satellite at scan x above its own two
+        local minima, matching how ``_numeric_peak`` measures a main peak's
+        height.  Comparing this against ``main["height"]`` puts both numbers on
+        the same scale, unlike the raw window value."""
+        left = int(np.argmin(y[max(0, x - r): x + 1])) + max(0, x - r)
+        right = int(np.argmin(y[x: min(y.size, x + r + 1)])) + x
+        if right <= left:
+            return 0.0
+        return float(y[x] - max(y[left], y[right]))
+
     def _shoulders(self, main, radius):
         """Tag the strongest TRAILING satellite: the +A polymerase A-addition
         product, found within ~(0.4–1.6) x one repeat (~one base) after the
@@ -390,7 +708,15 @@ class PeakPicker:
         out = []
         a, b = (main["apex"] + sp * 0.4, main["apex"] + sp * 1.6)
         lo, hi = (int(min(a, b)), int(max(a, b)))
+        r = max(2, int(round(sp * 0.20)))
         cands = self._window_peaks(main["col"], lo, hi)
+        # Compare like with like: a satellite's height has to be measured above
+        # its own local baseline, the same way ``main["height"]`` is.  The raw
+        # window value is an absolute voltage, so on a trace whose baseline sits
+        # well above zero it reads far taller than it is -- the old filter then
+        # rejected almost every real satellite (their ratio came out > 1) while
+        # letting a genuine minor allele through as if it were a +A tail.
+        cands = [(x, self._sat_height(y, x, r)) for x, _h in cands]
         cands = [(x, h) for x, h in cands
                  if SATELLITE_FRAC * main["height"] <= h
                  <= 0.9 * main["height"]]
@@ -399,7 +725,6 @@ class PeakPicker:
         x, h = max(cands, key=lambda c: c[1])
         if x <= main["apex"] + 2:                  # must trail the main
             return out
-        r = max(2, int(round(sp * 0.20)))
         left = int(np.argmin(y[max(0, x - r): x + 1])) + max(0, x - r)
         right = int(np.argmin(y[x: min(n, x + r + 1)])) + x
         if right <= left:
@@ -411,11 +736,22 @@ class PeakPicker:
         if hgt <= 0 or area <= 0:
             return out
         onset, end = self._onset_end(main["col"], x, left, right)
+        ambiguous = (main["height"] > 0
+                     and hgt >= SATELLITE_AMBIGUOUS_FRAC * main["height"])
         out.append({"apex": x, "left": left, "right": right,
                     "onset": onset, "end": end,
                     "area": area, "height": hgt,
                     "col": main["col"], "color": main["color"],
-                    "kind": "+A"})
+                    "kind": "+A",
+                    "ambiguous": ambiguous,
+                    # Record which main this shadows.  The scorer needs it to
+                    # attach the ambiguity flag to the right call, and the
+                    # nearest-main search is no use here: a satellite sits up
+                    # to ~1.6 spacings out, which is outside the allelic
+                    # window, so it would find nothing and drop the flag.
+                    "parent_scan": int(main["apex"]),
+                    "height_frac": round(hgt / main["height"], 4)
+                    if main["height"] > 0 else None})
         return out
 
     def _window_peaks(self, col, lo, hi):
@@ -444,6 +780,34 @@ class PeakPicker:
         return float(max(6.0, self.doc.n_scans * 0.004))
 
     # ------------------------------------- internal-standard CTC-CE duplexes
+    def auto_mark_std(self, channel=3, cut=1900):
+        """Find the internal standard automatically and mark it as the duplex set.
+
+        The CTC-CE standard is always present, so on a real run there is no need
+        to click the four peaks by hand.  *channel* is the physical MegaBACE
+        channel (3 = the T channel on a standard "ACTG" plate); it is translated
+        to an ``acgt`` column here, because the two orderings differ and
+        confusing them silently swaps sample and standard.
+
+        Returns the same message :meth:`mark_std` returns, or raises ValueError
+        when no quartet is present (in which case the caller should fall back to
+        clicking).
+        """
+        col = acgt_index_for_channel(getattr(self.doc, "base_order", "ACTG"),
+                                     channel)
+        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        found = find_is_quartet(y, cut=cut)
+        if found is None:
+            raise ValueError(
+                f"No internal-standard quartet on channel {channel}; "
+                "pick the standard peaks by hand.")
+        scans, _heights = found
+        self.std = [(x, n) for x, n in zip(scans, ["HOM1", "HOM2", "HET1", "HET2"])]
+        self.length_bp = None
+        return "Standard set: " + ", ".join(f"{n}@{x}" for x, n in self.std) \
+            + "  (auto)"
+
+    # ------------------------------------- internal-standard CTC-CE duplexes
     def _duplex_names(self, n):
         """CTC-CE duplex names for `n` picked peaks, in migration order.
 
@@ -469,12 +833,12 @@ class PeakPicker:
         """
         mains = [r for r in self.records if r["kind"] == "main"]
         if not mains:
-            raise ValueError("Pick the main peaks first.")
+            raise ValueError("Pick the standard main peaks first.")
         last_col = mains[-1]["col"]
         col_mains = sorted((m for m in mains if m["col"] == last_col),
                            key=lambda m: m["scan"])
         if len(col_mains) < 2:
-            raise ValueError("Need ≥ 2 main peaks on the same channel.")
+            raise ValueError("Need ≥ 2 standard main peaks on the same channel.")
         return col_mains[:4]
 
     def _position_mains(self):
@@ -559,41 +923,6 @@ class PeakPicker:
         """Back-compat alias for clust_frac (used by the editor table/tests)."""
         return self.clust_frac(rec)
 
-    def _het_window(self):
-        """How many scans count as one allelic position: a repeat (~ one base,
-        from the channel spacing) with a little slack, never below HET_WINDOW.
-        On a CTC-CE run the two alleles of a heterozygote sit one base apart,
-        which is typically far more than the old fixed 8-scan window."""
-        return max(HET_WINDOW, int(round(self._spacing() * 1.6)))
-
-    def clusters(self):
-        """Main peaks grouped into allelic positions: same channel and within
-        one repeat (≈ one base) of another main in the group."""
-        mains = [r for r in self.records if r["kind"] == "main"]
-        win = self._het_window()
-        out = []
-        for r in sorted(mains, key=lambda m: m["scan"]):
-            placed = False
-            for cl in out:
-                if any(r["col"] == m["col"]
-                       and abs(r["scan"] - m["scan"]) <= win for m in cl):
-                    cl.append(r)
-                    placed = True
-                    break
-            if not placed:
-                out.append([r])
-        return out
-
-    def clust_frac(self, rec):
-        """Variant (mutant) fraction small/(small+large) for a main peak in a
-        position with two peaks; 0.0 otherwise."""
-        for cl in self.clusters():
-            if rec in cl and len(cl) >= 2:
-                areas = sorted(m["area"] for m in cl)
-                if sum(areas) > 0:
-                    return areas[0] / sum(areas)
-        return 0.0
-
     def labelled_species(self):
         """The picked mains that carry a duplex label, in migration order.
         Tagging a well's position puts them in one list — two peaks for a
@@ -658,6 +987,41 @@ class PeakPicker:
                 "a_wt": a_wt, "a_mut": a_mut, "a_het": het, "ai": ai,
                 "n_homoduplex": len(hom)}
 
+    def _het_window(self):
+        """How many scans count as one allelic position: a repeat (~ one base,
+        from the channel spacing) with a little slack, never below HET_WINDOW.
+        On a CTC-CE run the two alleles of a heterozygote sit one base apart,
+        which is typically far more than the old fixed 8-scan window."""
+        return max(HET_WINDOW, int(round(self._spacing() * 1.6)))
+
+    def clusters(self):
+        """Main peaks grouped into allelic positions: same channel and within
+        one repeat (≈ one base) of another main in the group."""
+        mains = [r for r in self.records if r["kind"] == "main"]
+        win = self._het_window()
+        out = []
+        for r in sorted(mains, key=lambda m: m["scan"]):
+            placed = False
+            for cl in out:
+                if any(r["col"] == m["col"]
+                       and abs(r["scan"] - m["scan"]) <= win for m in cl):
+                    cl.append(r)
+                    placed = True
+                    break
+            if not placed:
+                out.append([r])
+        return out
+
+    def clust_frac(self, rec):
+        """Variant (mutant) fraction small/(small+large) for a main peak in a
+        position with two peaks; 0.0 otherwise."""
+        for cl in self.clusters():
+            if rec in cl and len(cl) >= 2:
+                areas = sorted(m["area"] for m in cl)
+                if sum(areas) > 0:
+                    return areas[0] / sum(areas)
+        return 0.0
+
     # ---------------------------------------------------------------- mutate
     def undo_last(self):
         """Remove the most recently picked peak (plus its +A tag)."""
@@ -681,7 +1045,7 @@ class PeakPicker:
         for r in sorted(self.records,
                         key=lambda r: (int(r["scan"]), int(r["col"]),
                                        int(r.get("gid", 0)))):
-            ma = self.mass_action(r) if r["kind"] == "main" else None
+            mf = self.mass_action(r) if r["kind"] == "main" else None
             rows.append({
                 "file": r["file"], "well": r["well"], "scan": r["scan"],
                 "channel": r["channel"], "base": r["base"], "kind": r["kind"],
@@ -690,12 +1054,26 @@ class PeakPicker:
                 "area_Vscan": round(r["area"], 3),
                 "duplex": self.duplex_of(r),
                 "length_bp": self.length_bp,
+                "ambiguous": bool(r.get("ambiguous")),
+                "parent_scan": r.get("parent_scan", ""),
+                "height_frac": r.get("height_frac", ""),
                 "fraction": round(self.clust_frac(r), 4)
                 if r["kind"] == "main" else "",
-                "mf": round(ma["mf"], 4) if ma else "",
-                "ai": round(ma["ai"], 4) if ma and ma["ai"] is not None else "",
+                "mf": round(mf["mf"], 4) if mf else "",
+                "ai": round(mf["ai"], 4) if mf and mf["ai"] is not None else "",
             })
         return rows
+
+    def ambiguous_satellites(self):
+        """Satellites tall enough that they may really be a minor allele.
+
+        These are the positions where a heterozygote can be silently reported
+        as a homozygote: the peak is tagged ``+A`` so ``clusters()`` never sees
+        it and ``clust_frac()`` returns 0.0.  Callers should treat any position
+        near one of these as unresolved rather than confident.
+        """
+        return [r for r in self.records
+                if r.get("kind") == "+A" and r.get("ambiguous")]
 
     # ---------------------------------------------------------------- overlay
     def plot_overlay(self, ax):
@@ -732,6 +1110,8 @@ class PeakPicker:
 def _write_csv(path, rows):
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
+        if not rows:
+            return
         w.writerow(list(rows[0].keys()))
         for r in rows:
             w.writerow(list(r.values()))
@@ -743,19 +1123,22 @@ def _write_xlsx(path, rows):
     wb = Workbook()
     ws = wb.active
     ws.title = "peaks"
-    headers = list(rows[0].keys())
-    ws.append(headers)
-    for r in rows:
-        ws.append([r[h] for h in headers])
-    for i, h in enumerate(headers, 1):
-        ws.column_dimensions[get_column_letter(i)].width = \
-            max(8, min(28, 6 + len(h)))
-    ws.freeze_panes = "A2"
+    if rows:
+        headers = list(rows[0].keys())
+        ws.append(headers)
+        for r in rows:
+            ws.append([r[h] for h in headers])
+        for i, h in enumerate(headers, 1):
+            ws.column_dimensions[get_column_letter(i)].width = \
+                max(8, min(28, 6 + len(h)))
+        ws.freeze_panes = "A2"
     wb.save(path)
 
 
 def save_table(path, rows):
-    """Write peak rows to CSV, JSON or XLSX depending on the file suffix."""
+    """Write peak rows to CSV, JSON or XLSX depending on the file suffix.
+
+    An empty *rows* list is written as an empty table rather than raising."""
     ext = Path(path).suffix.lower()
     if ext == ".json":
         Path(path).write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
@@ -763,6 +1146,192 @@ def save_table(path, rows):
         _write_xlsx(path, rows)
     else:
         _write_csv(path, rows)
+
+
+# --------------------------------------------------------------------------- #
+# drag to measure: a deliberately plainer manual area tool
+# --------------------------------------------------------------------------- #
+# PeakPicker decides for itself where a peak begins and ends, which is what you
+# want for a CTC-CE duplex run and exactly what you do not want when you are
+# measuring one specific hump by hand.  This tool takes the operator's word for
+# it: press, drag, release.  The two scans you drag between are the baseline
+# endpoints, and the area is whatever the trace stands above that line.
+DRAG_MIN_SPAN = 3           # scans; closer than this was a click, not a drag
+DRAG_MIN_AREA = 1e-9        # V*scan
+
+
+def region_area(y, start, stop):
+    """Baseline-corrected area of *y* between two hand-placed scans.
+
+    The two scans are the markers the operator dragged, and they are used
+    exactly as placed: the baseline is the straight line joining the trace value
+    at *start* to the value at *stop*, and the area is the part of the trace
+    standing above that line.  Same recipe as the automatic pickers
+    (:meth:`PeakPicker._numeric_peak`) -- sum the clipped differences, no
+    trapezoid -- but nothing here goes hunting for valleys, because choosing
+    where the hump begins is the whole point.
+
+    Reversed spans are normalised, so dragging right-to-left works.  Returns a
+    dict, or None when the span is degenerate or the trace never rises above
+    the line at all.
+    """
+    y = np.asarray(y, dtype=float)
+    n = y.size
+    if n < 2:
+        return None
+    start, stop = int(start), int(stop)
+    if start > stop:
+        start, stop = stop, start
+    start = max(0, min(n - 1, start))
+    stop = max(0, min(n - 1, stop))
+    if stop - start < DRAG_MIN_SPAN:
+        return None
+    xs = np.arange(start, stop + 1)
+    bl = np.linspace(float(y[start]), float(y[stop]), stop - start + 1)
+    above = np.clip(y[xs] - bl, 0.0, None)
+    area = float(np.sum(above))
+    if area <= DRAG_MIN_AREA:
+        return None
+    rel = int(np.argmax(above))
+    return {"start": start, "stop": stop,
+            "midpoint": (start + stop) // 2,
+            "peak_scan": start + rel,
+            "height": float(above[rel]),
+            "area": area,
+            "baseline_left": float(y[start]),
+            "baseline_right": float(y[stop])}
+
+
+class DragAreaPicker:
+    """Headless store for hand-measured peak areas on one trace.
+
+    Two scans and a channel in, one area out.  There is deliberately no peak
+    finding, no valley walking, no ``+A`` handling and no genotype call here --
+    a region measure should be exactly what the dragged span says, so the
+    genotype logic in :mod:`scorer` has nothing to second-guess.
+    """
+
+    def __init__(self, doc, path, colors=None, base_order=None,
+                 theme_mode="base", show=None, run_name=None):
+        self.doc = doc
+        self.path = Path(path)
+        self.show = show or (lambda col: True)
+        self.colors = dict(colors or DEFAULT_COLORS)
+        self.base_order = (base_order or "ACTG").upper()
+        self.col_color = channel_colors(self.base_order, self.colors,
+                                        theme_mode)
+        # A run is the folder a well came out of; wells in one run are what make
+        # a table worth having, so keep them apart in every row.
+        self.run_name = str(run_name or self.path.parent.name or "")
+        self.well = str(getattr(doc, "well", None) or self.path.stem)
+        self.records: list[_Record] = []
+
+    # ------------------------------------------------------------- measuring
+    def best_col(self, start, stop):
+        """The channel carrying the biggest hump in the span.
+
+        Defaults the measurement to the peak the operator was pointing at
+        rather than to whatever channel happens to be first.  Ties go to the
+        lowest column so the same drag always reports the same channel.
+        """
+        best, best_area = None, -1.0
+        for col in sorted(self.col_color):
+            if not self.show(col):
+                continue
+            res = region_area(self.doc.acgt[:, col], start, stop)
+            if res and res["area"] > best_area:
+                best, best_area = col, res["area"]
+        return best
+
+    def add(self, start, stop, col=None):
+        """Measure the span *start*..*stop* and record it.
+
+        *col* is an ``acgt`` column; None picks the tallest hump in the span.
+        Returns the new record, or None when the span is unusable.
+        """
+        if col is None:
+            col = self.best_col(start, stop)
+        if col is None or not (0 <= col < self.doc.acgt.shape[1]):
+            return None
+        res = region_area(self.doc.acgt[:, col], start, stop)
+        if res is None:
+            return None
+        rec = _Record(
+            file=str(self.path), run=self.run_name, well=self.well,
+            scan=res["midpoint"], start_scan=res["start"],
+            end_scan=res["stop"], midpoint=res["midpoint"],
+            peak_scan=res["peak_scan"], channel=col + 1,
+            base=CHANNEL_ORDER[col], kind="region",
+            height_V=round(res["height"], 4),
+            area_Vscan=round(res["area"], 3),
+            baseline_left_V=round(res["baseline_left"], 4),
+            baseline_right_V=round(res["baseline_right"], 4),
+        )
+        self.records.append(rec)
+        return rec
+
+    def undo_last(self):
+        if self.records:
+            return self.records.pop()
+        return None
+
+    def clear_all(self):
+        self.records = []
+
+    def rows(self):
+        """Recorded measurements, oldest first.
+
+        Click order rather than scan order, matching the on-screen table: the
+        sequence of measurements is itself the record of what was done.
+        """
+        return list(self.records)
+
+    def export_rows(self):
+        """Measurements left to right along the migration axis, for saving."""
+        return [dict(r) for r in sorted(self.records,
+                                        key=lambda r: (r["start_scan"],
+                                                       r["channel"]))]
+
+    # ---------------------------------------------------------------- drawing
+    def plot_overlay(self, ax, pending=None):
+        """Draw the baseline and markers for every recorded measurement.
+
+        *pending* is the span currently being dragged as ``(start, stop, col)``
+        and is drawn dashed, so what is about to be recorded is visible before
+        the mouse is released.
+        """
+        for r in self.records:
+            self._draw_span(ax, r["start_scan"], r["end_scan"],
+                            r["channel"] - 1,
+                            color=self.col_color.get(r["channel"] - 1, "#666666"),
+                            label=f"{r['area_Vscan']:.0f}")
+        if pending is not None and pending[0] is not None and pending[1] is not None:
+            col = pending[2] if len(pending) > 2 else None
+            self._draw_span(ax, pending[0], pending[1], col,
+                            color="#999999", label="", dashed=True)
+
+    def _draw_span(self, ax, start, stop, col, color="#666666", label="",
+                   dashed=False):
+        """Baseline line, shaded area and endpoint guides for one span."""
+        a, b = sorted((int(start), int(stop)))
+        if b - a < 1:
+            return
+        ls = "--" if dashed else "-"
+        if col is None or not (0 <= col < self.doc.acgt.shape[1]):
+            col = self.best_col(a, b) or 0
+        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        xs = np.arange(a, b + 1)
+        bl = np.linspace(float(y[a]), float(y[b]), b - a + 1)
+        ax.plot(xs, bl, color=color, lw=1.1, ls=ls, alpha=0.9, zorder=4)
+        ax.fill_between(xs, bl, np.maximum(y[xs], bl), color=color,
+                        alpha=0.16, linewidth=0, zorder=1)
+        for x in (a, b):
+            ax.axvline(x, color=color, lw=0.7, ls=":", alpha=0.7, zorder=3)
+        if not dashed and label:
+            k = int(np.argmax(y[xs] - bl))
+            ax.annotate(label, (xs[k], y[xs[k]]), textcoords="offset points",
+                        xytext=(0, 5), ha="center", fontsize=6,
+                        color=color, zorder=5)
 
 
 class GenotypingEditor(ttk.Frame):
@@ -877,9 +1446,7 @@ class GenotypingEditor(ttk.Frame):
                    command=self._mark_std).pack(side=tk.LEFT)
         ttk.Button(sbtn, text="Clear", command=self._clear_std).pack(side=tk.LEFT, padx=4)
         ttk.Label(std, text="The four first main peaks (scan order) are tagged\n"
-                            "HOM1, HOM2 (homoduplexes) then HET1, HET2 (heteroduplexes).\n"
-                            "Tagging also switches that well to the CTCE mass-action\n"
-                            "MF = (A_MUT + ½·A_HET) / (A_WT + A_MUT + A_HET).",
+                            "HOM1, HOM2 (homoduplexes) then HET1, HET2 (heteroduplexes).",
                   foreground="#777", wraplength=fw, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
         self.std_lbl = ttk.Label(std, text="No standard set.",
                                  foreground="#555", wraplength=fw, justify=tk.LEFT)
@@ -895,11 +1462,10 @@ class GenotypingEditor(ttk.Frame):
         tblf = ttk.LabelFrame(right, text="Picked peaks",
                               padding=4)
         tblf.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        cols = ("#", "scan", "duplex", "ch", "kind", "height V", "area V·sc",
-                "frac", "MF")
+        cols = ("#", "scan", "duplex", "ch", "kind", "height V", "area V·sc", "frac")
         self.tree = ttk.Treeview(tblf, columns=cols, show="headings", height=12)
         widths = {"#": 34, "scan": 54, "duplex": 58, "ch": 40, "kind": 66,
-                  "height V": 70, "area V·sc": 78, "frac": 50, "MF": 52}
+                  "height V": 70, "area V·sc": 78, "frac": 50}
         for c in cols:
             self.tree.heading(c, text=c)
             self.tree.column(c, width=widths[c], anchor="e" if c not in ("#", "kind") else "w",
@@ -1019,19 +1585,6 @@ class GenotypingEditor(ttk.Frame):
 
     def _sync_fractions(self):
         lines = []
-        for m in self.pk.labelled_species():
-            ma = self.pk.mass_action(m)
-            if not ma:
-                continue
-            het = f"  A_HET {ma['a_het']:.0f}" if ma["a_het"] else ""
-            lines.append(
-                f"{self.pk.duplex_of(m)}  MF {ma['mf']:.3f}  "
-                f"(AI {ma['ai']:.3f}, A_WT {ma['a_wt']:.0f}, "
-                f"A_MUT {ma['a_mut']:.0f}{het})")
-        if lines:
-            self.frac_var.set("\n".join(lines))
-            return
-        lines = []
         for cl in self.pk.clusters():
             if len(cl) >= 2 and sum(m["area"] for m in cl) > 0:
                 areas = sorted(m["area"] for m in cl)
@@ -1048,12 +1601,10 @@ class GenotypingEditor(ttk.Frame):
         self.tree.delete(*self.tree.get_children())
         for i, r in enumerate(self.records, 1):
             fr = self._clust_frac(r) if r["kind"] == "main" else ""
-            ma = self.pk.mass_action(r) if r["kind"] == "main" else None
             self.tree.insert("", tk.END, values=(
                 i, r["scan"], self._duplex_of(r), r["base"], r["kind"],
                 f"{r['height']:.3f}", f"{r['area']:.1f}",
-                f"{fr:.3f}" if fr else "",
-                f"{ma['mf']:.3f}" if ma else ""))
+                f"{fr:.3f}" if fr else ""))
 
     def _undo_last(self):
         if not self.pk.undo_last():

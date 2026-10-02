@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+
+# packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
