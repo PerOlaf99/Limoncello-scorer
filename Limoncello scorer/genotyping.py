@@ -359,6 +359,34 @@ def prime_plate_co_migration(model, wells):
         model.co_mig[k] = collected[k]
 
 
+def strongest_sample_band_snr(acgt, samp_col, scans):
+    """Strongest product band on the sample channel, in units of its noise."""
+    y = np.asarray(acgt[:, samp_col], dtype=float)
+    sigma = _noise_sigma(y)
+    if sigma <= 0 or not len(scans):
+        return 0.0
+    base = float(np.median(y[:400]))
+    return max((max(0.0, (float(y[max(0, int(s) - 6):int(s) + 7].max()) - base)
+                     / sigma)) for s in scans)
+
+
+def prime_plate_sample_snr(model, wells):
+    """Fill a model's typical sample signal from the wells that were marked.
+
+    Same *wells* argument as :func:`prime_plate_std_snr`.  Used to judge a well
+    whose standard did not fully form: on ABCC2_N10 that reads D01 at 62 sigma
+    and E01 at 24 where the plate's real calls sit at 500-5000, and both are
+    operator no-calls, whereas ABCC2_N11's unresolved wells read 4000 and are
+    real hom-1s.  The same event means opposite things on the two plates, and
+    only the plate itself says which.
+    """
+    if model is None:
+        return
+    model.sample_snr = [strongest_sample_band_snr(a, c, s)
+                        for a, c, s in wells if s]
+    model.sample_snr = [v for v in model.sample_snr if v > 0]
+
+
 def acgt_index_for_channel(base_order: str, channel: int) -> int:
     """Column of ``doc.acgt`` holding MegaBACE *channel* (1-based).
 
@@ -596,6 +624,9 @@ class PlateISModel:
         # same for every duplex (a heteroduplex has its own mobility).  Filled
         # by prime_plate_co_migration() from the marked wells.
         self.co_mig = [[] for _ in range(4)]
+        # Strongest sample band per marked well, so a well whose standard did
+        # not form can be judged against this plate instead of a fixed floor.
+        self.sample_snr = []
 
     @classmethod
     def from_marks(cls, marks):
@@ -643,6 +674,18 @@ class PlateISModel:
             return None
         import statistics as _st
         return max(5.0, 0.25 * _st.median(self.std_snr))
+
+    def min_sample_snr(self):
+        """Sample signal a half-formed standard must still show to be called.
+
+        A quarter of this plate's typical strongest band, with an absolute
+        floor so a faint plate cannot demand the impossible.  Only consulted
+        where the standard itself is in doubt.
+        """
+        if len(self.sample_snr) < 4:
+            return None
+        import statistics as _st
+        return max(20.0, 0.25 * _st.median(self.sample_snr))
 
     def co_migration_window(self, duplex):
         """Scans either side of a fitted band centre where its product sits.
@@ -988,11 +1031,27 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
     # the well is the explicit statement that the standard is usable there.
     merged_het = len(scans) < 4
     row["het_resolved"] = not merged_het
-    if merged_het and is_model is not None and not is_model.merged_seen \
-            and not manual:
-        row["reason"] = ("standard shows an unresolved heteroduplex on a plate "
-                         "whose marked wells always resolve it")
-        return row
+    std_unresolved = (merged_het and is_model is not None
+                      and not is_model.merged_seen and not manual)
+    if std_unresolved:
+        # Flagged, not rejected.  This used to return a bare no-call, which was
+        # right on the plate it was written for and wrong everywhere else: on
+        # ABCC2_N11 it discarded 17 wells the operator calls real hom-1s,
+        # because d3 there is 12 scans and the last two standard bands simply
+        # did not separate in the standard channel.  The reason is that a
+        # half-formed standard puts the sample windows in doubt, so the doubt
+        # belongs in the flags where it can be read and weighed -- not in a
+        # silent no-call that looks identical to an empty well.
+        #
+        # Rejecting outright only made sense while the check doubled as a guard
+        # on the invented quartets near scan 2000, and that guard is separate:
+        # it is the refusal to fall back to a global search once a plate model
+        # exists.  With a model in hand the windows are anchored to real bands,
+        # and whether the sample supports a call is already decided by the
+        # significance floors below -- D01 and E01 on ABCC2_N10 stay no-calls
+        # because they carry no sample signal, which is the honest reason.
+        row["flags"] = ",".join(filter(
+            None, [row["flags"], "std-unresolved"]))
 
     y = np.asarray(acgt[:, samp_col], dtype=float)
     n = y.size
@@ -1043,15 +1102,34 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
 
     call, frac, flags = scorer.t9_call(
         areas[0], areas[1], areas[2], None if merged_het else areas[3], snrs)
+    if std_unresolved and is_model is not None and call != "no-call":
+        # The windows came off a half-formed standard, so a call here rests on
+        # positions that are themselves in doubt.  That is worth allowing when
+        # the sample is plainly strong -- ABCC2_N11's unresolved wells read
+        # 4000 sigma and are real hom-1s -- and worth refusing when it is not,
+        # because ABCC2_N10's D01 and E01 read 62 and 24 on a plate whose real
+        # calls sit above 500, and the operator calls both no-call.  Measured
+        # against the plate rather than a fixed number, since the same event
+        # means opposite things on the two plates.
+        floor = is_model.min_sample_snr()
+        if floor is not None and max(snrs) < floor:
+            row["reason"] = ("standard unresolved and sample too weak to trust "
+                             "the windows it left behind")
+            return row
     row["call"] = call
     row["frac"] = round(frac, 4)
-    row["flags"] = ",".join(sorted(flags))
+    # Flags accumulate from here on: the call engine's own set, plus whatever
+    # the plate-level checks add.  Assigning rather than merging silently
+    # dropped std-unresolved whenever the well also read as merged.
+    row["flags"] = ",".join(sorted(set(flags) | set(
+        f for f in row["flags"].split(",") if f)))
     if merged_het:
         # Legitimate on a plate that runs merged, and never score-affecting --
         # but it is exactly the well where an allelic-imbalance read cannot be
         # checked, because the two heteroduplex areas that would show the
         # imbalance are not separable here.
-        row["flags"] = ",".join(sorted(flags | {"het-merged"}))
+        row["flags"] = ",".join(sorted(
+            set(f for f in row["flags"].split(",") if f) | {"het-merged"}))
 
     # Weak-standard flag, relative to this plate.  The call stands: a weak
     # pattern still reads in context, and ABCC2 D07 is a hom-1 the operator

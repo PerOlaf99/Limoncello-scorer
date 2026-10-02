@@ -1,4 +1,4 @@
-"""A weak standard is flagged, not rejected; a half-formed one is rejected.
+"""A weak standard is flagged, not rejected; a half-formed one is judged.
 
 Two different things can go wrong with the internal standard, and they are not
 the same problem:
@@ -8,10 +8,12 @@ the same problem:
   stands and only a flag is raised.  ABCC2 D07 reads 18 sigma against a plate
   median of 112 and is still an unambiguous hom-1.
 * **half-formed** -- the heteroduplexes fail to resolve on a plate whose marked
-  wells always resolve them.  That is not a weak standard, it is a different
-  shape, and the sample windows read off it are misplaced, so the well is not
-  genotypeable at all.  Every one of the operator's 56 ABCC2_N10 marks is
-  four-band, and its only two three-band reads (D01, E01) are both no-calls.
+  wells always resolve them.  That is a different shape, and the sample windows
+  read off it are misplaced, so it is flagged rather than trusted outright.
+  It is not disqualifying by itself: ABCC2_N11's three-band wells read ~4000
+  sigma and are the operator's hom-1s, while ABCC2_N10's two three-band reads
+  (D01, E01) are both no-calls at 62 and 24 sigma on a plate whose real calls
+  sit above 500.  The same shape, opposite meanings, so the sample decides.
 
 An absolute signal cutoff cannot tell these apart: D01 measures 27 sigma and
 D07 18, yet D01 is unusable and D07 is readable.  Judging against the plate's
@@ -66,10 +68,11 @@ FOUR = [2400, 2480, 2740, 2752]
 THREE = [2400, 2480, 2740]
 
 
-def _model(merged_seen, std_snr=None):
+def _model(merged_seen, std_snr=None, sample_snr=None):
     m = g.PlateISModel(SOLVE, [sum(FOUR) / 4.0], n_marked=20,
                        merged_seen=merged_seen)
     m.std_snr = list(std_snr or [])
+    m.sample_snr = list(sample_snr or [])
     return m
 
 
@@ -83,12 +86,36 @@ def test_merged_geometry_records_whether_marks_showed_one():
     assert with_merged.merged_seen is True
 
 
-def test_three_band_standard_is_off_model_on_a_never_merged_plate():
-    doc = _Doc(_acgt(THREE, samp=[2400, 2480]))
+def test_half_formed_standard_with_a_strong_sample_is_flagged_not_refused():
+    """The shape alone is not disqualifying; the sample decides.
+
+    ABCC2_N11's unresolved wells read ~4000 sigma and the operator calls them
+    hom-1, so refusing the shape outright threw away 17 real wells there.
+    """
+    doc = _Doc(_acgt(THREE, samp=[2390, 2470], samp_amp=4000.0))
     row = g.auto_genotype(doc, is_channel=3, sample_channel=2,
-                          base_order="ACTG", is_model=_model(False))
+                          base_order="ACTG", is_model=_model(False,
+                                                            sample_snr=[900.0] * 8))
+    assert row["call"] != "no-call", row["reason"]
+    assert "std-unresolved" in row["flags"]
+    assert row["het_resolved"] is False
+
+
+def test_half_formed_standard_with_a_weak_sample_is_refused():
+    """ABCC2_N10's D01 and E01 are the same shape at 62 and 24 sigma.
+
+    On a plate whose real calls sit above 500 that is not a genotype, and the
+    honest reason is a weak sample -- not the band count, which on ABCC2_N11
+    means the opposite.
+    """
+    # Comfortably over the absolute floor of 40, so it is the plate-relative
+    # bar that refuses this well and not the weaker check in front of it.
+    doc = _Doc(_acgt(THREE, samp=[2390, 2470], samp_amp=600.0))
+    row = g.auto_genotype(doc, is_channel=3, sample_channel=2,
+                          base_order="ACTG", is_model=_model(False,
+                                                            sample_snr=[900.0] * 8))
     assert row["call"] == "no-call"
-    assert "unresolved heteroduplex" in row["reason"]
+    assert "sample too weak" in row["reason"]
     assert row["het_resolved"] is False
 
 
@@ -100,12 +127,14 @@ def test_three_band_standard_is_normal_on_a_merged_plate():
     assert "het-merged" in row["flags"]
 
 
-def test_manual_marks_override_the_off_model_rejection():
-    """The operator's word stands where the shape test would refuse."""
-    doc = _Doc(_acgt(THREE, samp=[2400, 2480]))
+def test_manual_marks_override_the_shape_doubt():
+    """The operator's word stands where the shape test would raise a flag."""
+    doc = _Doc(_acgt(THREE, samp=[2400, 2480], samp_amp=600.0))
     row = g.auto_genotype(doc, is_channel=3, sample_channel=2, base_order="ACTG",
-                          std_scans_manual=THREE, is_model=_model(False))
-    assert "unresolved heteroduplex" not in row["reason"]
+                          std_scans_manual=THREE, is_model=_model(False,
+                                                                 sample_snr=[900.0] * 8))
+    assert "sample too weak" not in row["reason"]
+    assert "std-unresolved" not in row["flags"]
 
 
 def test_four_band_standard_is_unaffected_by_the_shape_test():
