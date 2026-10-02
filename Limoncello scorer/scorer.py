@@ -418,8 +418,12 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     merged_het = het2 is None
     het2 = 0.0 if merged_het else het2
 
-    sigmas = tuple(sigmas or ())
-    dom = max(sigmas) if sigmas else None
+    sigmas = tuple(x for x in (sigmas or ()) if x is not None)
+    # For global dominance, only consider homoduplex sigmas - het bands shouldn't
+    # make a weak homoduplex sample appear dominant (prevents het bands standing
+    # in for missing homs).
+    hom_sigmas = tuple(s for i, s in enumerate(sigmas) if i < 2 and s is not None)
+    dom = max(hom_sigmas) if hom_sigmas else (max(sigmas) if sigmas else None)
     total = hom1 + hom2 + het1 + het2
     s1 = sigmas[0] if len(sigmas) > 0 else None
     s2 = sigmas[1] if len(sigmas) > 1 else None
@@ -462,7 +466,12 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     # allele.  Measured across every het call carrying a reference genotype,
     # 0 of 31 genuine hets have an empty second homoduplex while 5 of 11 false
     # ones do, so this costs no true call and rejects half the false ones.
-    if both_present and hom2 > 0:
+    # Also require at least one homoduplex to be significant when sigma info
+    # is available; a strong het band should not create a het call when both
+    # homs are below threshold.
+    hom1_ok_sig = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
+    hom2_ok_sig = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
+    if both_present and hom2 > 0 and (s1 is None or hom1_ok_sig or hom2_ok_sig):
         if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
             flags.add("ai")
         return "het", frac, flags
