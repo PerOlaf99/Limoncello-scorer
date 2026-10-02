@@ -1,0 +1,3450 @@
+#!/usr/bin/env python3
+"""
+Limoncello CE Analyzer (Python)
+===============================
+A desktop viewer and base caller for capillary-electrophoresis traces:
+
+  • Multi-folder project load (RSD / SCF / ABI .ab1 / text traces)
+  • Multi-instrument trace display with current (µA) overlay
+  • 1–8 electropherogram panes, plus a Wrap view (one well in N rows)
+  • Raw / processed / wrapped / base-called views
+  • Quality profile (0–100, teal=good / brown=poor) + base letters
+  • Basecaller versions (mb1000/mb4000 × accuracy/length, legacy aliases)
+  • Auto-tour (slideshow) through the loaded wells
+  • Sort wells by well / name / folder, jump-to-well filter
+  • Export: FASTA, peak CSV, trace text (channels V + current µA)
+
+Base calling uses our own tuned caller (best_basecaller spacing tracker),
+not commercial instrument algorithms.
+
+Genotyping sits next to base calling in the Genotyping menu: manual peak
+picking straight on the stacked viewer (batch 4-6 wells at a time, click to
+pick, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML).
+
+Run:
+  python sequence_analyzer.py
+  python sequence_analyzer.py --folder /path/to/rsd_dir
+"""
+from __future__ import annotations
+
+import sys
+
+# ``--check`` must work even where tkinter/matplotlib are not installed, so
+# answer it before the GUI imports below are executed.
+if __name__ == "__main__" and "--check" in sys.argv[1:]:
+    from analyzer_core import environment_report
+    sys.exit(environment_report())
+
+import argparse
+import json
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+
+# matplotlib embedded
+import matplotlib
+
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
+
+from analyzer_core import (
+    AnalysisSettings,
+    BASECALLER_VERSIONS,
+    SOURCE_LABELS,
+    SUPPORTED_EXTS,
+    TraceDocument,
+    discover_files,
+    find_run_folders,
+    load_trace,
+    run_basecall,
+    display_trace,
+)
+
+CHANNEL_ORDER = "ACGT"
+QUALITY_COLOR = "#C77B00"   # brownish (poor-quality colour, manual)
+QUALITY_GOOD = "#00998A"    # blue-green (good-quality colour, manual)
+CURRENT_COLOR = "#8C8C9E"
+
+# Limoncello palette — the lime-yellow, slightly fluorescent colour of the
+# Italian lemon liqueur that gives this app its name.
+LIMON_BAR = "#D9F24A"       # fluorescent lime-yellow top strip
+LIMON_DRK = "#22350E"       # dark green-lemon for text on the bar
+LIMON_ACCENT = "#BEE027"    # accent green-yellow
+DOC_CACHE_MAX = 300         # keep memory bounded on huge run collections
+SCAN_RATE_HZ = 1.75         # instrument scan rate (~0.571 s per scan)
+WELL_RE = re.compile(r"([A-Ha-h]\d{1,2})")
+
+TRACE_THEMES = {
+    # Classic = the MegaBACE software look, colours FIXED per base letter:
+    # A green, C blue, T red, G black.  Traces are drawn Ch1..Ch4 in the run's
+    # base order (default A·C·T·G), so on a default run Ch1=A (green),
+    # Ch2=C (blue), Ch3=T (red), Ch4=G (black) — exactly as on the MegaBACE
+    # sequence analyser.  The base order only shifts which channel shows
+    # which colour; colours stay with the letters.
+    "Classic": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
+    # Sequencing (MegaBACE SA) colours are FIXED per base, exactly as the SA
+    # software shows them: A green, C blue, T red, G black.  The base order
+    # changes per chemistry (it only decides which base sits on which physical
+    # channel), so the traces keep these colours at all times.  The dye-kit
+    # names below therefore match the equivalent of these colours on MegaBACE.
+    "Seq DYEnamic (T·G·C·A)": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
+    "Seq ET primer (A·C·T·G)": {"A": "#00AA00", "C": "#0000DD", "G": "#111111", "T": "#DD0000"},
+    "Chromas": {"A": "#00AA00", "C": "#1E90FF", "G": "#444444", "T": "#FF0000"},
+    "High-contrast": {"A": "#2E8B57", "C": "#1F4FC0", "G": "#000000", "T": "#E03030"},
+    "Monochrome": {"A": "#777777", "C": "#555555", "G": "#333333", "T": "#888888"},
+    # MegaBACE genotyping dye sets are FIXED per CHANNEL (no base colours),
+    # applied physically: Channel1,2,3,4.  Dye set 1 = Ch1 Red (ET-ROX),
+    # Ch2 Blue (FAM), Ch3 Black (HEX/NED), Ch4 Green (TET/HEX).  Many users
+    # are used to Red=Ch3 / Black=Ch4, hence the second variant.
+    "Genotyping (R·B·Blk·G)": {"A": "#E03030", "C": "#2557E8", "G": "#111111", "T": "#00B052"},
+    "Genotyping (G·B·R·Blk)": {"A": "#00B052", "C": "#2557E8", "G": "#E03030", "T": "#111111"},
+}
+
+# "channel" themes paint each trace by position (Channel1..4), ignoring which
+# base letter the channel carries (genotyping dye sets).  Everything else,
+# including Classic, paints by the colour of the base letter (MegaBACE SA).
+TRACE_THEME_MODE = {
+    "Genotyping (R·B·Blk·G)": "channel",
+    "Genotyping (G·B·R·Blk)": "channel",
+}
+
+SRC_FG = {
+    "rsd": "#000000",
+    "scf": "#1E55C0",
+    "abi": "#0F7A4D",
+    "text": "#B45A00",
+}
+
+# well sorting modes: "letter first" = A01,A02,…; "number first" = A01,B01,…H01,A02…
+SORT_OPTIONS = [
+    ("well_row", "Well (letter first)"),
+    ("well_col", "Well (number first)"),
+    ("name", "File name"),
+    ("folder", "Folder + name"),
+]
+SORT_CODES = {label: code for code, label in SORT_OPTIONS}
+SORT_LABELS = {code: label for code, label in SORT_OPTIONS}
+
+
+class ToolTip:
+    """Small floating label that appears after hovering a widget.
+    `getter` is called on hover and returns the text to show (or '')."""
+
+    def __init__(self, widget, getter):
+        self.widget = widget
+        self.getter = getter
+        self.tip = None
+        self._after = None
+        widget.bind("<Enter>", lambda e: self._schedule(), add="+")
+        widget.bind("<Leave>", lambda e: self._cancel(), add="+")
+        widget.bind("<Motion>", lambda e: self._schedule(), add="+")
+
+    def _schedule(self):
+        # Never stack tips: drop any visible one and re-arm.
+        self._cancel()
+        self._after = self.widget.after(350, self._show)
+
+    def _cancel(self):
+        if self._after:
+            self.widget.after_cancel(self._after)
+            self._after = None
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+    def _show(self):
+        self._after = None
+        text = self.getter()
+        if not text:
+            return
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+        self.tip = tk.Toplevel(self.widget, bg="#FFFFE1")
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{self.widget.winfo_pointerx() + 14}"
+                             f"+{self.widget.winfo_pointery() + 14}")
+        tk.Label(self.tip, text=text, bg="#FFFFE1", fg="#222222",
+                 justify=tk.LEFT, font=("DejaVu Sans", 9),
+                 padx=4, pady=2).pack()
+
+
+class LimoncelloAnalyzerApp(tk.Tk):
+    def __init__(self, initial_folders: Optional[List[Path]] = None):
+        super().__init__()
+        self.title("Limoncello CE Analyzer")
+        self.minsize(1040, 720)
+        self.configure(bg="#F2F4F7")
+        # Undecorated but STILL WM-managed: 'splash' removes the gray OS
+        # titlebar while mutter keeps managing the window (focus, placement).
+        # Unlike override-redirect, this does not wedge the desktop.
+        try:
+            self.attributes("-type", "splash")
+        except tk.TclError:
+            pass
+        self.geometry("1440x920")
+        self._drag_off = (0, 0)
+        self._zoomed = False
+        self._pre_zoom = ""
+        self._busy = False
+        self._cancel = False
+        self.bind("<Escape>", self._on_escape)
+        self.bind("<F11>", lambda e: self._toggle_zoom())
+        self.bind("<F1>", lambda e: self.show_help())
+        self.bind("<Home>", lambda e: self._reset_zoom())
+        self.bind("<Control-z>", lambda e: self._gen_undo())
+        self.bind("<Control-Z>", lambda e: self._gen_undo())
+
+        self.folders: List[Path] = list(initial_folders or [])
+        self.files: List[Path] = []
+        self.docs: dict[str, TraceDocument] = {}
+        self._comment_cache: dict[str, str] = {}
+        self.selected: List[Path] = []
+        self.excluded: set[str] = set()   # individual files hidden by the user
+        self._bg_checked = False
+        self._bg_imgs: List[np.ndarray] = []
+        self.settings = AnalysisSettings()
+        self.base_order_var = tk.StringVar(value=self.settings.base_order)
+        self.n_graphs = tk.IntVar(value=1)
+        self.view_mode = tk.StringVar(value="processed")
+        self.basecaller = tk.StringVar(value="mb1000_accuracy")
+        self.status_var = tk.StringVar(value="Ready — add a data folder to begin")
+
+        # Visualization state
+        self.chan_show = [tk.BooleanVar(value=True) for _ in CHANNEL_ORDER]
+        self.show_letters = tk.BooleanVar(value=True)
+        self.show_qnum = tk.BooleanVar(value=False)
+        self.show_qcurve = tk.BooleanVar(value=False)
+        self.show_current = tk.BooleanVar(value=True)
+        self.x_time = tk.BooleanVar(value=False)  # x axis: scans (off) vs time (on)
+        self.theme = tk.StringVar(value="Classic")
+        self.wrap_rows = tk.IntVar(value=5)
+
+        # Main-window manual genotyping: the user pages the current batch
+        # (n_graphs wells at a time), zooms in and clicks peaks on the stacked
+        # viewer.  One PeakPicker per displayed well accumulates the records.
+        self.genotyping_active = False
+        # area_mode reuses this whole mode for the plainer drag-to-measure
+        # tool: same stacked viewer, same table, same batching, but a
+        # press-drag-release span instead of a click that detects a peak.
+        self.area_mode = False
+        self._gen_pickers: dict = {}
+        self._area_pickers: dict = {}
+        self._area_drag = None
+        self._area_cursors: list = []
+        self._gen_active_path: Optional[Path] = None
+        # Auto-genotyping: which physical channel carries the internal
+        # standard and which carries the sample.  These are per-run assay
+        # roles, not dye names -- they start at the T9 kit's Ch3/Ch2 but the
+        # user can move them, and the pairing is checked before a single well
+        # is scored, because swapping them does not fail loudly: it scores the
+        # sample's own peaks as the standard and returns confident nonsense.
+        self._auto_is_channel = tk.IntVar(value=3)
+        self._auto_sample_channel = tk.IntVar(value=2)
+        self._auto_rows: list = []
+        self._auto_tree = None
+        self._pick_cid = None
+        self._gen_motion_cid = None
+        self._area_release_cid = None
+        self._gen_cursors: list = []
+        self.pick_table = None
+        self.pick_tree = None
+        self._gen_sh = tk.BooleanVar(value=True)
+        self._gen_d2 = tk.BooleanVar(value=True)
+        # The two pick modes are radio buttons in effect: at most one can own
+        # the canvas, and the menu shows which one is live.
+        self._mode_pick = tk.BooleanVar(value=False)
+        self._mode_area = tk.BooleanVar(value=False)
+
+        # Shared X/Y view, stored as [first, last] fractions of the full data
+        # range. One model drives every visible graph plus the axis bars.
+        self._view_x = [0.0, 1.0]
+        self._view_y = [0.0, 1.0]
+        self._plot_axes: List = []
+        self._full_xlim = None
+        self._full_ylim = None
+
+        # List sorting / filtering / tour
+        self.sort_mode = tk.StringVar(value="well_row")
+        self.filter_var = tk.StringVar()
+        self.cycle_ms = tk.IntVar(value=3000)
+        self.touring = False
+        self.cycle_pos = 0
+        self._tour_job = None
+
+        self._style()
+        self._build_menu()
+        self._build_layout()
+        roots = list(self.folders)
+        self.folders = []
+        for root in roots:
+            self._absorb_runs(root)
+        self.refresh_file_list()
+        # Draw the empty (background) view once the window is up, otherwise
+        # the plot area stays blank until the first selection.
+        self.after(50, self.redraw)
+
+    # ------------------------------------------------------------------ style
+    def _style(self):
+        style = ttk.Style(self)
+        # NOTE: stay on the native theme — the 'clam' theme repaints the
+        # scale thumb on every hover motion and flickers on X11.
+        bg = "#F2F4F7"
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg)
+        style.configure("TLabelframe", background=bg)
+        style.configure("TLabelframe.Label", background=bg, foreground="#0F3A6E",
+                        font=("", 9, "bold"))
+        style.configure("TListbox", background="#FFFFFF", fieldbackground="#FFFFFF",
+                        foreground="#1A1C22")
+        style.configure("TCheckbutton", background=bg)
+
+    # ------------------------------------------------------ custom titlebar
+    def _start_move(self, event):
+        self._drag_off = (event.x_root - self.winfo_x(),
+                          event.y_root - self.winfo_y())
+
+    def _on_move(self, event):
+        x = event.x_root - self._drag_off[0]
+        y = event.y_root - self._drag_off[1]
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        # keep at least a sliver on-screen so the bar can always be grabbed
+        x = max(200 - self.winfo_width(), min(x, sw - 200))
+        y = max(0, min(y, sh - 60))
+        self.geometry(f"+{x}+{y}")
+
+    def _toggle_zoom(self):
+        if self._zoomed:
+            self.geometry(self._pre_zoom)
+            self._zoomed = False
+        else:
+            self._pre_zoom = self.geometry()
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            self.geometry(f"{sw}x{sh}+0+0")
+            self._zoomed = True
+
+    def _close(self):
+        self.destroy()
+
+    def _popup_menu(self, menu, mb):
+        """Open a top menu bar dropdown (stock Menubutton posting fails here)."""
+        try:
+            menu.tk_popup(mb.winfo_rootx(), mb.winfo_rooty() + mb.winfo_height())
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _on_escape(self, event=None):
+        if self._busy:
+            self._cancel = True
+            self.status_var.set("Cancelling…")
+        elif self._zoomed:
+            self._toggle_zoom()
+
+    # ------------------------------------------------------------------ UI
+    def _build_menu(self):
+        file_m = tk.Menu(self, tearoff=0)
+        file_m.add_command(label="Add data folder…", command=self.add_folder)
+        file_m.add_command(label="Clear folders", command=self.clear_folders)
+        file_m.add_separator()
+        file_m.add_command(label="Export sequence (FASTA)…", command=self.export_fasta)
+        file_m.add_command(label="Export peak table (CSV)…", command=self.export_peaks)
+        file_m.add_command(label="Export trace text (V + µA)…", command=self.export_text)
+        file_m.add_separator()
+        file_m.add_command(label="Save graph image…", command=self.save_figure)
+        file_m.add_separator()
+        file_m.add_command(label="Save settings JSON…", command=self.save_settings)
+        file_m.add_command(label="Load settings JSON…", command=self.load_settings)
+        file_m.add_separator()
+        file_m.add_command(label="Exit", command=self.destroy)
+
+        view_m = tk.Menu(self, tearoff=0)
+        for mode, label in [
+            ("raw", "Raw traces"),
+            ("processed", "Processed (ACGT)"),
+            ("called", "Base-called (with peaks)"),
+            ("esd", "Sequencing trace (ESD peaks)"),
+            ("wrap", "Wrap (one well, N rows)"),
+        ]:
+            view_m.add_radiobutton(
+                label=label, variable=self.view_mode, value=mode, command=self.redraw)
+        view_m.add_separator()
+        view_m.add_checkbutton(
+            label="Show base letters on peaks", variable=self.show_letters,
+            command=self.redraw)
+        view_m.add_checkbutton(
+            label="Show quality numbers (zoomed)", variable=self.show_qnum,
+            command=self.redraw)
+        view_m.add_checkbutton(
+            label="Show quality profile (0-100)", variable=self.show_qcurve,
+            command=self.redraw)
+        view_m.add_checkbutton(
+            label="Show instrument current (µA)", variable=self.show_current,
+            command=lambda: (self._sync_current_btn(), self.redraw()))
+        view_m.add_separator()
+
+        sort_m = tk.Menu(self, tearoff=0)
+        for code, label in SORT_OPTIONS:
+            sort_m.add_radiobutton(label=label, variable=self.sort_mode, value=code,
+                                   command=self.refresh_file_list)
+        view_m.add_cascade(label="Sort files", menu=sort_m)
+
+        wrap_m = tk.Menu(self, tearoff=0)
+        wrap_var = tk.StringVar(value=str(self.wrap_rows.get()))
+        for r in (2, 3, 4, 5, 6, 8):
+            wrap_m.add_radiobutton(
+                label=f"{r} rows", variable=wrap_var, value=str(r),
+                command=lambda r=r: (self.wrap_rows.set(r), self.redraw()))
+        view_m.add_cascade(label="Wrap rows", menu=wrap_m)
+
+        tour_m = tk.Menu(self, tearoff=0)
+        for ms, label in [(2000, "2 s"), (3000, "3 s"), (4000, "4 s"), (5000, "5 s")]:
+            tour_m.add_radiobutton(label=label, value=ms, variable=self.cycle_ms)
+        view_m.add_cascade(label="Tour interval", menu=tour_m)
+
+        view_m.add_separator()
+        view_m.add_command(label="Page backward", command=lambda: self._page_by(-1))
+        view_m.add_command(label="Page forward", command=lambda: self._page_by(1))
+        view_m.add_command(label="Start/stop auto-tour", command=self.toggle_tour)
+        view_m.add_command(label="Reset view (X & Y)", command=self._reset_zoom)
+        view_m.add_command(label="Redraw", command=self.redraw)
+
+        chan_m = tk.Menu(self, tearoff=0)
+        for i, base in enumerate(CHANNEL_ORDER):
+            chan_m.add_checkbutton(
+                label=f"Channel {base}", variable=self.chan_show[i],
+                command=self.redraw)
+        view_m.add_cascade(label="Channels", menu=chan_m)
+
+        theme_m = tk.Menu(self, tearoff=0)
+        for name in TRACE_THEMES:
+            theme_m.add_radiobutton(
+                label=name, variable=self.theme, value=name, command=self.redraw)
+        view_m.add_cascade(label="Trace colors", menu=theme_m)
+
+        basecall_m = tk.Menu(self, tearoff=0)
+        basecall_m.add_command(label="Basecall selected", command=self.basecall_selected)
+        basecall_m.add_command(label="Basecall all in list", command=self.basecall_all)
+        basecall_m.add_separator()
+        basecall_m.add_command(label="⚙ Basecall settings…", command=self.open_settings)
+        basecall_m.add_separator()
+        basecall_m.add_radiobutton(
+            label="Sequencing trace (ESD peaks)",
+            variable=self.view_mode, value="esd", command=self.redraw)
+        basecall_m.add_radiobutton(
+            label="Plain channels (processed)",
+            variable=self.view_mode, value="processed", command=self.redraw)
+        basecall_m.add_separator()
+        basecall_m.add_command(label="Clear base calls (undo)", command=self.clear_basecalls)
+
+        genotyping_m = tk.Menu(self, tearoff=0)
+        genotyping_m.add_checkbutton(label="Manual peak picking…",
+                                     variable=self._mode_pick,
+                                     command=self.toggle_genotyping_picking)
+        genotyping_m.add_checkbutton(label="Peak area by drag…",
+                                     variable=self._mode_area,
+                                     command=self.toggle_area_picking)
+        genotyping_m.add_separator()
+        genotyping_m.add_checkbutton(
+            label="Add +A (A-addition) peak",
+            variable=self._gen_sh, command=self._sync_gen_opts)
+        genotyping_m.add_checkbutton(
+            label="Mark start/end from the 2nd derivative",
+            variable=self._gen_d2, command=self._sync_gen_opts)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Undo last pick / measurement",
+                                 command=self._gen_undo)
+        genotyping_m.add_command(label="Clear picks / measurements",
+                                 command=self._gen_clear)
+        genotyping_m.add_command(label="Mark peaks as standard…",
+                                 command=self._gen_mark_std)
+        genotyping_m.add_command(label="Tag duplex species for MF…",
+                                 command=self._gen_mark_duplex)
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
+        genotyping_m.add_command(label="Next batch →",
+                                 command=lambda: self._page_by(1))
+        genotyping_m.add_command(label="← Previous batch",
+                                 command=lambda: self._page_by(-1))
+        genotyping_m.add_separator()
+        genotyping_m.add_command(label="Exit peak picking",
+                                 command=self.exit_genotyping_picking)
+
+        auto_m = tk.Menu(genotyping_m, tearoff=0)
+        auto_m.add_command(label="Auto-genotype selected wells…",
+                           command=self.auto_genotype_wells)
+        auto_m.add_command(label="Channel roles (standard / sample)…",
+                           command=self.auto_genotype_channels)
+        auto_m.add_separator()
+        auto_m.add_command(label="Save auto-genotype table…",
+                           command=self.auto_genotype_save)
+        genotyping_m.add_cascade(label="Auto-genotyping", menu=auto_m)
+
+        help_m = tk.Menu(self, tearoff=0)
+        help_m.add_command(label="User manual…", command=self.show_help)
+        help_m.add_command(label="About", command=self.show_about)
+
+        comments_m = tk.Menu(self, tearoff=0)
+        comments_m.add_command(label="Run comments…", command=self.edit_comments)
+        comments_m.add_command(label="Run info…", command=self.show_run_info)
+
+        self._menus = {"File": file_m, "View": view_m,
+                       "Base calling": basecall_m, "Genotyping": genotyping_m,
+                       "Comments": comments_m, "Help": help_m}
+    def _build_layout(self):
+        # Yellow title bar — the window is undecorated ('splash'), so this is
+        # the top of the app and carries the name (centred) + window buttons.
+        tbar = tk.Frame(self, bg=LIMON_BAR, bd=0)
+        tbar.pack(side=tk.TOP, fill=tk.X)
+        tbar.columnconfigure(0, weight=1)
+        tbar.columnconfigure(2, weight=1)
+
+        left_pad = tk.Frame(tbar, bg=LIMON_BAR)
+        left_pad.grid(row=0, column=0, sticky="nsew")
+
+        mid = tk.Frame(tbar, bg=LIMON_BAR)
+        mid.grid(row=0, column=1, pady=4)
+        title_lbl = ttk.Label(mid, text="Limoncello CE Analyzer",
+                              font=("DejaVu Sans", 16, "bold"),
+                              background=LIMON_BAR, foreground=LIMON_DRK)
+        title_lbl.pack()
+        sub_lbl = ttk.Label(mid, text="multi-instrument trace viewer",
+                            background=LIMON_BAR, foreground="#4A5A18")
+        sub_lbl.pack()
+
+        btn_style = dict(relief=tk.FLAT, bd=0, font=("DejaVu Sans", 12),
+                         bg=LIMON_BAR, fg=LIMON_DRK,
+                         activebackground=LIMON_ACCENT, activeforeground=LIMON_DRK,
+                         takefocus=0, cursor="hand2", padx=10, pady=3)
+        btns = tk.Frame(tbar, bg=LIMON_BAR)
+        btns.grid(row=0, column=2, sticky="e")
+        tk.Button(btns, text="✕", command=self._close, **btn_style).pack(side=tk.RIGHT)
+        tk.Button(btns, text="□", command=self._toggle_zoom, **btn_style).pack(side=tk.RIGHT)
+
+        for widget in (tbar, left_pad, mid, title_lbl, sub_lbl, btns):
+            widget.bind("<ButtonPress-1>", self._start_move)
+            widget.bind("<B1-Motion>", self._on_move)
+            widget.bind("<Double-Button-1>", lambda e: self._toggle_zoom())
+        acc = tk.Frame(self, bg=LIMON_ACCENT, height=2)
+        acc.pack(side=tk.TOP, fill=tk.X)
+        acc.pack_propagate(False)
+
+        # Menu bar (gray strip below the yellow banner)
+        mbar = tk.Frame(self, bg="#E8EBEF", bd=0, highlightthickness=0)
+        mbar.pack(side=tk.TOP, fill=tk.X)
+        for label, menu in self._menus.items():
+            mb = tk.Menubutton(
+                mbar, text=f"  {label}  ", menu=menu, relief=tk.FLAT,
+                font=("DejaVu Sans", 10), fg="#1A1C22", bg="#E8EBEF",
+                activebackground="#D6DCE3", activeforeground="#0F3A6E",
+                bd=0, padx=0, pady=2, takefocus=0, cursor="hand2")
+            mb.pack(side=tk.LEFT, padx=2, pady=1)
+            # Stock Menubutton posting misbehaves under this WM, and a menu
+            # opened on press is closed again by the same click's release.
+            # Open on release instead, with the default handling suppressed.
+            mb.bind("<ButtonPress-1>", lambda e: "break")
+            mb.bind("<ButtonRelease-1>",
+                    lambda e, m=menu, b=mb: self._popup_menu(m, b))
+
+        # Status bar
+        ttk.Label(self, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).pack(
+            side=tk.BOTTOM, fill=tk.X
+        )
+
+        body = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        # ----- Left: folders + files -----
+        left = ttk.Frame(body, width=380)
+        body.add(left, weight=1)
+
+        ttk.Label(left, text="⛁ Data folders", font=("", 10, "bold"),
+                  foreground="#0F3A6E").pack(anchor=tk.W, padx=4, pady=(4, 0))
+        self.folder_list = tk.Listbox(left, height=5, exportselection=False,
+                                      selectmode=tk.EXTENDED,
+                                      bg="#FFFFFF", highlightthickness=1,
+                                      highlightbackground="#B9C2D2",
+                                      activestyle="none")
+        self.folder_list.pack(fill=tk.X, padx=4, pady=2)
+        self.folder_list.bind("<<ListboxSelect>>", self._on_folder_select)
+        self.folder_list.bind("<Double-Button-1>", self._on_folder_activate)
+        fscroll = ttk.Scrollbar(left, orient=tk.HORIZONTAL,
+                                command=self.folder_list.xview)
+        fscroll.pack(fill=tk.X, padx=4)
+        self.folder_list.configure(xscrollcommand=fscroll.set)
+        self._folder_paths: List[Path] = []
+        ToolTip(self.folder_list, self._folder_tip_text)
+        fb = ttk.Frame(left)
+        fb.pack(fill=tk.X, padx=4)
+        ttk.Button(fb, text="⊕ Add…", command=self.add_folder).pack(side=tk.LEFT)
+        ttk.Button(fb, text="– Remove", command=self.remove_folder).pack(side=tk.LEFT, padx=4)
+
+        self.samples_label = ttk.Label(left, text="◧ Samples / files",
+                                       font=("", 10, "bold"),
+                                       foreground="#0F3A6E")
+        self.samples_label.pack(anchor=tk.W, padx=4, pady=(8, 0))
+
+        # sort + filter row
+        srow = ttk.Frame(left)
+        srow.pack(fill=tk.X, padx=4)
+        ttk.Label(srow, text="Sort:").pack(side=tk.LEFT)
+        self.sort_labels = {c: l for c, l in SORT_OPTIONS}
+        self.sort_codes = {l: c for c, l in SORT_OPTIONS}
+        self.sort_label_var = tk.StringVar(value=self.sort_labels["well_row"])
+        self.sort_cb = ttk.Combobox(srow, textvariable=self.sort_label_var, width=18,
+                                    values=list(SORT_LABELS.values()), state="readonly")
+        self.sort_cb.pack(side=tk.LEFT, padx=(2, 4))
+        self.sort_cb.bind("<<ComboboxSelected>>",
+                          lambda e: (self.sort_mode.set(self.sort_codes[self.sort_label_var.get()]),
+                                     self.refresh_file_list()))
+        ttk.Label(srow, text="Jump/well:").pack(side=tk.LEFT)
+        self.well_entry = ttk.Entry(srow, textvariable=self.filter_var, width=6)
+        self.well_entry.pack(side=tk.LEFT, padx=2)
+        self.filter_var.trace_add("write", lambda *a: self.refresh_file_list())
+
+        self.file_list = tk.Listbox(left, selectmode=tk.EXTENDED, exportselection=False,
+                                    bg=LIMON_BAR, fg=LIMON_DRK,
+                                    selectbackground=LIMON_ACCENT, selectforeground=LIMON_DRK,
+                                    highlightthickness=1,
+                                    highlightbackground="#B9C2D2",
+                                    activestyle="none")
+        self.file_list.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+        self.file_list.bind("<<ListboxSelect>>", self.on_file_select)
+        self.file_list.bind("<space>", lambda e: self.toggle_tour())
+        self.file_list.bind("<Down>", self._page_key)
+        self.file_list.bind("<Up>", self._page_key)
+        self.file_list.bind("<Page_Down>", self._page_key)
+        self.file_list.bind("<Page_Up>", self._page_key)
+        self.file_list.bind("<Delete>", lambda e: self.remove_samples())
+        self.bind("<Down>", self._page_key_root)
+        self.bind("<Up>", self._page_key_root)
+        self.bind("<Page_Down>", self._page_key_root)
+        self.bind("<Page_Up>", self._page_key_root)
+
+        rrow = ttk.Frame(left)
+        rrow.pack(fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Button(rrow, text="– Remove file(s)",
+                   command=self.remove_samples).pack(side=tk.LEFT)
+
+        frow = ttk.Frame(left)
+        frow.pack(fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Label(frow, text="Graphs").pack(side=tk.LEFT)
+        tk.Spinbox(
+            frow, from_=1, to=8, textvariable=self.n_graphs, width=3,
+            command=self.redraw, highlightthickness=0
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Label(frow, text="Tour (ms)").pack(side=tk.LEFT, padx=(8, 0))
+        tk.Spinbox(
+            frow, from_=500, to=20000, increment=500, textvariable=self.cycle_ms,
+            width=5, highlightthickness=0
+        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(frow, text="▶", width=3, command=self.toggle_tour).pack(side=tk.LEFT, padx=2)
+
+        # ----- Center: plots -----
+        center = ttk.Frame(body)
+        self.center = center
+        body.add(center, weight=5)
+
+        chan_bar = ttk.Frame(center)
+        chan_bar.pack(fill=tk.X, padx=4, pady=(4, 0))
+        ttk.Label(chan_bar, text="Channels:").pack(side=tk.LEFT)
+        self._chan_cbs = []
+        for i in range(len(CHANNEL_ORDER)):
+            # widget i drives chan_show[i], and chan_show is indexed by
+            # physical channel -- so widget i IS Ch i+1 and the widgets are
+            # already in order.  Only the label needs the dye order.
+            cb = tk.Checkbutton(
+                chan_bar, text=f"  Ch{i + 1} {CHANNEL_ORDER[i]}  ", variable=self.chan_show[i],
+                command=self._chan_changed, bg="#F2F4F7",
+                fg="#000000", activebackground="#F2F4F7",
+                selectcolor="white")
+            cb.pack(side=tk.LEFT, padx=2)
+            self._chan_cbs.append(cb)
+        # the bar starts out indexed A,C,G,T; relabel to the run's dye order
+        self._refresh_channel_labels()
+        self.base_order_var.trace_add("write", self._on_base_order_changed)
+        self._refresh_channel_buttons()
+        self._cur_btn = tk.Checkbutton(
+            chan_bar, text="  µA  ", variable=self.show_current,
+            bg="#DFF6DC", activebackground="#DFF6DC", fg="#14532D",
+            selectcolor="white",
+            command=lambda: (self._sync_current_btn(), self.redraw()))
+        self._cur_btn.pack(side=tk.LEFT, padx=(8, 2))
+        self._sync_current_btn()
+        self._time_btn = tk.Checkbutton(
+            chan_bar, text="  Time (min)  ", variable=self.x_time,
+            bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
+            command=self.redraw)
+        self._time_btn.pack(side=tk.LEFT, padx=(8, 2))
+        ttk.Label(chan_bar, text="Trace colors:").pack(side=tk.RIGHT, pady=4)
+        self.theme_cb = ttk.Combobox(
+            chan_bar, textvariable=self.theme, width=24, state="readonly",
+            values=list(TRACE_THEMES))
+        self.theme_cb.pack(side=tk.RIGHT, padx=(4, 8))
+        self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
+        ttk.Button(chan_bar, text="⟲ Reset view",
+                   command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
+
+        # Axis bars: drag to pan, mouse-wheel to zoom. One bar per axis and it
+        # drives every visible graph at once (shared X / shared Y).
+        plotf = self.plotf = ttk.Frame(center)
+        plotf.pack(fill=tk.BOTH, expand=True)
+        plotf.rowconfigure(0, weight=1)
+        plotf.columnconfigure(0, weight=1)
+
+        self.fig = Figure(figsize=(9, 7), dpi=100, facecolor="#FFFFFF")
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plotf)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self.canvas.get_tk_widget().bind("<Button-3>", self._on_right_click)
+        self.xbar = ttk.Scrollbar(plotf, orient=tk.HORIZONTAL)
+        self.xbar.grid(row=1, column=0, sticky="ew")
+        self.ybar = ttk.Scrollbar(plotf, orient=tk.VERTICAL)
+        self.ybar.grid(row=0, column=1, sticky="ns")
+        self.xbar.configure(command=lambda *a: self._bar_cmd("x", a))
+        self.ybar.configure(command=lambda *a: self._bar_cmd("y", a))
+        for bar, axis in ((self.xbar, "x"), (self.ybar, "y")):
+            bar.bind("<Button-4>", lambda e, ax=axis: self._wheel_zoom(ax, 1))
+            bar.bind("<Button-5>", lambda e, ax=axis: self._wheel_zoom(ax, -1))
+            bar.bind("<MouseWheel>",
+                     lambda e, ax=axis: self._wheel_zoom(ax, 1 if e.delta > 0 else -1))
+            bar.bind("<Double-Button-1>", lambda e, ax=axis: self._reset_axis(ax))
+            bar.bind("<Button-3>", self._on_right_click)
+            bar.configure(cursor="hand2")
+
+        # Sequence readout (the pane is retitled and swapped for the picked-
+        # peaks table while manual peak picking is active)
+        hdr = ttk.Frame(center)
+        hdr.pack(fill=tk.X, padx=4)
+        self.seq_hdr = ttk.Label(hdr, text="Called sequence")
+        self.seq_hdr.pack(side=tk.LEFT)
+        self.seq_text = scrolledtext.ScrolledText(center, height=4, wrap=tk.CHAR,
+                                                  font=("Courier", 9))
+        self.seq_text.pack(fill=tk.X, padx=4, pady=2)
+
+        # ----- Advanced base-call parameters live in a menu dialog ----
+        # (no right-hand knob panel → more room for plots, no flicker)
+        self._build_settings_dialog()
+
+    def _build_settings_dialog(self):
+        """Advanced base-call parameters in a separate (hidden) window."""
+        win = tk.Toplevel(self)
+        win.title("⚙ Basecall settings (advanced)")
+        win.geometry("380x620")
+        win.minsize(340, 420)
+        win.withdraw()
+        self.settings_win = win
+
+        frm = ttk.Frame(win)
+        frm.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(frm, highlightthickness=0, bg="#F2F4F7")
+        sb = ttk.Scrollbar(frm, orient=tk.VERTICAL, command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        canvas.configure(yscrollcommand=sb.set, bg="#F2F4F7")
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Label(inner,
+                  text="Tuned once per caller — normally you won't need to change "
+                       "these.\nApply re-runs the selected wells with them.",
+                  foreground="#666", wraplength=340).pack(anchor=tk.W, padx=8, pady=6)
+
+        def section(title: str) -> ttk.LabelFrame:
+            f = ttk.LabelFrame(inner, text=title, padding=4)
+            f.pack(fill=tk.X, padx=6, pady=4)
+            return f
+
+        def check(parent, text, var, cmd=None):
+            tk.Checkbutton(parent, text=text, variable=var, command=cmd,
+                           bg="#F2F4F7", activebackground="#F2F4F7",
+                           selectcolor="#FFFFFF").pack(anchor=tk.W)
+
+        def scale(parent, var, lo, hi, res):
+            tk.Scale(parent, from_=lo, to=hi, variable=var, orient=tk.HORIZONTAL,
+                     resolution=res, showvalue=0, highlightthickness=0,
+                     relief=tk.FLAT, length=280, troughcolor="#DCE4EF",
+                     bg="#F2F4F7", activebackground="#DCE4EF", sliderrelief=tk.RAISED
+                     ).pack(fill=tk.X)
+
+        f = section("Basecaller version")
+        for key, desc in BASECALLER_VERSIONS.items():
+            tk.Radiobutton(f, text=key, variable=self.basecaller, value=key,
+                           bg="#F2F4F7", activebackground="#F2F4F7",
+                           selectcolor="#F2F4F7").pack(anchor=tk.W)
+            ttk.Label(f, text=f"  {desc}", foreground="#555").pack(anchor=tk.W)
+
+        f = section("Dye / channel")
+        if not hasattr(self, "base_order_var"):        # keep the one traced
+            self.base_order_var = tk.StringVar(value=self.settings.base_order)
+        ttk.Label(f, text="Base order (instrument)").pack(anchor=tk.W)
+        ttk.Combobox(f, textvariable=self.base_order_var,
+                     values=["ACTG", "TGCA", "GATC", "CTAG"], width=12).pack(anchor=tk.W)
+        ttk.Label(f, text="MegaBACE default is ACTG (Ch1=A, Ch2=C, Ch3=T, Ch4=G); "
+                          "DYEnamic runs are TGCA. ABI uses its own FWO order.",
+                  foreground="#777", wraplength=250).pack(anchor=tk.W)
+
+        f = section("Baseline")
+        self.bl_enable = tk.BooleanVar(value=True)
+        check(f, "Enable baseline", self.bl_enable)
+        self.bl_win = tk.IntVar(value=self.settings.baseline_window)
+        ttk.Label(f, text="Window").pack(anchor=tk.W)
+        scale(f, self.bl_win, 51, 401, 1)
+
+        f = section("Spectral & mobility")
+        self.spec_en = tk.BooleanVar(value=True)
+        self.spec_adapt = tk.BooleanVar(value=True)
+        self.mob_en = tk.BooleanVar(value=True)
+        check(f, "Spectral separation", self.spec_en)
+        check(f, "Position-adaptive matrix", self.spec_adapt)
+        check(f, "Mobility correction", self.mob_en)
+
+        f = section("Band filter (deconv)")
+        self.gauss_en = tk.BooleanVar(value=True)
+        self.gauss_seg = tk.IntVar(value=384)
+        self.gauss_reg = tk.DoubleVar(value=0.05)
+        check(f, "Gaussian reconstruction", self.gauss_en)
+        ttk.Label(f, text="Segment size").pack(anchor=tk.W)
+        scale(f, self.gauss_seg, 128, 1024, 1)
+        ttk.Label(f, text="Noise reg").pack(anchor=tk.W)
+        scale(f, self.gauss_reg, 0.01, 0.2, 0.001)
+
+        f = section("Spacing tracker")
+        self.bonus = tk.DoubleVar(value=0.7)
+        self.pullback = tk.DoubleVar(value=0.008)
+        self.ema = tk.DoubleVar(value=0.08)
+        self.wlo = tk.DoubleVar(value=0.70)
+        self.whi = tk.DoubleVar(value=1.30)
+        ttk.Label(f, text="Channel peak bonus").pack(anchor=tk.W)
+        scale(f, self.bonus, 0.0, 1.5, 0.1)
+        ttk.Label(f, text="Pullback weight").pack(anchor=tk.W)
+        scale(f, self.pullback, 0.0, 0.03, 0.001)
+        ttk.Label(f, text="EMA alpha").pack(anchor=tk.W)
+        scale(f, self.ema, 0.02, 0.25, 0.01)
+        ttk.Label(f, text="Window frac lo / hi").pack(anchor=tk.W)
+        scale(f, self.wlo, 0.5, 0.95, 0.01)
+        scale(f, self.whi, 1.05, 1.6, 0.01)
+
+        f = section("Scan region (display)")
+        self.scan_start = tk.IntVar(value=0)
+        self.scan_end = tk.IntVar(value=0)
+        ttk.Label(f, text="Start (0=auto)").pack(anchor=tk.W)
+        ttk.Entry(f, textvariable=self.scan_start, width=10).pack(anchor=tk.W)
+        ttk.Label(f, text="End (0=full)").pack(anchor=tk.W)
+        ttk.Entry(f, textvariable=self.scan_end, width=10).pack(anchor=tk.W)
+
+        bf = ttk.Frame(inner)
+        bf.pack(fill=tk.X, padx=6, pady=8)
+        ttk.Button(bf, text="Apply + redraw",
+                   command=self.apply_knobs_redraw).pack(fill=tk.X, pady=2)
+        ttk.Button(bf, text="Basecall selected with these",
+                   command=self.basecall_selected).pack(fill=tk.X, pady=2)
+        ttk.Button(bf, text="Close", command=win.withdraw).pack(fill=tk.X, pady=(4, 2))
+
+    def open_settings(self):
+        self.settings_win.deiconify()
+        self.settings_win.lift()
+
+    # ------------------------------------------------------------------ data
+    def _absorb_runs(self, root: Path):
+        """Expand a root folder into its run folders and add them to the list.
+        Returns (n_found, n_added)."""
+        runs = find_run_folders(root)
+        known = {str(p.resolve()) for p in self.folders}
+        added = 0
+        for p in runs:
+            if str(p.resolve()) in known:
+                continue
+            self.folders.append(p)
+            self._folder_paths.append(p)
+            self.folder_list.insert(tk.END, p.name)
+            added += 1
+        return len(runs), added
+
+    def _pick_folders(self) -> List[Path]:
+        """Pick one or more folders. Prefer zenity (a proper picker where you
+        can Ctrl-click several folders); fall back to the Tk chooser."""
+        start = str(self._folder_paths[-1].parent) if self._folder_paths else ""
+        if shutil.which("zenity"):
+            cmd = ["zenity", "--file-selection", "--directory", "--multiple",
+                   "--separator=\n",
+                   "--title=Add data folder(s): select a run, or Ctrl-click several"]
+            if start:
+                cmd.append(f"--filename={start}/")
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+                if r.returncode != 0:
+                    return []
+                return [Path(p) for p in r.stdout.splitlines() if p.strip()]
+            except Exception:
+                pass
+        d = filedialog.askdirectory(parent=self,
+                                    title="Select a folder with run folders "
+                                          "(rsd / scf / ab1 / text)")
+        return [Path(d)] if d else []
+
+    def add_folder(self):
+        # A folder that holds many runs (e.g. an OY collection) loads every
+        # run; selecting a single run folder loads just that run. Several
+        # folders can be picked at once.
+        roots = self._pick_folders()
+        if not roots:
+            return
+        total_added = 0
+        nofiles = []
+        for root in roots:
+            n_found, added = self._absorb_runs(root)
+            total_added += added
+            if n_found == 0:
+                nofiles.append(root)
+        # show everything again (a stale folder selection would hide new runs)
+        self.folder_list.selection_clear(0, tk.END)
+        self.refresh_file_list()
+        if nofiles:
+            messagebox.showwarning(
+                "No trace files",
+                "No trace files found under:\n"
+                + "\n".join(str(p) for p in nofiles), parent=self)
+        if total_added:
+            self.status_var.set(f"Added {total_added} run folder(s)")
+
+    def _folder_tip_text(self) -> str:
+        if not self._folder_paths:
+            return ""
+        i = self.folder_list.nearest(self.winfo_pointery() - self.folder_list.winfo_rooty())
+        if not 0 <= i < len(self._folder_paths):
+            return ""
+        return str(self._folder_paths[i])
+
+    def _on_folder_select(self, _evt=None):
+        sel = self.folder_list.curselection()
+        if sel:
+            idx = sel[0]
+            if 0 <= idx < len(self._folder_paths):
+                self.status_var.set(f"Folder: {self._folder_paths[idx]}")
+        self.refresh_file_list()
+
+    def _on_folder_activate(self, _evt=None):
+        # Double-click a folder row: show only that folder's files and open
+        # the first one. Ctrl/Shift-click several rows first to show a union.
+        self.refresh_file_list()
+        if self.files:
+            self.file_list.selection_clear(0, tk.END)
+            self.file_list.selection_set(0)
+            self.file_list.activate(0)
+            self.on_file_select(None)
+
+    def _selected_folder_paths(self) -> List[Path]:
+        return [self._folder_paths[i] for i in self.folder_list.curselection()
+                if 0 <= i < len(self._folder_paths)]
+
+    def remove_folder(self):
+        sel = list(self.folder_list.curselection())
+        if not sel:
+            self.status_var.set("Select a folder/run in the list above first")
+            return
+        removed = []
+        for i in sorted(sel, reverse=True):
+            if i < len(self._folder_paths):
+                path = self._folder_paths.pop(i)
+                self.folder_list.delete(i)
+                removed.append(path)
+                try:
+                    self.folders.remove(path)
+                except ValueError:
+                    pass
+        # any file-level hides under a removed run no longer apply
+        for p in removed:
+            rp = str(p.resolve())
+            self.excluded = {e for e in self.excluded
+                             if not e.startswith(rp + "/") and e != rp}
+        gone = {str(p.resolve()) for p in removed}
+        self.selected = [p for p in self.selected
+                         if str(p.resolve()) not in gone]
+        self.folder_list.selection_clear(0, tk.END)
+        self.refresh_file_list()
+        self.redraw()
+        self.status_var.set(f"Removed {len(removed)} run folder(s)")
+
+    def remove_samples(self):
+        idxs = self.file_list.curselection()
+        if not idxs:
+            self.status_var.set("Select sample(s) in the list below first")
+            return
+        n = 0
+        for i in idxs:
+            if i < len(self.files):
+                self.excluded.add(str(self.files[i].resolve()))
+                n += 1
+        self.file_list.selection_clear(0, tk.END)
+        self.selected = []
+        self.refresh_file_list()
+        self.redraw()
+        self.status_var.set(f"Removed {n} sample file(s) from the list")
+
+    def clear_folders(self):
+        self.folders.clear()
+        self._folder_paths.clear()
+        self.excluded.clear()
+        self.selected = []
+        self.folder_list.delete(0, tk.END)
+        self.refresh_file_list()
+        self.redraw()
+
+    def _well_parts(self, name: str):
+        m = WELL_RE.search(name)
+        if not m:
+            return "", 9999
+        w = m.group(1).upper()
+        letter = w[:1] if w[:1] in "ABCDEFGH" else "Z"
+        nums = re.findall(r"\d+", w)
+        num = int(nums[0]) if nums else 9999
+        return letter, num
+
+    def _sort_key(self, f: Path):
+        letter, num = self._well_parts(f.stem)
+        mode = self.sort_mode.get()
+        if mode == "well_col":
+            return (num, letter, f.parent.name, f.name)
+        if mode == "well_row":
+            return (letter, num, f.parent.name, f.name)
+        if mode == "name":
+            return (f.name.lower(), f.parent.name)
+        return (f.parent.name, f.name)
+
+    def refresh_file_list(self):
+        selected = self._selected_folder_paths()
+        # No folder selected -> every added run (cross-run compare). Selecting
+        # one or more folders narrows the sample list to those folders' files.
+        folders = selected if selected else self.folders
+        files = [f for f in discover_files(folders)
+                 if str(f.resolve()) not in self.excluded]
+        filt = self.filter_var.get().strip().lower()
+        if filt:
+            files = [f for f in files
+                     if filt in f.stem.lower()
+                     or WELL_RE.search(f.stem) and filt in WELL_RE.search(f.stem).group(1).lower()
+                     or filt in f.parent.name.lower()]
+        self.files = sorted(files, key=self._sort_key)
+        self.file_list.delete(0, tk.END)
+        if self.files:
+            self.file_list.insert(tk.END, *(f"{f.parent.name}/{f.name}"
+                                            for f in self.files))
+        colorize = len(self.files) <= 5000  # keep huge runs fast
+        vis: dict = {}
+        for i, f in enumerate(self.files):
+            if colorize:
+                ext = f.suffix.lower().lstrip(".")
+                self.file_list.itemconfig(i, fg=SRC_FG.get(ext, "#000"))
+            vis[str(f.resolve())] = i
+        # keep a selection if possible
+        sel_idxs = []
+        for p in self.selected:
+            i = vis.get(str(p.resolve()))
+            if i is not None:
+                sel_idxs.append(i)
+        if sel_idxs:
+            for i in sel_idxs:
+                self.file_list.selection_set(i)
+        exts = " ".join(sorted({f".{f.suffix.lower().lstrip('.')}" for f in self.files}))
+        scope = (f"{len(selected)} selected folder(s)" if selected
+                 else f"{len(self.folders)} folder(s)")
+        if hasattr(self, "samples_label"):
+            self.samples_label.configure(
+                text=f"◧ Samples / files  ({len(self.files)})")
+        self.status_var.set(f"{len(self.files)} files ({exts or 'none'}) in {scope}"
+                            + ("  [filtered]" if filt else ""))
+
+    def on_file_select(self, _evt=None):
+        idxs = self.file_list.curselection()
+        self.selected = [self.files[i] for i in idxs if i < len(self.files)]
+        if self.selected:
+            self.cycle_pos = 0  # manual selection resets any tour position
+        self.redraw()
+
+    # ------------------------------------------------------------------ page
+    def _current_page_start(self) -> int:
+        if self.selected:
+            key = str(self.selected[0].resolve())
+            for i, p in enumerate(self.files):
+                if str(p.resolve()) == key:
+                    return i
+        return self.cycle_pos
+
+    def _page_by(self, delta: int):
+        """Manual paging: advance/retreat the selection window by n graphs."""
+        m = len(self.files)
+        if m == 0:
+            return
+        n = max(1, self.n_graphs.get())
+        if m <= n:
+            idxs = list(range(m))
+        else:
+            start = self._current_page_start() + delta * n
+            if start >= m:
+                start = 0
+            elif start < 0:
+                start = m - n
+            if start + n > m:
+                start = m - n
+            idxs = list(range(start, start + n))
+        self.cycle_pos = idxs[0] if idxs else 0
+        self.selected = [self.files[i] for i in idxs]
+        self.file_list.selection_clear(0, tk.END)
+        for i in idxs:
+            self.file_list.selection_set(i)
+        if idxs:
+            self.file_list.see(idxs[-1])
+        if idxs:
+            self.status_var.set("Page: " + "  ".join(
+                f"{p.parent.name}/{p.name}" for p in self.selected))
+        self.redraw()
+
+    def _page_key(self, event):
+        self._page_by(1 if event.keysym in ("Down", "Page_Down") else -1)
+        return "break"
+
+    def _page_key_root(self, event):
+        if event.keysym not in ("Down", "Up", "Page_Down", "Page_Up"):
+            return None
+        w = self.focus_get()
+        if w is not None and w.winfo_class() in (
+                "Listbox", "Canvas", "FigureCanvasTkAgg"):
+            self._page_by(1 if event.keysym in ("Down", "Page_Down") else -1)
+        return None
+
+    # ------------------------------------------------------------------ tour
+    def _sync_current_btn(self):
+        self.cur_btn_on = self.show_current.get()
+        if getattr(self, "_cur_btn", None) is not None:
+            if self.cur_btn_on:
+                self._cur_btn.configure(bg="#DFF6DC", activebackground="#DFF6DC",
+                                        fg="#14532D")
+            else:
+                self._cur_btn.configure(bg="#F2F4F7", activebackground="#F2F4F7",
+                                        fg="#777777")
+
+    def toggle_current(self):
+        self.show_current.set(not self.show_current.get())
+        self._sync_current_btn()
+        self.status_var.set("Current trace (µA): " +
+                            ("ON" if self.cur_btn_on else "OFF"))
+        self.redraw()
+
+    def toggle_tour(self):
+        self.touring = not self.touring
+        if self.touring:
+            self.cycle_pos = 0
+            if not self.selected:
+                self.cycle_pos = 0
+            self._tour_tick()
+        else:
+            if self._tour_job:
+                self.after_cancel(self._tour_job)
+                self._tour_job = None
+
+    def _tour_tick(self):
+        if not self.touring:
+            return
+        m = len(self.files)
+        if m == 0:
+            self.toggle_tour()
+            return
+        n = max(1, self.n_graphs.get())
+        paths = [self.files[(self.cycle_pos + i) % m] for i in range(n)]
+        self.selected = paths[:n]
+        idxs = []
+        byp = {str(p.resolve()): i for i, p in enumerate(self.files)}
+        for p in paths:
+            i = byp.get(str(p.resolve()))
+            if i is not None:
+                idxs.append(i)
+        self.file_list.selection_clear(0, tk.END)
+        for i in idxs:
+            self.file_list.selection_set(i)
+        if idxs:
+            self.file_list.see(idxs[-1])
+        self.cycle_pos = (self.cycle_pos + n) % m
+        self.redraw()
+        self._tour_job = self.after(max(300, self.cycle_ms.get()), self._tour_tick)
+
+    # ------------------------------------------------------------------ analysis
+    def _settings_from_ui(self) -> AnalysisSettings:
+        s = AnalysisSettings(
+            basecaller=self.basecaller.get(),
+            base_order=self.base_order_var.get(),
+            baseline_window=int(self.bl_win.get()),
+            spectral_enable=self.spec_en.get(),
+            position_adaptive_spectral=self.spec_adapt.get(),
+            mobility_enable=self.mob_en.get(),
+            use_gaussian_reconstruction=self.gauss_en.get(),
+            gaussian_recon_segment_size=int(self.gauss_seg.get()),
+            gaussian_recon_noise_reg=float(self.gauss_reg.get()),
+            channel_peak_bonus=float(self.bonus.get()),
+            pullback_weight=float(self.pullback.get()),
+            ema_alpha=float(self.ema.get()),
+            window_frac_lo=float(self.wlo.get()),
+            window_frac_hi=float(self.whi.get()),
+            view_mode=self.view_mode.get(),
+            signal_start=int(self.scan_start.get()),
+            signal_end=int(self.scan_end.get()),
+        )
+        return s
+
+    def apply_knobs_redraw(self):
+        self.settings = self._settings_from_ui()
+        # re-load docs so the dye order / base_order takes effect on fresh loads
+        self._refresh_channel_buttons()
+        self.redraw()
+
+    def _ensure_doc(self, path: Path) -> TraceDocument:
+        key = str(path.resolve())
+        if key not in self.docs:
+            self.status_var.set(f"Loading {path.name}…")
+            self.update_idletasks()
+            try:
+                self.docs[key] = load_trace(path, base_order=self.base_order_var.get())
+            except RuntimeError as e:
+                messagebox.showerror("Load error", f"{path.name}:\n{e}")
+                raise
+            if len(self.docs) > DOC_CACHE_MAX:
+                sel = {str(p.resolve()) for p in self.selected}
+                for k in list(self.docs):
+                    if k not in sel:
+                        del self.docs[k]
+                        if len(self.docs) <= DOC_CACHE_MAX:
+                            break
+        return self.docs[key]
+
+    def basecall_selected(self):
+        if not self.selected:
+            messagebox.showinfo("Basecall", "Select one or more wells in the list.")
+            return
+        if self._busy:
+            return
+        self._busy = True
+        self._cancel = False
+        self.settings = self._settings_from_ui()
+        total = len(self.selected)
+        done = 0
+        try:
+            for path in self.selected:
+                if self._cancel or not self.winfo_exists():
+                    break
+                try:
+                    doc = self._ensure_doc(path)
+                except Exception:
+                    break
+                try:
+                    if doc.source == "rsd":
+                        self.status_var.set(f"Basecalling {done + 1}/{total}: "
+                                            f"{path.name} ({self.settings.basecaller})…")
+                        run_basecall(doc, self.settings)
+                    else:
+                        self.status_var.set(f"{path.name}: no {self.basecaller.get()} "
+                                            f"params for {doc.source} files — "
+                                            f"showing container bases")
+                except Exception as e:
+                    messagebox.showerror("Basecall error", f"{path.name}:\n{e}")
+                    break
+                done += 1
+                # keep the window (and the whole desktop) responsive on big jobs
+                if total > 50 or done % 10 == 0:
+                    if self.winfo_exists():
+                        self.update()
+            if self.winfo_exists():
+                self.status_var.set(
+                    f"Cancelled after {done} well(s)" if self._cancel
+                    else f"Basecalled {total} well(s)")
+                self.redraw()
+                self._show_sequence()
+        finally:
+            self._busy = False
+
+    def basecall_all(self):
+        if not self.files:
+            return
+        n = len(self.files)
+        if n > 96 and not messagebox.askyesno(
+                "Basecall all",
+                f"Basecall all {n} wells?\n\nThis runs for a long time and uses "
+                "a lot of CPU/memory. You can press Esc to cancel.", parent=self):
+            return
+        self.selected = list(self.files)
+        self.basecall_selected()
+
+    def clear_basecalls(self):
+        """Undo a base call: drop sequence/peaks/qualities so a run that was
+        mistakenly call-ed (e.g. genotyping/fragment data) shows clean traces
+        again.  Only the in-memory documents are touched; data files stay
+        as they are."""
+        if not self.selected:
+            messagebox.showinfo("Clear base calls",
+                                "Select one or more wells in the list first.")
+            return
+        cleared = 0
+        for path in self.selected:
+            doc = self.docs.get(str(path.resolve()))
+            if doc is not None and doc.sequence:
+                doc.sequence = ""
+                doc.peak_positions = []
+                doc.qualities = []
+                doc.settings_used = None
+                cleared += 1
+        self.status_var.set(
+            f"Cleared base calls for {cleared} well(s)" if cleared
+            else "No base calls to clear on the selected wells")
+        self.redraw()
+        self._show_sequence()
+
+    def toggle_genotyping_picking(self):
+        """Main-window manual peak picking: the viewer stays exactly as it is
+        (zoom bars, µA, Channels), but clicks on a subplot pick peaks for that
+        well and the sequence pane shows the picked-peaks table instead.
+        Calling it again (or Exit peak picking) returns to the viewer."""
+        if self.genotyping_active and not self.area_mode:
+            self.exit_genotyping_picking()
+            return
+        self.enter_genotyping_picking()
+
+    def enter_genotyping_picking(self):
+        if not self.selected:
+            messagebox.showinfo("Genotyping",
+                                "Select the wells to genotype in the list first.")
+            return
+        if self.genotyping_active:
+            self.exit_genotyping_picking()     # switching between the two modes
+        self.area_mode = False
+        self._mode_pick.set(True)
+        self._mode_area.set(False)
+        self.seq_text.pack_forget()
+        self.seq_hdr.config(text="Picked peaks")
+        self._build_pick_table()
+        self._pick_cid = self.canvas.mpl_connect("button_press_event",
+                                                 self._on_gen_pick)
+        self._gen_motion_cid = self.canvas.mpl_connect(
+            "motion_notify_event", self._on_gen_motion)
+        self.genotyping_active = True
+        self.status_var.set("Manual genotyping — zoom in, click each peak you "
+                            "want; page the batch (Genotyping · Next/Previous "
+                            "batch) and pick the next wells.")
+        self.redraw()
+
+    def toggle_area_picking(self):
+        """Drag-to-measure, in the same window and the same mode plumbing as
+        manual peak picking.  Holding the left button and dragging between two
+        points measures the area above the straight line between them, so there
+        is no second window to keep in sync with this one."""
+        if self.genotyping_active and self.area_mode:
+            self.exit_genotyping_picking()
+            return
+        self.enter_area_picking()
+
+    def enter_area_picking(self):
+        if not self.selected:
+            messagebox.showinfo("Area measure",
+                                "Select the wells to measure in the list first.")
+            return
+        if self.genotyping_active:
+            self.exit_genotyping_picking()
+        self.area_mode = True
+        self._mode_area.set(True)
+        self._mode_pick.set(False)
+        self.seq_text.pack_forget()
+        self.seq_hdr.config(text="Measured areas")
+        self._build_pick_table(area=True)
+        self._pick_cid = self.canvas.mpl_connect("button_press_event",
+                                                 self._on_gen_pick)
+        self._gen_motion_cid = self.canvas.mpl_connect(
+            "motion_notify_event", self._on_gen_motion)
+        self._area_release_cid = self.canvas.mpl_connect(
+            "button_release_event", self._on_area_release)
+        self.genotyping_active = True
+        self.status_var.set("Drag to measure — hold the left button and drag "
+                            "between the two points the baseline should pass "
+                            "through, then release. Drag right-to-left works "
+                            "too; page the batch as usual.")
+        self.redraw()
+
+    def exit_genotyping_picking(self):
+        if not self.genotyping_active:
+            return
+        for attr in ("_pick_cid", "_gen_motion_cid", "_area_release_cid"):
+            cid = getattr(self, attr, None)
+            if cid is not None:
+                try:
+                    self.canvas.mpl_disconnect(cid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._gen_cursors = []
+        self._area_cursors = []
+        self._area_drag = None
+        if self.pick_table is not None:
+            try:
+                self.pick_table.destroy()
+            except Exception:
+                pass
+            self.pick_table = None
+            self.pick_tree = None
+        self.genotyping_active = False
+        self.area_mode = False
+        self._mode_pick.set(False)
+        self._mode_area.set(False)
+        self.seq_hdr.config(text="Called sequence")
+        self.seq_text.pack(fill=tk.X, padx=4, pady=2)
+        self.status_var.set("Back to the trace viewer.")
+        self.redraw()
+
+    def _build_pick_table(self, area=False):
+        tblf = ttk.Frame(self.center)
+        tblf.pack(fill=tk.X, padx=4, pady=2)
+        if area:
+            cols = ("run", "well", "ch", "start", "stop", "mid", "h V", "area")
+            widths = {"run": 90, "well": 58, "ch": 34, "start": 48, "stop": 48,
+                      "mid": 50, "h V": 62, "area": 64}
+            left_anchor = ("run", "well")
+            stretch = ("run", "well")
+        else:
+            cols = ("well", "scan", "duplex", "ch", "kind", "h V", "area",
+                    "frac", "MF")
+            widths = {"well": 60, "scan": 54, "duplex": 58, "ch": 34,
+                      "kind": 62, "h V": 66, "area": 66, "frac": 50,
+                      "MF": 52}
+            left_anchor = ("well", "kind")
+            stretch = ("scan", "kind")
+        self.pick_tree = ttk.Treeview(tblf, columns=cols, show="headings",
+                                      height=4)
+        for c in cols:
+            self.pick_tree.heading(c, text=c)
+            self.pick_tree.column(c, width=widths[c],
+                                  anchor="w" if c in left_anchor else "e",
+                                  stretch=(c in stretch))
+        vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=self.pick_tree.yview)
+        self.pick_tree.configure(yscrollcommand=vs.set)
+        self.pick_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.pick_table = tblf
+
+    def _ensure_area_picker(self, path):
+        """One DragAreaPicker per displayed well, built on first use."""
+        from genotyping import DragAreaPicker
+        key = str(path.resolve())
+        pk = self._area_pickers.get(key)
+        if pk is None:
+            doc = self._ensure_doc(path)
+            col2chan = self._col_to_chan()
+            pk = DragAreaPicker(doc, path, colors=self._theme_colors(),
+                                base_order=self.base_order_var.get(),
+                                theme_mode=self._theme_mode(),
+                                show=lambda c: self.chan_show[
+                                    col2chan.get(c, c)].get(),
+                                run_name=path.parent.name)
+            self._area_pickers[key] = pk
+        return pk
+
+    def _gen_paths(self):
+        n = max(1, min(8, self.n_graphs.get()))
+        sel = [Path(p) for p in (self.selected or [])]
+        return sel[:n]
+
+    def _ensure_picker(self, path):
+        from genotyping import PeakPicker
+        key = str(path.resolve())
+        pk = self._gen_pickers.get(key)
+        if pk is None:
+            doc = self._ensure_doc(path)
+            # the picker is handed acgt columns, the checkboxes are indexed by
+            # physical channel -- translate, or a non-ACTG run hides one trace
+            # and picks from another
+            col2chan = self._col_to_chan()
+            pk = PeakPicker(doc, path, colors=self._theme_colors(),
+                            base_order=self.base_order_var.get(),
+                            theme_mode=self._theme_mode(),
+                            show=lambda c: self.chan_show[
+                                col2chan.get(c, c)].get(),
+                            include_sh=self._gen_sh.get(),
+                            show_d2=self._gen_d2.get())
+            self._gen_pickers[key] = pk
+        return pk
+
+    def _gen_axes_hit(self, event):
+        """Resolve a mouse event to (index, trace axes, scan, volts).
+
+        matplotlib reports ``event.inaxes`` as the last axes sharing the hit
+        point, which is the uA twin when the current overlay is on -- so the
+        event's own ``ydata`` would be microamps, not volts.  When display
+        coords are available, match against the stacked trace axes and invert
+        that axes' own transform instead.  Synthetic events (tests) without
+        display coords fall back to the ``inaxes`` identity."""
+        ex = getattr(event, "x", None)
+        ey = getattr(event, "y", None)
+        x = getattr(event, "xdata", None)
+        y = getattr(event, "ydata", None)
+        ax = None
+        if ex is not None and ey is not None:
+            for i, candidate in enumerate(self._plot_axes):
+                try:
+                    inside = candidate.get_window_extent().contains(ex, ey)
+                except Exception:
+                    inside = False
+                if inside:
+                    ax = candidate
+                    i = i
+                    try:
+                        x, y = ax.transData.inverted().transform((ex, ey))
+                    except Exception:
+                        return None
+                    break
+            if ax is None:
+                return None
+        else:
+            try:
+                i = self._plot_axes.index(event.inaxes)
+            except (ValueError, AttributeError):
+                return None
+            ax = self._plot_axes[i]
+        if x is None or y is None:
+            return None
+        try:
+            if not (np.isfinite(x) and np.isfinite(y)):
+                return None
+        except TypeError:
+            return None
+        return i, ax, x, y
+
+    def _on_gen_pick(self, event):
+        if not self.genotyping_active:
+            return
+        if event.inaxes is None or event.xdata is None:
+            return
+        if getattr(event, "button", 1) != 1:
+            return
+        hit = self._gen_axes_hit(event)
+        if hit is None:
+            return
+        i, _ax, xs, vs = hit
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            return
+        path = paths[i]
+        if self.area_mode:
+            # arm a span on this subplot; _on_area_release commits it
+            self._area_drag = {"i": i, "start": int(round(xs)),
+                               "stop": int(round(xs))}
+            return
+        try:
+            pk = self._ensure_picker(path)
+        except Exception as e:
+            self.status_var.set(f"Could not load {path.name}: {e}")
+            return
+        rec = pk.pick(xs, vol=vs)
+        if rec is None:
+            if getattr(pk, "_reject", None) == "area":
+                self.status_var.set(f"That area is already picked on {path.name} "
+                                    "— undo it first to pick it again.")
+            else:
+                self.status_var.set(f"No peak found near that scan on {path.name} — "
+                                    "try again closer to a hump.")
+            return
+        self._gen_active_path = path
+        self.status_var.set(f"{path.parent.name}/{path.name} · well {pk.doc.well}: "
+                            f"peak scan {rec['scan']} · {rec['base']} "
+                            f"height {rec['height']:.3f} V")
+        self.redraw()
+        self._sync_pick_table()
+
+    def _make_area_markers(self, ax):
+        """Live preview artists for the span being dragged on one subplot.
+
+        Persistent artists updated with set_data/set_xdata rather than a full
+        figure rebuild, because this runs on every motion event and a redraw of
+        eight stacked traces would stutter badly.
+        """
+        line = ax.plot([], [], color="#B00020", lw=1.2, ls="--", alpha=0.9,
+                       zorder=23, visible=False)[0]
+        left = ax.axvline(0, color="#B00020", lw=0.7, ls=":", alpha=0.7,
+                          zorder=23, visible=False)
+        right = ax.axvline(0, color="#B00020", lw=0.7, ls=":", alpha=0.7,
+                           zorder=23, visible=False)
+        ann = ax.annotate("", xy=(0.5, 0.90), xycoords="axes fraction",
+                          ha="center", va="top", fontsize=7, color="#111",
+                          zorder=25, visible=False,
+                          bbox=dict(boxstyle="round,pad=0.3", fc="#FFF9C4",
+                                    ec="#999", lw=0.6, alpha=0.9))
+        return (ax, line, left, right, ann)
+
+    def _area_preview(self, event):
+        """Follow the pointer with the dashed baseline and a live area readout."""
+        from genotyping import DRAG_MIN_SPAN, region_area
+        drag = self._area_drag
+        if drag is None or not self._area_cursors:
+            return
+        if getattr(event, "xdata", None) is None:
+            return
+        drag["stop"] = int(round(event.xdata))
+        i = drag["i"]
+        if not (0 <= i < len(self._area_cursors)):
+            return
+        ax, line, left, right, ann = self._area_cursors[i]
+        a, b = sorted((drag["start"], drag["stop"]))
+        for art in self._area_cursors:
+            for k in art[1:]:
+                k.set_visible(False)
+        if b - a < DRAG_MIN_SPAN:
+            self.canvas.draw_idle()
+            return
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            return
+        try:
+            pk = self._ensure_area_picker(paths[i])
+        except Exception:
+            return
+        col = pk.best_col(a, b)
+        if col is None:
+            return
+        y = np.asarray(pk.doc.acgt[:, col], dtype=float)
+        xs = np.arange(a, b + 1)
+        bl = np.linspace(float(y[a]), float(y[b]), b - a + 1)
+        line.set_data(xs, bl)
+        line.set_visible(True)
+        left.set_xdata([a, a])
+        right.set_xdata([b, b])
+        left.set_visible(True)
+        right.set_visible(True)
+        res = region_area(y, a, b)
+        if res is not None:
+            ann.set_text(f"mid {res['midpoint']} · {res['area']:.1f} V·scan")
+            ann.set_visible(True)
+        self.canvas.draw_idle()
+
+    def _on_area_release(self, event):
+        """Commit the dragged span as one measurement."""
+        from genotyping import DRAG_MIN_SPAN
+        drag = self._area_drag
+        if not self.area_mode or drag is None:
+            return
+        self._area_drag = None
+        for art in self._area_cursors:
+            for k in art[1:]:
+                k.set_visible(False)
+        if getattr(event, "button", 1) != 1:
+            self.canvas.draw_idle()
+            return
+        # The release position is the reliable end of the span: a brisk drag
+        # can finish before any motion event arrives.
+        x = getattr(event, "xdata", None)
+        stop = int(round(x)) if x is not None else drag["stop"]
+        i = drag["i"]
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            self.canvas.draw_idle()
+            return
+        path = paths[i]
+        a, b = sorted((drag["start"], stop))
+        if b - a < DRAG_MIN_SPAN:
+            self.status_var.set(f"Drag at least {DRAG_MIN_SPAN} scans to "
+                                f"measure a peak on {path.name}.")
+            self.canvas.draw_idle()
+            return
+        try:
+            pk = self._ensure_area_picker(path)
+        except Exception as e:
+            self.status_var.set(f"Could not load {path.name}: {e}")
+            return
+        rec = pk.add(a, b)
+        if rec is None:
+            # Two quite different reasons nothing came back, and "nothing rises
+            # above the baseline" is simply false when every channel is off.
+            if not any(v.get() for v in self.chan_show):
+                self.status_var.set(
+                    "No channel is switched on, so there is nothing to measure "
+                    f"on {path.name} — tick at least one in the Channels row.")
+            else:
+                self.status_var.set(f"Nothing rises above the baseline between "
+                                    f"those scans on {path.name} — try a wider "
+                                    f"or better-placed span.")
+        else:
+            self._gen_active_path = path
+            self.status_var.set(
+                f"{path.parent.name}/{path.name} · well {rec['well']}: "
+                f"{rec['base']} mid {rec['midpoint']} (peak {rec['peak_scan']}) "
+                f"height {rec['height_V']:.3f} V, area "
+                f"{rec['area_Vscan']:.1f} V·scan")
+        self.redraw()
+        self._sync_pick_table()
+
+    def _make_gen_cursor(self, ax):
+        """Readout + crosshair for one stacked subplot: shows the scan under the
+        pointer, its voltage, and the nearest real peak (picked or not) so the
+        user can tell which hump they are aiming at before clicking."""
+        ann = ax.annotate(
+            "", xy=(0.996, 0.985), xycoords="axes fraction", ha="right",
+            va="top", fontsize=7, color="#111", zorder=25, visible=False,
+            bbox=dict(boxstyle="round,pad=0.3", fc="#FFF9C4", ec="#999",
+                      lw=0.6, alpha=0.9))
+        vline = ax.axvline(0, color="#B00020", lw=0.7, ls="--", alpha=0.65,
+                           zorder=24, visible=False)
+        hline = ax.axhline(0, color="#B00020", lw=0.7, ls=":", alpha=0.55,
+                           zorder=24, visible=False)
+        return (ax, ann, vline, hline)
+
+    def _hide_gen_cursor(self):
+        for (_ax, ann, vline, hline) in self._gen_cursors:
+            ann.set_visible(False)
+            vline.set_visible(False)
+            hline.set_visible(False)
+
+    def _gen_nearest_peak(self, pk, scan, vol):
+        """The dominant local max within one base on any visible channel, as a
+        short label.  Ranked by height (what the user is aiming at), not by
+        scan distance, so a flat-channel wobble cannot win over the real peak.
+        """
+        if vol is None or scan is None:
+            return None
+        best = None
+        rad = max(6, int(round(pk._spacing())))
+        col2chan = self._col_to_chan(pk.base_order)
+        for col in sorted(pk.col_color):
+            try:
+                if not self.chan_show[col2chan.get(col, col)].get():
+                    continue
+            except Exception:
+                pass
+            for (s, y) in pk._window_peaks(col, scan - rad, scan + rad):
+                key = (-y, abs(s - scan))
+                if best is None or key < best[0]:
+                    best = (key, col, s, y)
+        if best is None:
+            return None
+        (_k, col, s, y) = best
+        picked = any(r["col"] == col and abs(r["scan"] - s) <= 2
+                     for r in pk.records)
+        return (f"peak  Ch{col2chan.get(col, col) + 1} "
+                f"{CHANNEL_ORDER[col]}  scan {s} · {y:.0f} V"
+                + ("  [picked]" if picked else ""))
+
+    def _on_gen_motion(self, event):
+        if not self.genotyping_active:
+            return
+        if self.area_mode:
+            # area mode keeps its own preview artists, so the crosshair guard
+            # below must not apply to it
+            if self._area_cursors:
+                self._area_preview(event)
+            return
+        if not self._gen_cursors:
+            return
+        hit = self._gen_axes_hit(event)
+        if hit is None:
+            if any(ann.get_visible() for (_a, ann, _v, _h) in self._gen_cursors):
+                self._hide_gen_cursor()
+                self.canvas.draw_idle()
+            return
+        i, ax, xs, vs = hit
+        paths = self._gen_paths()
+        if not (0 <= i < len(paths)):
+            return
+        try:
+            pk = self._ensure_picker(paths[i])
+        except Exception:
+            self._hide_gen_cursor()
+            return
+        scan = int(round(xs))
+        vol = float(vs)
+        text = f"cursor  scan {scan} · {vol:.0f} V"
+        near = self._gen_nearest_peak(pk, scan, vol)
+        if near:
+            text += "\n" + near
+        for (cax, ann, vline, hline) in self._gen_cursors:
+            if cax is ax:
+                ann.set_text(text)
+                ann.set_visible(True)
+                vline.set_xdata([scan, scan])
+                vline.set_visible(True)
+                hline.set_ydata([vol, vol])
+                hline.set_visible(True)
+            else:
+                ann.set_visible(False)
+                vline.set_visible(False)
+                hline.set_visible(False)
+        self.canvas.draw_idle()
+
+    def _redraw_genotyping(self):
+        """Stack the current batch and draw each well's raw channels plus the
+        picked-peak overlays, so zoom / µA / Reset view keep working while the
+        user picks peaks on the main window"""
+        self.fig.clear()
+        self._plot_axes = []
+        self._gen_cursors = []
+        self._area_cursors = []
+        self._full_xlim = None
+        self._full_ylim = None
+        paths = self._gen_paths()
+        if not paths:
+            self.canvas.draw_idle()
+            self._sync_pick_table()
+            return
+        gx0 = gx1 = gy0 = gy1 = None
+        for i, path in enumerate(paths):
+            ax = self.fig.add_subplot(len(paths), 1, i + 1)
+            try:
+                pk = (self._ensure_area_picker(path) if self.area_mode
+                      else self._ensure_picker(path))
+                doc = pk.doc
+            except Exception as e:
+                ax.text(0.5, 0.5, f"Load error: {e}",
+                        ha="center", transform=ax.transAxes)
+                continue
+            n = doc.acgt.shape[0]
+            x = np.arange(n)
+            plotted = False
+            # draw by PHYSICAL channel (run dye order) so pick mode shows the
+            # same legend, colours, stacking and show/hide as the viewer
+            for ci, base, col, color in self._channel_lines(
+                    self._settings_from_ui()):
+                if not self.chan_show[ci].get():
+                    continue
+                seg = doc.acgt[:, col]
+                ax.plot(x, seg, color=color, lw=0.7,
+                        label=f"Ch{ci + 1} {base}")
+                m0 = float(np.nanmin(seg))
+                m1 = float(np.nanmax(seg))
+                gy0 = m0 if gy0 is None else min(gy0, m0)
+                gy1 = m1 if gy1 is None else max(gy1, m1)
+                plotted = True
+            if n:
+                gx0 = 0 if gx0 is None else 0
+                gx1 = n if gx1 is None else max(gx1, n)
+            self._plot_axes.append(ax)
+            if not plotted:
+                ax.text(0.5, 0.5, "(all channels hidden)", ha="center",
+                        va="center", transform=ax.transAxes, color="#888")
+            if self.show_current.get() and doc.current_ua is not None:
+                axc = ax.twinx()
+                cu = doc.current_ua
+                axc.plot(np.arange(n), cu, color=CURRENT_COLOR, lw=0.8,
+                         alpha=0.8, linestyle=":", label="I (µA)")
+                axc.set_ylabel("µA", color=CURRENT_COLOR, fontsize=6)
+                axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
+            if self.area_mode:
+                ap = self._area_pickers.get(str(path.resolve()))
+                if ap is not None:
+                    ap.plot_overlay(ax)
+                self._area_cursors.append(self._make_area_markers(ax))
+            else:
+                pk.plot_overlay(ax)
+            ax.tick_params(labelsize=7)
+            ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
+                    transform=ax.transAxes, ha="left", va="top",
+                    fontsize=6, color="#333", zorder=6)
+            if not self.area_mode:
+                self._gen_cursors.append(self._make_gen_cursor(ax))
+            self._style_x_axis(ax, i == len(paths) - 1)
+        if gx1 is not None and gy0 is not None and gx1 > gx0:
+            pad = 0.02 * (gy1 - gy0) or 1.0
+            self._full_xlim = (float(gx0), float(gx1))
+            self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
+        self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
+        self._add_volt_label()
+        self._apply_zoom()
+        self.canvas.draw_idle()
+        self._sync_pick_table()
+
+    def _sync_pick_table(self):
+        if getattr(self, "pick_tree", None) is None:
+            return
+        self.pick_tree.delete(*self.pick_tree.get_children())
+        if self.area_mode:
+            for path in self._gen_paths():
+                pk = self._area_pickers.get(str(path.resolve()))
+                if pk is None:
+                    continue
+                for r in sorted(pk.records,
+                                key=lambda r: (int(r["start_scan"]),
+                                               int(r["channel"]))):
+                    self.pick_tree.insert("", tk.END, values=(
+                        r["run"] or "-", r["well"], r["base"],
+                        r["start_scan"], r["end_scan"], r["midpoint"],
+                        f"{r['height_V']:.3f}", f"{r['area_Vscan']:.1f}"))
+            return
+        for path in self._gen_paths():
+            pk = self._gen_pickers.get(str(path.resolve()))
+            if pk is None:
+                continue
+            for r in sorted(pk.records,
+                            key=lambda r: (int(r["scan"]), int(r["col"]),
+                                           int(r.get("gid", 0)))):
+                fr = pk.clust_frac(r) if r["kind"] == "main" else None
+                ma = pk.mass_action(r) if r["kind"] == "main" else None
+                self.pick_tree.insert("", tk.END, values=(
+                    pk.doc.well, r["scan"], pk.duplex_of(r), r["base"],
+                    r["kind"], f"{r['height']:.3f}", f"{r['area']:.1f}",
+                    f"{fr:.3f}" if fr else "",
+                    f"{ma['mf']:.3f}" if ma else ""))
+
+    def _gen_picker_active(self):
+        """The picker to act on: the well of the last click, else the first
+        displayed well that already has picks, else the first displayed well."""
+        if self._gen_active_path is not None:
+            pk = self._gen_pickers.get(str(self._gen_active_path.resolve()))
+            if pk is not None:
+                return pk
+        for path in self._gen_paths():
+            pk = self._gen_pickers.get(str(path.resolve()))
+            if pk is not None and pk.records:
+                return pk
+        for path in self._gen_paths():
+            pk = self._gen_pickers.get(str(path.resolve()))
+            if pk is not None:
+                return pk
+        return None
+
+    def _sync_gen_opts(self):
+        for pk in self._gen_pickers.values():
+            pk.include_sh = bool(self._gen_sh.get())
+            pk.show_d2 = bool(self._gen_d2.get())
+        self.redraw()
+
+    def _gen_undo(self):
+        if not self.genotyping_active:
+            return
+        if self.area_mode:
+            rec = None
+            if self._gen_active_path is not None:
+                pk = self._area_pickers.get(str(self._gen_active_path.resolve()))
+                if pk is not None:
+                    rec = pk.undo_last()
+            if rec is None:
+                for path in self._gen_paths():
+                    pk = self._area_pickers.get(str(path.resolve()))
+                    if pk is not None and pk.records:
+                        rec = pk.undo_last()
+                        self._gen_active_path = path
+                        break
+            if rec is None:
+                self.status_var.set("Nothing to undo.")
+                return
+            self.status_var.set(f"Removed {rec['base']} at mid "
+                                f"{rec['midpoint']}.")
+            self.redraw()
+            self._sync_pick_table()
+            return
+        pk = self._gen_picker_active()
+        if pk is None or not pk.undo_last():
+            self.status_var.set("Nothing to undo.")
+            return
+        self.status_var.set("Removed last picked peak.")
+        self.redraw()
+        self._sync_pick_table()
+
+    def _gen_clear(self):
+        if not self.genotyping_active:
+            return
+        store = self._area_pickers if self.area_mode else self._gen_pickers
+        if store:
+            store.clear()
+            self._gen_active_path = None
+            self.status_var.set("Measurements cleared." if self.area_mode
+                                else "Picks cleared.")
+        self.redraw()
+        self._sync_pick_table()
+
+    def _gen_mark_std(self):
+        if not self.genotyping_active:
+            return
+        pk = self._gen_picker_active()
+        if pk is None:
+            self.status_var.set("Select wells first.")
+            return
+        length = simpledialog.askstring(
+            "Internal standard",
+            "Fragment length (bp) of the standard — the same for the four\n"
+            "CTC-CE duplex peaks (HOM1/HOM2/HET1/HET2).\n"
+            "Leave empty if unknown.",
+            parent=self)
+        if length is None:
+            return
+        length_bp = None
+        if length.strip():
+            try:
+                length_bp = float(length.strip())
+            except ValueError:
+                messagebox.showerror("Internal standard",
+                                     f"'{length}' is not a number.")
+                return
+        try:
+            msg = pk.mark_std(length_bp)
+        except ValueError as e:
+            messagebox.showwarning("Internal standard", str(e))
+            return
+        self._gen_active_path = Path(pk.path)
+        self.status_var.set(f"Well {pk.doc.well}: {msg}")
+        self._sync_pick_table()
+
+    def _gen_mark_duplex(self):
+        """Tag the active well's picked mains as the duplex species of one
+        allelic position, so it reports the CTCE mass-action MF."""
+        if not self.genotyping_active:
+            return
+        pk = self._gen_picker_active()
+        if pk is None:
+            self.status_var.set("Select wells first.")
+            return
+        try:
+            msg = pk.mark_duplex()
+        except ValueError as e:
+            messagebox.showwarning("Duplex species", str(e))
+            return
+        self._gen_active_path = Path(pk.path)
+        ma = next((pk.mass_action(m) for m in pk.labelled_species()), None)
+        if ma:
+            msg += f"   MF {ma['mf']:.3f}"
+        self.status_var.set(f"Well {pk.doc.well}: {msg}")
+        self._sync_pick_table()
+        self.redraw()
+
+    # ------------------------------------------------------- auto-genotyping
+    def _auto_targets(self):
+        """The wells to score: every selected well that has a file on disk."""
+        return [Path(p) for p in (self.selected or []) if Path(p).is_file()]
+
+    def auto_genotype_channels(self):
+        """Ask which physical channels carry the standard and the sample.
+
+        The engine needs to know which trace holds the internal-standard
+        quartet and which holds the sample's four duplexes.  That is a property
+        of the assay on the plate, not of the dye order, so it is asked for
+        explicitly rather than assumed.  The pairing is checked here, before
+        any well is scored: if the two land on the same acgt column the engine
+        would compare a channel against itself and every well would come back
+        "no standard quartet" for no visible reason.
+        """
+        win = tk.Toplevel(self)
+        win.title("Auto-genotyping — channel roles")
+        win.transient(self)
+        win.resizable(False, False)
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Which physical channel carries what on this run?\n"
+                 "The dye order only says which base sits on Ch1–Ch4; it "
+                 "does not\nsay which channel holds the standard.",
+            justify="left").grid(row=0, column=0, columnspan=2, sticky="w",
+                                 pady=(0, 10))
+        for row, (var, label) in enumerate(
+                ((self._auto_is_channel, "Internal-standard channel"),
+                 (self._auto_sample_channel, "Sample channel")), start=1):
+            text = f"{label} ({self._channel_label(var.get())}):"
+            ttk.Label(body, text=text).grid(row=row, column=0, sticky="w",
+                                             pady=3)
+            box = ttk.Combobox(body, textvariable=var, state="readonly",
+                               values=[1, 2, 3, 4], width=6)
+            box.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=3)
+            var.trace_add(
+                "write",
+                lambda var=var, row=row: self._auto_label_text(body, row, var))
+        self._auto_hint = ttk.Label(body, text="", foreground="#8A2A0A")
+        self._auto_hint.grid(row=3, column=0, columnspan=2, sticky="w",
+                             pady=(8, 0))
+        btns = ttk.Frame(body)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel",
+                   command=win.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="Save", command=self._auto_save_channels).pack(
+            side="right")
+
+        def check(*_a):
+            is_c = int(self._auto_is_channel.get())
+            sa_c = int(self._auto_sample_channel.get())
+            if is_c == sa_c:
+                self._auto_hint.config(
+                    text=f"Pick two different channels — Ch{is_c} cannot be "
+                         "both the standard and the sample.")
+            else:
+                self._auto_hint.config(text="")
+
+        self._auto_is_channel.trace_add("write", check)
+        self._auto_sample_channel.trace_add("write", check)
+        check()
+
+    def _auto_label_text(self, body, row, var):
+        """Keep each channel row's label showing the base that channel holds."""
+        labels = ("Internal-standard channel", "Sample channel")
+        name = labels[row - 1]
+        for w in body.winfo_children():
+            if isinstance(w, ttk.Label) and w.cget("text").startswith(name):
+                w.config(text=f"{name} ({self._channel_label(var.get())}):")
+                break
+
+    def _channel_label(self, channel):
+        """'Ch3 (T)' for the given physical channel, per the run's dye order."""
+        from genotyping import acgt_index_for_channel
+        try:
+            base = "ACGT"[acgt_index_for_channel(
+                self.base_order_var.get(), channel)]
+        except Exception:
+            base = "?"
+        return f"Ch{channel} ({base})"
+
+    def _auto_save_channels(self):
+        is_c = int(self._auto_is_channel.get())
+        sa_c = int(self._auto_sample_channel.get())
+        if is_c == sa_c:
+            messagebox.showerror(
+                "Auto-genotyping — channel roles",
+                f"Ch{is_c} is set as both the internal standard and the "
+                "sample.\n\nPick two different channels: the engine locates "
+                "the standard quartet\non one channel and measures the "
+                "sample's duplexes on another.")
+            return
+        for w in self.winfo_children():
+            if isinstance(w, tk.Toplevel) and w.title().startswith(
+                    "Auto-genotyping"):
+                w.destroy()
+        self.status_var.set(
+            f"Auto-genotyping: internal standard Ch{is_c}, sample Ch{sa_c} "
+            f"({self.base_order_var.get()}).")
+
+    def auto_genotype_wells(self):
+        """Score every selected well with no clicking, and show the results.
+
+        Progress goes to the status bar as it goes and the rows land in their
+        own table, separate from the manual pick/area table, so the two never
+        overwrite each other.
+        """
+        import genotyping
+        targets = self._auto_targets()
+        if not targets:
+            messagebox.showinfo(
+                "Auto-genotype selected wells",
+                "Select the wells to genotype in the list first.")
+            return
+        is_c = int(self._auto_is_channel.get())
+        sa_c = int(self._auto_sample_channel.get())
+        if is_c == sa_c:
+            messagebox.showerror(
+                "Auto-genotype selected wells",
+                f"Ch{is_c} is set as both the internal standard and the "
+                "sample.\n\nUse Genotyping ▸ Auto-genotyping ▸ Channel "
+                "roles to\npoint them at two different channels.")
+            return
+        base = self.base_order_var.get()
+        self._auto_rows = []
+        self.status_var.set(f"Auto-genotyping {len(targets)} wells…")
+        self.update_idletasks()
+        for i, path in enumerate(targets, start=1):
+            try:
+                doc = self._ensure_doc(path)
+            except Exception as e:            # unreadable file, not fatal
+                self._auto_rows.append(
+                    {"run": path.parent.name, "well": path.stem,
+                     "call": "no-call", "frac": 0.0, "flags": "load-error",
+                     "hom1": 0.0, "hom2": 0.0, "het1": 0.0, "het2": 0.0,
+                     "snr1": 0.0, "snr2": 0.0, "snr3": 0.0, "snr4": 0.0,
+                     "is_channel": is_c, "sample_channel": sa_c,
+                     "std_scans": "", "reason": str(e)})
+            else:
+                self._auto_rows.append(genotyping.auto_genotype(
+                    doc, is_channel=is_c, sample_channel=sa_c,
+                    base_order=base, cut=genotyping.DEFAULT_IS_CUT,
+                    run_name=path.parent.name))
+            if i % 8 == 0 or i == len(targets):
+                self.status_var.set(f"Auto-genotyping… {i}/{len(targets)}")
+                self.update_idletasks()
+        self._build_auto_table()
+        calls = {}
+        for r in self._auto_rows:
+            calls[r["call"]] = calls.get(r["call"], 0) + 1
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(calls.items()))
+        self.status_var.set(
+            f"Auto-genotyped {len(self._auto_rows)} wells "
+            f"(standard Ch{is_c}, sample Ch{sa_c}): {summary}.")
+        self.redraw()
+
+    def _build_auto_table(self):
+        """The auto-genotype results table, below the plot like the pick
+        table.  One row per well, no-call rows showing their reason."""
+        if self._auto_tree is not None:
+            try:
+                self._auto_tree.master.destroy()
+            except tk.TclError:
+                pass
+            self._auto_tree = None
+        cols = ("well", "call", "frac", "hom1", "hom2", "het1", "het2",
+                "snr1", "snr2", "snr3", "snr4", "flags", "reason")
+        tblf = ttk.Frame(self.center)
+        tblf.pack(fill=tk.X, padx=4, pady=2)
+        hdr = ttk.Label(self.center, text="Auto-genotype results")
+        hdr.pack(anchor="w", padx=4)
+        hdr.pack_forget()
+        self.pick_tree = None       # the pick table is not on screen in this mode
+        tree = ttk.Treeview(tblf, columns=cols, show="headings", height=8)
+        widths = {"well": 56, "call": 74, "frac": 48, "hom1": 56, "hom2": 56,
+                  "het1": 56, "het2": 56, "snr1": 46, "snr2": 46, "snr3": 46,
+                  "snr4": 46, "flags": 90, "reason": 200}
+        left = ("well", "call", "flags", "reason")
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=widths[c],
+                        anchor="w" if c in left else "e",
+                        stretch=(c in ("reason", "flags")))
+        for r in self._auto_rows:
+            tree.insert("", tk.END, values=(
+                r.get("well", ""), r.get("call", ""),
+                f"{r.get('frac', 0.0):.3f}",
+                f"{r.get('hom1', 0.0):.0f}", f"{r.get('hom2', 0.0):.0f}",
+                f"{r.get('het1', 0.0):.0f}", f"{r.get('het2', 0.0):.0f}",
+                f"{r.get('snr1', 0.0):.0f}", f"{r.get('snr2', 0.0):.0f}",
+                f"{r.get('snr3', 0.0):.0f}", f"{r.get('snr4', 0.0):.0f}",
+                r.get("flags", ""), r.get("reason", "")))
+        vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        self._auto_tree = tree
+        self._auto_table = tblf
+
+    def auto_genotype_save(self):
+        """Write the auto-genotype rows out through the shared save_table, so
+        they land in the same CSV/XLSX/JSON shapes as the manual pick table."""
+        if not self._auto_rows:
+            messagebox.showinfo(
+                "Save auto-genotype table",
+                "Run Genotyping ▸ Auto-genotyping ▸ Auto-genotype selected "
+                "wells\nfirst.")
+            return
+        from genotyping import save_table
+        types = [("CSV (Excel-compatible)", "*.csv"), ("JSON (ML)", "*.json")]
+        try:
+            import openpyxl  # noqa: F401
+            types.insert(1, ("Excel workbook (.xlsx)", "*.xlsx"))
+        except ImportError:
+            pass
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv",
+                                            filetypes=types)
+        if not path:
+            return
+        try:
+            save_table(Path(path), self._auto_rows)
+        except Exception as e:
+            messagebox.showerror("Save auto-genotype table", str(e))
+            return
+        self.status_var.set(f"Saved {len(self._auto_rows)} auto-genotype "
+                            f"rows to {Path(path).name}.")
+
+    def _gen_save(self):
+        if not self.genotyping_active:
+            return
+        from genotyping import save_table
+        rows = []
+        if self.area_mode:
+            # run folder first, then well, then left-to-right along the trace
+            for key, pk in sorted(self._area_pickers.items(),
+                                  key=lambda kv: (kv[1].run_name, kv[1].well,
+                                                  str(kv[1].path))):
+                if pk.records:
+                    rows.extend(pk.export_rows())
+        else:
+            # group by sample first (run folder, then well name) so one
+            # sample's peaks are never interleaved with another's, then scan
+            # order inside
+            for key, pk in sorted(self._gen_pickers.items(),
+                                  key=lambda kv: str(kv[1].path)):
+                if pk.records:
+                    rows.extend(pk.export_rows())
+        if not rows:
+            messagebox.showinfo(
+                "Save peaks table" if not self.area_mode else "Save areas",
+                "Pick some peaks first, then save." if not self.area_mode
+                else "Measure something first, then save.")
+            return
+        types = [("CSV (Excel-compatible)", "*.csv"), ("JSON (ML)", "*.json")]
+        try:
+            import openpyxl  # noqa: F401
+            types.insert(1, ("Excel workbook (.xlsx)", "*.xlsx"))
+        except ImportError:
+            pass
+        path = filedialog.asksaveasfilename(parent=self, defaultextension=".csv",
+                                            filetypes=types)
+        if not path:
+            return
+        try:
+            save_table(path, rows)
+        except Exception as e:
+            messagebox.showerror("Save peaks table",
+                                 f"Could not write file:\n{e}")
+            return
+        wells = sorted({r["well"] for r in rows})
+        unit = "area" if self.area_mode else "peak"
+        self.status_var.set(f"Saved {len(rows)} {unit} rows ({len(wells)} well"
+                            f"{'s' if len(wells) != 1 else ''}) to {path}")
+
+    def _col_to_chan(self, order=None):
+        """acgt matrix column -> physical channel index of that trace.
+
+        The matrix is always stored A,C,G,T, but the *instrument* channel a
+        dye sits on follows the run's base order, so physical Ch1 is not
+        necessarily the A column.  Everything that keys off a channel number
+        (the show/hide checkboxes, the labels) must go through this map."""
+        order = (order or self.base_order_var.get() or "ACTG").upper()
+        out: dict = {}
+        for ci, base in enumerate(order[:4]):
+            if base in CHANNEL_ORDER:
+                out[CHANNEL_ORDER.index(base)] = ci
+        return out
+
+    def _on_base_order_changed(self, *_args):
+        """Dye order changed: the channel bar, the legends and the peak colours
+        all follow it.  Pickers and traces baked in the old order, so drop them
+        -- but never silently throw away peaks the user has already picked."""
+        self._refresh_channel_labels()
+        if any(pk.records for pk in self._gen_pickers.values()):
+            self.status_var.set(
+                f"Dye order is now {self.base_order_var.get()} — the already "
+                "picked peaks keep the colours they were picked with. Clear "
+                "picks to rebuild them in the new order.")
+            return
+        self._gen_pickers = {}
+        self.redraw()
+
+    def channel_bar_order(self, order=None):
+        """The channel checkboxes as (channel, label), left to right.
+
+        Widget k drives chan_show[k], and chan_show is indexed by *physical
+        channel*, so widget k is already Ch k+1 and the widgets are already in
+        the right order.  The only thing that was ever wrong is the label: it
+        was keyed off the matrix column the widget was born with rather than
+        off the channel, which is what put "Ch4" to the left of "Ch3".  So this
+        relabels in place and never re-packs -- the checkboxes share their
+        parent with side=RIGHT siblings, and re-packing them would move the
+        whole group to the end of the toolbar, away from its "Channels:"
+        label.  Free of Tk so it can be tested.
+        """
+        order = (order or self.base_order_var.get() or "ACTG").upper()[:4]
+        return [(ci, f"  Ch{ci + 1} {order[ci]}  ")
+                for ci in range(min(len(order), len(CHANNEL_ORDER)))]
+
+    def _refresh_channel_labels(self):
+        """Relabel the channel checkboxes to match the run's dye order."""
+        cbs = getattr(self, "_chan_cbs", [])
+        for ci, text in self.channel_bar_order():
+            if ci < len(cbs):
+                try:
+                    cbs[ci].config(text=text)
+                except Exception:
+                    pass
+
+    def _chan_changed(self):
+        """Channel on/off toggles refresh the viewer (and the picked-peak
+        overlays when main-window picking is active)."""
+        self.redraw()
+
+    def _show_sequence(self):
+        self.seq_text.delete("1.0", tk.END)
+        for path in self.selected[: self.n_graphs.get()]:
+            key = str(path.resolve())
+            doc = self.docs.get(key)
+            if not doc:
+                continue
+            if key not in self._comment_cache:
+                self._comment_cache[key] = self._read_comment(path)
+            comment = self._comment_cache.get(key, "")
+            if not doc.sequence:
+                head = f">{doc.well} ({doc.source}) — use ▶ Call to base-call"
+                if comment:
+                    head += f"\n; {comment}"
+                self.seq_text.insert(tk.END, head + "\n\n")
+                continue
+            head = f">{doc.well} {self._well_stats(doc)}  [{doc.source}]"
+            if comment:
+                head += f"\n; {comment}"
+            self.seq_text.insert(
+                tk.END, f"{head}\n{doc.sequence}\n\n")
+
+    # ------------------------------------------------------- comments / info
+    def _comment_file(self, path: Path) -> Path:
+        """Comments are kept next to the data as '<file>.comment.txt' — they
+        travel with the run and never touch the binary .rsd/.scf file."""
+        return Path(str(path) + ".comment.txt")
+
+    def _read_comment(self, path: Path) -> str:
+        cf = self._comment_file(path)
+        try:
+            if cf.exists():
+                return cf.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            pass
+        return ""
+
+    def edit_comments(self):
+        """View / write the run comment for the currently selected file."""
+        if not self.selected:
+            messagebox.showinfo("Run comments", "Select a well/file first.")
+            return
+        path = self.selected[0]
+        key = str(path.resolve())
+        if key not in self._comment_cache:
+            self._comment_cache[key] = self._read_comment(path)
+        comment = self._comment_cache.get(key, "")
+
+        win = tk.Toplevel(self)
+        win.title("Run comments")
+        win.geometry("520x300")
+        win.transient(self)
+        win.grab_set()
+        tk.Label(win, text=f"{path.name}: comment for this run", anchor=tk.W).pack(
+            fill=tk.X, padx=10, pady=(8, 2))
+        box = tk.Text(win, wrap=tk.WORD, undo=True)
+        box.insert("1.0", comment)
+        box.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        note = (
+            "Stored beside the data file:\n"
+            f"{self._comment_file(path).name}\n"
+            "You can delete the file to remove the comment.")
+        tk.Label(win, text=note, fg="#555", justify=tk.LEFT, anchor=tk.W).pack(
+            fill=tk.X, padx=10, pady=(0, 2))
+        bar = ttk.Frame(win)
+        bar.pack(fill=tk.X, padx=10, pady=6)
+
+        def save():
+            text = box.get("1.0", "end-1c").strip()
+            self._comment_cache[key] = text
+            try:
+                if text:
+                    self._comment_file(path).write_text(text, encoding="utf-8")
+                else:
+                    try:
+                        self._comment_file(path).unlink()
+                    except OSError:
+                        pass
+                self.status_var.set(f"Comment saved for {path.name}")
+            except OSError as e:
+                messagebox.showerror("Run comments", f"Could not write comment:\n{e}")
+            win.destroy()
+            self._show_sequence()
+
+        ttk.Button(bar, text="Save", command=save).pack(side=tk.LEFT)
+        ttk.Button(bar, text="Discard", command=win.destroy).pack(side=tk.LEFT, padx=6)
+
+    def show_run_info(self):
+        """Read-only rundown of the selected well's run parameters."""
+        if not self.selected:
+            messagebox.showinfo("Run info", "Select a well/file first.")
+            return
+        path = self.selected[0]
+        key = str(path.resolve())
+        try:
+            doc = self._ensure_doc(path)
+        except Exception as e:
+            messagebox.showerror("Run info", f"{path.name}:\n{e}")
+            return
+        comment = self._comment_cache.get(key) or self._read_comment(path)
+
+        add = lambda k, v: chunks.append(f"{k:<20} {v}")
+        chunks = ["Run info", "   " + str(path), ""]
+        add("Well", doc.well)
+        add("Source", f"{doc.source} — {doc.meta}")
+        add("Scans", f"{doc.n_scans}  ({doc.n_scans / SCAN_RATE_HZ / 60:.1f} min "
+                     f"at {SCAN_RATE_HZ:.2f} Hz)")
+        add("Dye order (channels)", (self.base_order_var.get() or "ACTG").upper())
+        add("Column layout", doc.base_order)
+        add("Basecaller", self.basecaller.get())
+        if doc.sequence:
+            n = len(doc.sequence)
+            qa = np.asarray(doc.qualities[:n], dtype=float)
+            sp = np.median(np.diff(np.asarray(doc.peak_positions[:n], float)))
+            add("Sequence length", str(n))
+            add("Quality mean", f"{qa.mean():.1f}" if qa.size else "-")
+            add("Quality min", f"{qa.min():.0f}" if qa.size else "-")
+            add("N count", str(doc.sequence.count("N")))
+            add("Peak spacing", f"{sp:.2f} scans" if np.isfinite(sp) else "-")
+        else:
+            add("Sequence", "not base-called yet")
+        tr = doc.acgt
+        if tr.size:
+            # Report per *channel*, not per matrix column: doc.base_order is
+            # the A,C,G,T matrix layout, so pairing it with tr[:, c] would
+            # label the columns as channels and disagree with the channel bar.
+            order = (self.base_order_var.get() or "ACTG").upper()[:4]
+            col2chan = self._col_to_chan(order)
+            per = ", ".join(
+                f"Ch{ci + 1} {order[ci]}={float(np.nanmax(tr[:, col])):.3f} V"
+                for col, ci in sorted(col2chan.items(), key=lambda kv: kv[1]))
+            add("Signal max (V)", per)
+        cu = doc.current_ua
+        if cu is not None and cu.size:
+            add("Current (µA)", f"mean {np.nanmean(cu):.2f}, max {np.nanmax(cu):.2f}")
+        if comment:
+            chunks.append("")
+            chunks.append("Comment:")
+            chunks.append(comment)
+
+        win = tk.Toplevel(self)
+        win.title("Run info")
+        win.geometry("680x420")
+        win.transient(self)
+        win.grab_set()
+        txt = scrolledtext.ScrolledText(
+            win, wrap=tk.WORD, font=("DejaVu Sans Mono", 9))
+        txt.insert("1.0", "\n".join(chunks))
+        txt.config(state=tk.DISABLED)
+        txt.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        ttk.Button(win, text="Close", command=win.destroy).pack(anchor=tk.E, padx=10, pady=6)
+
+    # ------------------------------------------------------------------ plot
+    def _theme_colors(self) -> dict:
+        return dict(TRACE_THEMES.get(self.theme.get(), "Classic"))
+
+    def _theme_mode(self) -> str:
+        """'base' themes paint each trace by the colour of its base letter
+        (MegaBACE SA sequencing colours are fixed per base); 'channel' themes
+        paint Channel1..4 by position (genotyping dye sets)."""
+        return TRACE_THEME_MODE.get(self.theme.get(), "base")
+
+    def _channel_lines(self, settings):
+        """Physical channel order Ch1..Ch4 -> (channel_idx, base letter,
+        acgt column, colour), so traces render exactly as MegaBACE SA shows
+        them: channels in run order, each coloured by the base it carries."""
+        order = (settings.base_order or "ACTG").upper()
+        colors = self._theme_colors()
+        mode = self._theme_mode()
+        lines = []
+        for ci, base in enumerate(order[:4]):
+            try:
+                col = CHANNEL_ORDER.index(base)
+            except ValueError:
+                continue
+            color = colors[CHANNEL_ORDER[ci]] if mode == "channel" else colors.get(base, "#000000")
+            lines.append((ci, base, col, color))
+        return lines
+
+    def _refresh_channel_buttons(self):
+        """Label/colour the Channel checkbuttons in the run's physical channel
+        order (Ch1 = first tick, always shown first), using the colour of the
+        base each channel carries (Classic: Ch1 green, Ch2 blue, Ch3 red, Ch4
+        black, whatever the chemistry)."""
+        cbs = getattr(self, "_chan_cbs", None)
+        if not cbs:
+            return
+        order = (self.base_order_var.get() or "ACTG").upper()
+        colors = self._theme_colors()
+        mode = self._theme_mode()
+        for ci, base in enumerate(order[:4]):
+            if ci >= len(cbs):
+                break
+            color = colors[CHANNEL_ORDER[ci]] if mode == "channel" else colors.get(base, "#000000")
+            cbs[ci].config(text=f"  Ch{ci + 1} {base}  ", fg=color)
+
+    def _well_stats(self, doc) -> str:
+        import textwrap
+        seq, q = doc.sequence, doc.qualities
+        n = len(seq)
+        if n == 0:
+            return "not basecalled"
+        qa = np.asarray(q[:n], dtype=float) if q else np.array([], dtype=float)
+        qmean = float(qa.mean()) if qa.size else 0.0
+        qmin = float(qa.min()) if qa.size else 0.0
+        nN = seq.count("N")
+        gc = 100.0 * (seq.count("G") + seq.count("C")) / n if n else 0.0
+        pos = np.asarray(doc.peak_positions[:n], dtype=float)
+        sp = float(np.median(np.diff(pos))) if pos.size > 1 else 0.0
+        return (f"len={n} Qmean={qmean:.1f} Qmin={qmin:.1f} "
+                f"GC={gc:.1f}% N={nN} sp={sp:.2f} scans  [{doc.source}]")
+
+    def _q100(self, q: np.ndarray) -> np.ndarray:
+        """Map band-height qualities to a 0–100 score (manual-style profile)."""
+        if q.size == 0:
+            return q
+        qq = np.asarray(q, dtype=float)
+        scale = float(np.percentile(qq, 95))
+        if scale <= 0:
+            scale = float(qq.max()) or 1.0
+        return np.clip(qq / scale * 100.0, 0.0, 100.0)
+
+    def _draw_wrap(self, paths, settings, colors):
+        rows = max(1, min(8, self.wrap_rows.get()))
+        shows = [p for p in paths]
+        total = len(shows) * rows
+        cap = 20
+        if total > cap:
+            shows = shows[: max(1, cap // rows)]
+            total = len(shows) * rows
+        axes = self.fig.subplots(total, 1, sharex=True)
+        if total == 1:
+            axes = [axes]
+        self._plot_axes = list(axes)
+        gy0 = gy1 = None
+        gx1 = 0
+        for k, path in enumerate(shows):
+            try:
+                doc = self._ensure_doc(path)
+            except Exception:
+                ax = axes[k * rows]
+                ax.text(0.5, 0.5, f"Load error: {path.name}", ha="center", transform=ax.transAxes)
+                continue
+            tr = display_trace(doc, settings)
+            n = tr.shape[0]
+            gx1 = max(gx1, n)
+            segs = np.array_split(np.arange(n), rows)
+            for r in range(rows):
+                ax = axes[k * rows + r]
+                sel = segs[r]
+                for ci, base, col, color in self._channel_lines(settings):
+                    if self.chan_show[ci].get():
+                        y = tr[sel, col]
+                        ax.plot(sel, y, color=color, lw=0.6,
+                                label=f"Ch{ci + 1} {base}" if r == 0 else None)
+                        if y.size:
+                            m0 = float(np.nanmin(y)); m1 = float(np.nanmax(y))
+                            gy0 = m0 if gy0 is None else min(gy0, m0)
+                            gy1 = m1 if gy1 is None else max(gy1, m1)
+                # current overlay (µA) in row 0 only
+                if self.show_current.get() and r == 0 and doc.current_ua is not None:
+                    cu = doc.current_ua
+                    axc = ax.twinx()
+                    axc.plot(np.arange(n), cu, color=CURRENT_COLOR, lw=0.8,
+                             alpha=0.7, linestyle=":", label="I (µA)")
+                    axc.set_ylabel("µA", color=CURRENT_COLOR, fontsize=6)
+                    axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
+                ax.set_ylabel("", fontsize=7)
+                if r == 0:
+                    ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
+                            transform=ax.transAxes, ha="left", va="top",
+                            fontsize=6, color="#333", zorder=6)
+                ax.tick_params(labelsize=6)
+                self._style_x_axis(ax, r == rows - 1,
+                                   label=(r == rows - 1 and k == len(shows) - 1))
+                if self.show_letters.get():
+                    self._draw_letters(ax, doc, sel[0], sel[-1] + 1, colors, force=True)
+        for ax in axes:
+            ax.grid(True, alpha=0.15)
+        self.fig.suptitle(f"Wrap view — {len(shows)} well(s) × {rows} rows", fontsize=9)
+        if gy0 is not None and gx1 > 0:
+            pad = 0.02 * (gy1 - gy0) or 1.0
+            self._full_xlim = (0.0, float(gx1))
+            self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
+        return total
+
+    def _draw_letters(self, ax, doc, s0, s1, colors, force=False):
+        if not doc.sequence or not doc.peak_positions:
+            return
+        seq = doc.sequence
+        pos = np.asarray(doc.peak_positions, dtype=float)
+        q = doc.qualities or []
+        med_sp = float(np.median(np.diff(pos))) if pos.size > 1 else 0.0
+        tr = doc.acgt
+        ytop = float(np.nanmax(tr[max(0, s0):min(tr.shape[0], s1)])) if s1 > s0 else 1.0
+        tight = (s1 - s0) > 1400
+        draw_let = force or (not tight) or med_sp >= 10
+        for pi, base_ in enumerate(seq):
+            if pi >= len(pos) or base_ not in colors:
+                continue
+            p = int(pos[pi])
+            if not (s0 <= p < s1):
+                continue
+            if draw_let:
+                ax.text(p, ytop + 0.015 * ytop, base_, color=colors[base_],
+                        ha="center", va="bottom", fontsize=6.5, zorder=5, clip_on=True)
+        return med_sp
+
+    def _draw_esd_peaks(self, ax, doc, s0, s1, channel_lines):
+        """ESD-style view — the MegaBACE basecaller's processed picture: the
+        four dye traces with a clear mark on every peak.  When the run is
+        base-called the marks sit at the CALLER's peaks, coloured like the
+        trace that carries them; a heterozygous position then shows as two
+        rings at one scan and a mutation as a ring in an unexpected channel.
+        Nothing called yet?  Falls back to simple per-channel peak detection
+        so the pattern still reads like an ESD."""
+        tr = doc.acgt
+        if tr is None or tr.size == 0 or s1 <= s0:
+            return
+        col_color = {col: color for ci, base, col, color in channel_lines}
+        colors = self._theme_colors()
+        if doc.sequence and doc.peak_positions:
+            pos = np.asarray(doc.peak_positions, dtype=float)
+            for pi, base_ in enumerate(doc.sequence):
+                if pi >= len(pos):
+                    break
+                if base_ not in CHANNEL_ORDER:
+                    continue
+                p = int(pos[pi])
+                if not (s0 <= p < s1) or p >= tr.shape[0]:
+                    continue
+                col = CHANNEL_ORDER.index(base_)
+                color = col_color.get(col, colors.get(base_, "#444"))
+                ax.scatter([p], [tr[p, col]], s=18, marker="o",
+                           facecolors="none", edgecolors=color, linewidths=0.8,
+                           zorder=5, rasterized=True, clip_on=True)
+            return
+        seg = tr[s0:s1]
+        for ci, base, col, color in channel_lines:
+            y = seg[:, col]
+            if y.size < 3:
+                continue
+            y0 = float(np.nanmin(y))
+            y1 = float(np.nanmax(y))
+            if not np.isfinite(y1 - y0) or y1 - y0 <= 1e-9:
+                continue
+            rng = y1 - y0
+            # strict local maxima lifted off the noise floor (>5% of range)
+            cand = np.flatnonzero(
+                (y[1:-1] >= y[:-2]) & (y[1:-1] > y[2:])
+                & (y[1:-1] - y0 >= 0.05 * rng))
+            cand += 1
+            keep = []
+            for p in cand:
+                if not keep or p - keep[-1] >= 3:
+                    keep.append(p)
+            if not keep:
+                continue
+            kp = np.asarray(keep, dtype=int)
+            peak_v = y[kp]
+            ax.scatter(s0 + kp, peak_v, s=14, marker="o",
+                       facecolors="none", edgecolors=color, linewidths=0.7,
+                       zorder=5, rasterized=True, clip_on=True)
+
+    def _draw_quality(self, ax, doc, s0, s1):
+        if not doc.sequence or not doc.qualities:
+            return
+        pos = np.asarray(doc.peak_positions, dtype=float)
+        q = np.asarray(doc.qualities[: len(pos)], dtype=float)
+        if q.size and q.max() > 0:
+            q = self._q100(q)
+        m = (pos >= s0) & (pos < s1)
+        if not m.any():
+            return
+        x, y = pos[m], q[m]
+        # poor (brown) everywhere, good (teal) overlaid on runs above threshold
+        axb = ax.twinx()
+        axb.plot(x, y, color=QUALITY_COLOR, lw=0.8, alpha=0.55, zorder=2)
+        axb.fill_between(x, 0, y, color=QUALITY_COLOR, alpha=0.06, zorder=1)
+        thresh = 32.0
+        good = y >= thresh
+        cross = np.zeros_like(good)
+        cross[1:] = good[:-1]
+        starts = np.where(good & ~cross)[0]
+        ends = np.where(~good & (cross))[0]
+        for st in starts:
+            en = ends[ends > st]
+            en = en[0] if len(en) else len(x)
+            xt = x[st:en + 1]
+            yt = y[st:en + 1]
+            if len(xt) > 1:
+                axb.plot(xt, yt, color=QUALITY_GOOD, lw=1.0, alpha=0.9, zorder=3)
+        axb.set_ylim(0, 100)
+        axb.set_ylabel("Q (0–100)", color="#555", fontsize=6)
+        axb.tick_params(axis="y", labelsize=6, colors="#555")
+
+    def _background_image(self):
+        """Lazy-load every Background*/BG* picture shipped with the app (its own
+        folder) or sitting next to it, and return one at random for the empty
+        view.  Own-folder copies win, so a shared/zipped copy is self-contained."""
+        if not self._bg_checked:
+            self._bg_checked = True
+            try:
+                from PIL import Image, ImageOps
+            except Exception:
+                return None
+            here = Path(__file__).resolve().parent
+            seen_names = set()
+            for root in (here, here.parent):
+                if not root.is_dir():
+                    continue
+                for p in sorted(root.iterdir()):
+                    if not p.is_file():
+                        continue
+                    stem = p.stem.lower()
+                    if not (stem.startswith("background") or stem.startswith("bg")):
+                        continue
+                    if p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"):
+                        continue
+                    key = p.name.lower()
+                    if key in seen_names:
+                        continue
+                    seen_names.add(key)
+                    try:
+                        img = ImageOps.exif_transpose(Image.open(p)).convert("RGB")
+                        img.thumbnail((1600, 1600))
+                        self._bg_imgs.append(np.array(img))
+                    except Exception:
+                        continue
+        if not self._bg_imgs:
+            return None
+        return random.choice(self._bg_imgs)
+
+    def _on_right_click(self, _evt=None):
+        """Right-click on the plot/axis bars resets the shared view."""
+        self._reset_zoom()
+        return "break"
+
+    def _reset_axis(self, axis):
+        (self._view_x if axis == "x" else self._view_y)[:] = [0.0, 1.0]
+        self._apply_zoom()
+
+    def _reset_zoom(self):
+        self._view_x[:] = [0.0, 1.0]
+        self._view_y[:] = [0.0, 1.0]
+        if self._full_xlim is None:
+            # Empty/background view: rebuild it so the picture is restored.
+            self.redraw()
+        else:
+            self._apply_zoom()
+
+    def _wheel_zoom(self, axis, direction):
+        """Mouse-wheel over an axis bar: zoom that axis around its centre."""
+        v = self._view_x if axis == "x" else self._view_y
+        lo, hi = v
+        width = max(1e-9, hi - lo)
+        centre = 0.5 * (lo + hi)
+        new_w = min(1.0, max(width / 1000.0, width * (0.8 if direction > 0 else 1.25)))
+        lo2 = min(max(0.0, centre - new_w / 2.0), 1.0 - new_w)
+        v[:] = [lo2, lo2 + new_w]
+        self._apply_zoom()
+
+    def _bar_cmd(self, axis, args):
+        """ttk scrollbar -> pan that axis (grab the thumb and slide)."""
+        if not args:
+            return
+        v = self._view_x if axis == "x" else self._view_y
+        lo, hi = v
+        width = hi - lo
+        cmd = args[0]
+        if cmd == "moveto" and len(args) > 1:
+            new_lo = min(max(0.0, float(args[1])), max(0.0, 1.0 - width))
+            v[:] = [new_lo, new_lo + width]
+        elif cmd == "scroll" and len(args) > 1:
+            n = float(args[1])
+            step = width * (0.1 if len(args) > 2 and args[2] == "units" else 1.0)
+            new_lo = min(max(0.0, lo + n * step), max(0.0, 1.0 - width))
+            v[:] = [new_lo, new_lo + width]
+        self._apply_zoom()
+
+    def _apply_zoom(self, *_):
+        """Push the shared X/Y view onto every visible graph + both bars."""
+        if self._full_xlim is None or not self._plot_axes:
+            # Empty/background view: make sure nothing (e.g. a toolbar zoom)
+            # has pushed the picture out of frame.
+            if self._full_xlim is None and self.fig.axes:
+                for ax in self.fig.axes:
+                    ax.set_xlim(0, 1)
+                    ax.set_ylim(0, 1)
+                    ax.set_autoscale_on(False)
+                if hasattr(self, "xbar"):
+                    self.xbar.set(0.0, 1.0)
+                    self.ybar.set(0.0, 1.0)
+                self.canvas.draw_idle()
+            return
+        x0, x1 = self._full_xlim
+        y0, y1 = self._full_ylim
+        fx0, fx1 = self._view_x
+        fy0, fy1 = self._view_y
+        w = (x1 - x0) * max(1e-9, fx1 - fx0)
+        h = (y1 - y0) * max(1e-9, fy1 - fy0)
+        xlo = x0 + (x1 - x0) * fx0
+        ylo = y0 + (y1 - y0) * fy0
+        for ax in self._plot_axes:
+            ax.set_xlim(xlo, xlo + w)
+            ax.set_ylim(ylo, ylo + h)
+        if hasattr(self, "xbar"):
+            self.xbar.set(fx0, fx1)
+            self.ybar.set(fy0, fy1)
+        self.canvas.draw_idle()
+
+    def _fmt_time(self, scan, _pos=None):
+        """Scan number -> minutes:seconds label (whole seconds)."""
+        total = int(round(float(scan) / SCAN_RATE_HZ))
+        return f"{total // 60}:{total % 60:02d}"
+
+    def _style_x_axis(self, ax, is_bottom, label=True):
+        """Show x tick labels on the bottom pane only; label scans or time."""
+        ax.tick_params(axis="x", labelbottom=bool(is_bottom))
+        if not is_bottom:
+            return
+        if self.x_time.get():
+            ax.xaxis.set_major_formatter(FuncFormatter(self._fmt_time))
+        if label:
+            ax.set_xlabel("Time (min)" if self.x_time.get() else "Scan")
+
+    def _add_volt_label(self):
+        """One shared Y-axis label, centred on the whole stack with some air."""
+        self.fig.supylabel("Volt", fontsize=8, x=0.014, color="#333")
+
+    def redraw(self):
+        if self.genotyping_active:
+            self._redraw_genotyping()
+            return
+        self.fig.clear()
+        self._plot_axes = []
+        self._full_xlim = None
+        self._full_ylim = None
+        colors = self._theme_colors()
+        n = max(1, min(8, self.n_graphs.get()))
+        paths = self.selected[:n] if self.selected else []
+        if not paths:
+            ax = self.fig.add_subplot(111)
+            bg = self._background_image()
+            if bg is not None:
+                ax.set_position([0, 0, 1, 1])
+                ax.imshow(bg, extent=[0, 1, 0, 1], aspect="auto")
+                ax.text(0.5, 0.96, "Select wells from the list",
+                        ha="center", va="top", fontsize=15, color="#1A1A1A")
+            else:
+                ax.text(0.5, 0.5, "Select wells from the list\n(View → Sort files / Jump well to "
+                                  "compare the same well across runs)",
+                        ha="center", va="center")
+            ax.set_axis_off()
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_autoscale_on(False)
+            self.canvas.draw_idle()
+            self.seq_text.delete("1.0", tk.END)
+            return
+
+        settings = self._settings_from_ui()
+        wrap = settings.view_mode == "wrap"
+
+        if wrap:
+            self._draw_wrap(paths, settings, colors)
+            self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.3, w_pad=0.2, pad=0.4)
+            self._add_volt_label()
+            self._apply_zoom()
+            self.canvas.draw_idle()
+            self._show_sequence()
+            return
+
+        gx0 = gx1 = gy0 = gy1 = None
+        for i, path in enumerate(paths):
+            ax = self.fig.add_subplot(len(paths), 1, i + 1)
+            try:
+                doc = self._ensure_doc(path)
+            except Exception as e:
+                ax.text(0.5, 0.5, f"Load error: {e}", ha="center", transform=ax.transAxes)
+                continue
+            tr = display_trace(doc, settings)
+            s0 = max(0, settings.signal_start)
+            s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
+            s1 = min(tr.shape[0], s1)
+            x = np.arange(s0, s1)
+            plotted = False
+            for ci, base, col, color in self._channel_lines(settings):
+                if not self.chan_show[ci].get():
+                    continue
+                seg = tr[s0:s1, col]
+                ax.plot(x, seg, color=color, lw=0.7, label=f"Ch{ci + 1} {base}")
+                if seg.size:
+                    m0 = float(np.nanmin(seg)); m1 = float(np.nanmax(seg))
+                    gy0 = m0 if gy0 is None else min(gy0, m0)
+                    gy1 = m1 if gy1 is None else max(gy1, m1)
+                plotted = True
+            if s1 > s0:
+                gx0 = s0 if gx0 is None else min(gx0, s0)
+                gx1 = s1 if gx1 is None else max(gx1, s1)
+            self._plot_axes.append(ax)
+            if not plotted:
+                ax.text(0.5, 0.5, "(all channels hidden)",
+                        ha="center", va="center", transform=ax.transAxes, color="#888")
+
+            if self.show_current.get() and doc.current_ua is not None:
+                axc = ax.twinx()
+                cu = doc.current_ua
+                axc.plot(np.arange(s0, s1), cu[s0:s1], color=CURRENT_COLOR, lw=0.8,
+                         alpha=0.8, linestyle=":", label="I (µA)")
+                axc.set_ylabel("µA", color=CURRENT_COLOR, fontsize=6)
+                axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
+
+            ax.tick_params(labelsize=7)
+            ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
+                    transform=ax.transAxes, ha="left", va="top",
+                    fontsize=6, color="#333", zorder=6)
+            self._style_x_axis(ax, i == len(paths) - 1)
+
+            if settings.view_mode == "esd":
+                self._draw_esd_peaks(
+                    ax, doc, s0, s1, self._channel_lines(settings))
+            elif doc.sequence and settings.view_mode == "called" and doc.peak_positions:
+                if self.show_letters.get():
+                    self._draw_letters(ax, doc, s0, s1, colors, force=False)
+                ytop = float(np.nanmax(tr[s0:s1])) if s1 > s0 else 1.0
+                if self.show_qnum.get():
+                    q = doc.qualities or []
+                    pos = np.asarray(doc.peak_positions, dtype=float)
+                    for pi, base_ in enumerate(doc.sequence):
+                        if pi >= len(pos):
+                            break
+                        p = int(pos[pi])
+                        if not (s0 <= p < s1) or pi >= len(q):
+                            continue
+                        ax.text(p, -0.02 * ytop, f"{q[pi]:.1f}", color=QUALITY_COLOR,
+                                ha="center", va="top", fontsize=6, zorder=5, clip_on=True)
+
+            if (self.show_qcurve.get() and doc.sequence and doc.qualities
+                    and settings.view_mode not in ("raw", "esd")):
+                self._draw_quality(ax, doc, s0, s1)
+        if gx0 is not None and gy0 is not None and gx1 > gx0:
+            pad = 0.02 * (gy1 - gy0) or 1.0
+            self._full_xlim = (float(gx0), float(gx1))
+            self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
+        self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
+        self._add_volt_label()
+        self._apply_zoom()
+        self.canvas.draw_idle()
+        self._show_sequence()
+
+    # ------------------------------------------------------------------ I/O
+    def _docs_for_export(self):
+        out = []
+        for p in self.selected:
+            doc = self.docs.get(str(p.resolve()))
+            if doc:
+                out.append(doc)
+        return out
+
+    def export_fasta(self):
+        docs = self._docs_for_export()
+        if not docs:
+            messagebox.showinfo("Export", "Select loaded wells first.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".fasta", filetypes=[("FASTA", "*.fasta")])
+        if not path:
+            return
+        lines = []
+        for doc in docs:
+            if doc.sequence:
+                lines.append(f">{doc.well} len={len(doc.sequence)} [{doc.source}]\n{doc.sequence}")
+        Path(path).write_text("\n".join(lines) + "\n")
+        self.status_var.set(f"Wrote {path}")
+
+    def export_peaks(self):
+        """Export basecalled peaks to CSV: well, base, scan position, quality."""
+        import csv
+        docs = self._docs_for_export()
+        if not docs:
+            messagebox.showinfo("Export", "Select loaded wells first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        with open(path, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["well", "index", "base", "scan", "quality", "source"])
+            for doc in docs:
+                if not doc.sequence:
+                    continue
+                for i, (b, pos, q) in enumerate(zip(
+                        doc.sequence, doc.peak_positions, doc.qualities or [])):
+                    w.writerow([doc.well, i, b, int(pos), float(q), doc.source])
+        self.status_var.set(f"Wrote {path}")
+
+    def export_text(self):
+        """Export trace text (manual 5.2): channels (V), current (µA), params."""
+        import csv
+        docs = self._docs_for_export()
+        if not docs:
+            messagebox.showinfo("Export", "Select loaded wells first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt", filetypes=[("Text", "*.txt")])
+        if not path:
+            return
+        with open(path, "w", newline="") as fh:
+            for doc in docs:
+                fh.write(f"# WELL {doc.well}  SOURCE {doc.source}  {doc.meta}\n")
+                fh.write("# Instrument parameters: source file "
+                         f"{doc.path.name} ({doc.n_scans} scans)\n")
+                if doc.sequence:
+                    fh.write(f"# Bases called: {len(doc.sequence)}  start scan "
+                             f"{doc.peak_positions[0] if doc.peak_positions else '-'} "
+                             f"end scan "
+                             f"{doc.peak_positions[-1] if doc.peak_positions else '-'}\n")
+                w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+                hdr = ["scan"] + [f"{b}(V)" for b in CHANNEL_ORDER]
+                if doc.current_ua is not None:
+                    hdr.append("current(uA)")
+                w.writerow(hdr)
+                c = doc.current_ua
+                for s in range(doc.n_scans):
+                    row = [s] + [f"{doc.acgt[s, ci]:.4g}" for ci in range(4)]
+                    if c is not None:
+                        row.append(f"{c[s]:.4g}")
+                    w.writerow(row)
+                fh.write("\n")
+        self.status_var.set(f"Wrote {path} ({len(docs)} well(s))")
+
+    def save_figure(self):
+        """Save the current plot area as an image (replaces the old toolbar)."""
+        path = filedialog.asksaveasfilename(
+            title="Save graph image",
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("PDF", "*.pdf"),
+                       ("SVG", "*.svg"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self.fig.savefig(path, dpi=150, facecolor=self.fig.get_facecolor())
+        except Exception as e:
+            messagebox.showerror("Save graph image", str(e), parent=self)
+            return
+        self.status_var.set(f"Saved graph image: {path}")
+
+    def save_settings(self):
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        s = self._settings_from_ui()
+        Path(path).write_text(json.dumps(s.__dict__, indent=2))
+
+    def load_settings(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        data = json.loads(Path(path).read_text())
+        for k, v in data.items():
+            if hasattr(self.settings, k):
+                setattr(self.settings, k, v)
+        self.basecaller.set(data.get("basecaller", "mb1000_accuracy"))
+        self.base_order_var.set(data.get("base_order", "ACTG"))
+        self.bonus.set(data.get("channel_peak_bonus", 0.7))
+        self.pullback.set(data.get("pullback_weight", 0.008))
+        self._refresh_channel_buttons()
+        self.status_var.set(f"Loaded settings from {path}")
+
+    def show_help(self):
+        """Scrollable in-app user manual (Help -> User manual, or F1)."""
+        text = (
+            "Limoncello CE Analyzer — user manual\n"
+            "=====================================\n\n"
+            "WHAT IT IS\n"
+            "  A viewer and base caller for capillary-electrophoresis traces.\n"
+            "  Supports .rsd, .scf, ABI .ab1 and text/CSV traces.\n"
+            "  Fluorescence is shown in Volts; instrument current in µA.\n\n"
+            "1. OPEN YOUR DATA\n"
+            "  File ▸ Add data folder…  (or the  ⊕ Add…  button)\n"
+            "    • Pick ONE run folder to load just that run.\n"
+            "    • Ctrl-click SEVERAL folders in the picker to load them at once.\n"
+            "    • Pick a parent folder that contains many run folders\n"
+            "      (e.g. a whole OY run collection) to load every run under it.\n"
+            "  The chosen runs appear in the  Data folders  list, top-left.\n\n"
+            "2. THE DATA FOLDERS LIST\n"
+            "  • Click a row to show only that run's files in Samples / files.\n"
+            "  • Ctrl-click / Shift-click several rows to show their files together.\n"
+            "  • Double-click a row to show that run and open its first sample.\n"
+            "  • Select row(s) and click  – Remove  to unload those runs.\n"
+            "  • File ▸ Clear folders unloads everything.\n\n"
+            "3. THE SAMPLES / FILES LIST\n"
+            "  Each entry is one trace (shown as  run/file).\n"
+            "  • Click to plot it; Ctrl/Shift-click to plot several side by side.\n"
+            "  • Set the  Graphs  spinner (bottom-left) to stack up to 8 plots.\n"
+            "  • Type in  Jump/well  to filter by well name, file name or run name.\n"
+            "  • Sort:  View ▸ Sort files  (well row, column, name, run, …).\n"
+            "  • Remove selected samples with  – Remove file(s)  or the Delete key.\n\n"
+            "4. MOVING AROUND THE PLOT\n"
+            "  • Bottom bar = X (scan) axis, right bar = Y (signal) axis.\n"
+            "  • X tick numbers appear only under the bottom pane, so stacked\n"
+            "    plots keep their height. Tick  Time (min)  to read the X axis as\n"
+            "    minutes:seconds instead of scan numbers (1.75 scans/s,\n"
+            "    ~0.57 s/scan).\n"
+            "  • Grab a bar's thumb and slide to pan that axis.\n"
+            "  • Roll the mouse wheel over the X bar to zoom X; over the Y bar to\n"
+            "    zoom Y. Double-click a bar to reset that axis.\n"
+            "  • Both bars move every visible plot together, so comparisons stay\n"
+            "    aligned.\n"
+            "  • Lost in the zoom?  Right-click the plot or a bar, press Home, or\n"
+            "    use the  ⟲ Reset view  button (View ▸ Reset view) to start over.\n\n"
+"5. VIEW MODES  (View menu)\n"
+             "  • Raw traces            — detector signal as recorded.\n"
+             "  • Processed (ACGT)      — colour-separated channels.\n"
+             "  • Base-called           — peaks with base letters and quality.\n"
+             "  • Sequencing trace (ESD)— the basecaller's processed picture: the four\n"
+             "                            dye traces with one mark on every peak.\n"
+             "                            Called runs show a ring on each CALLED\n"
+             "                            peak (in that base's colour); a\n"
+             "                            heterozygous position appears as two\n"
+             "                            rings at one scan, a mutation as a ring\n"
+             "                            in an unexpected channel.  No letters,\n"
+             "                            no quality line.  (Also on the Base\n"
+             "                            calling menu.)\n"
+             "  • Wrap                  — one well split over N rows; set\n"
+             "                            View ▸ Wrap rows (2-8).\n"
+            "  • Channels submenu toggles the four channels; Trace colors picks a\n"
+            "    colour scheme.  Traces are drawn in the run's physical channel\n"
+            "    order (Ch1..Ch4) — the first tick is always the first channel —\n"
+            "    each labelled by the base it carries (set the chemistry under\n"
+            "    ⚙ Basecall settings ▸ Dye/channel ▸ Base order).\n"
+            "      'Classic' (default) is the MegaBACE software look: colours\n"
+            "      are FIXED per base letter — A green, C blue, T red, G black.\n"
+            "      With the default base order A·C·T·G that shows\n"
+            "      Ch1=A green, Ch2=C blue, Ch3=T red, Ch4=G black.  Other\n"
+            "      chemistries only shift which channel shows which colour;\n"
+            "      the letters keep their colours (DYEnamic runs = TGCA).\n"
+            "      Sequencing dye sets are FIXED per base, like the MegaBACE SA:\n"
+            "      A green, C blue, T red, G black — the same traces therefore keep\n"
+            "      the same colours whatever the kit, only the channels shift.\n"
+            "        'Seq DYEnamic (T·G·C·A)'  = fixed colours with DYEnamic kit\n"
+            "                                   (Ch1=T · Ch2=G · Ch3=C · Ch4=A).\n"
+            "        'Seq ET primer (A·C·T·G)' = fixed colours with ET primer kit\n"
+            "                                   (Ch1=A · Ch2=C · Ch3=T · Ch4=G).\n"
+            "      Genotyping dye sets are FIXED per channel (no base colours):\n"
+            "        'Genotyping (R·B·Blk·G)'  = Ch1 Red (ET-ROX), Ch2 Blue (FAM),\n"
+            "                                   Ch3 Black (HEX/NED), Ch4 Green (TET/HEX)\n"
+            "        'Genotyping (G·B·R·Blk)'  = Green/Blue/Red/Black on Ch1-4\n"
+            "                                   (the order Fragment-readers are used to).\n"
+            "  • Page forward / Page backward step through wells; auto-tour plays\n"
+            "    them automatically (Space starts/stops it).\n\n"
+"6. BASECALLING  (Base calling menu)\n"
+             "  • Basecall selected — calls the wells currently plotted.\n"
+             "  • Basecall all in list — calls everything listed (asks first if big).\n"
+             "  • ⚙ Basecall settings… — pick a basecaller + advanced parameters.\n"
+             "  • Sequencing trace (ESD peaks) / Plain channels (processed) —\n"
+             "    the two plot styles from section 5, so base calling and its\n"
+             "    result live together.\n"
+             "  • Clear base calls (undo) — removes a call's letters, peak marks\n"
+             "    and quality curve, e.g. when fragment/genotyping data was\n"
+             "    base-called by mistake.\n"
+             "  • Basecaller presets (instrument × mode):\n"
+             "      mb1000_accuracy  MB1000 · longest error-free run, high %ID\n"
+             "      mb1000_length    MB1000 · longest read at ID ≥95%\n"
+             "      mb4000_accuracy  MB4000 · error-free mode + 4000 CHM\n"
+             "      mb4000_length    MB4000 · length mode + 4000 CHM\n"
+             "      pos_bonus07      legacy alias for mb1000_accuracy\n"
+             "      pos_profile      legacy alias for mb1000_length\n"
+             "      hz_soften        accuracy base + mild mid hard-zone\n"
+             "      raw_peaks        minimal envelope-peak call (debug)\n"
+             "  • Use mb4000_* only on MegaBACE 4000 data; on 1000 traces the\n"
+             "    4000 spectral matrix is the wrong chemistry and reads collapse.\n"
+             "  • Called sequence(s) appear in the box below the plot.\n"
+             "  • After a call the plot itself stays clean — the extra green\n"
+             "    'quality' line is OFF by default.  Turn it on only if you want\n"
+             "    it:  View ▸ Show quality profile (0-100).\n\n"
+"6b. GENOTYPING  (Genotyping menu, between Base calling and Comments)\n"
+               "  Manual peak picking…  keeps THIS window exactly as it is — the same\n"
+               "  stacked viewer, zoom bars, Reset view, µA and Channels row — but\n"
+               "  clicking a peak now records it for that well, and the Called-sequence\n"
+               "  box below the plot becomes the Picked-peaks table.  Show several\n"
+               "  wells at once (the Graphs spinbox), zoom in, and pick each well's\n"
+               "  peaks; then page the batch onward — Genotyping ▸ Next batch / Previous\n"
+               "  batch move 4-6 wells at a time.  The table collects every well you\n"
+               "  visited, so you save the whole run in one go.  Exit peak picking\n"
+               "  returns to the normal trace viewer.  It is built from scratch for\n"
+               "  fragment genotyping (CTC-CE runs, e.g. a FAM sample with an Atto532\n"
+               "  internal standard in another channel).\n"
+"  • Click a peak (or just beside it) — the best available algorithm\n"
+               "    locates it, shades the peak area and logs scan, channel/base,\n"
+               "    height and area.  The recognition method is selectable\n"
+               "    (Best prominence, Simple maxima, Gaussian fit).\n"
+               "  •  Area is measured between the peak's OWN two valleys (capped\n"
+               "    at 0.95 x the run's peak spacing), so a tight allele pair no\n"
+               "    longer borrows each other's area: the small allele of a het\n"
+               "    pair used to report a near-equal area and a fake ~50/50\n"
+               "    fraction.  Fractions are small/(small+large) of those areas.\n"
+               "  •  Hovering a subplot shows a crosshair plus a live readout in\n"
+               "    that subplot's corner: the scan under the pointer, its\n"
+               "    voltage, and the dominant peak within one base on any visible\n"
+               "    channel, marked [picked] once you have it.\n"
+"  Peak area by drag…  is the same mode with the automation switched off,\n"
+               "  for when you want to say where a peak starts and ends yourself.\n"
+               "  Hold the left button and drag between the two points, and the\n"
+               "  straight line between them becomes the baseline: the area above\n"
+               "  it is what gets measured, exactly as drawn.  A dashed baseline and\n"
+               "  a live ‘mid … area V·scan’ readout follow the pointer; release\n"
+               "  to record.  Dragging right-to-left works, and nothing is detected,\n"
+               "  so there is no finder, no internal standard to mark and no +A\n"
+               "  tagging.  The table becomes run / well / ch / start / stop / mid /\n"
+               "  h V / area.\n"
+"  •  Use it when the peak is crowded, overlapping or not peak-shaped, or\n"
+               "    when you want the area over a span the automatic valleys would\n"
+               "    not choose.  Use Manual peak picking when the trace is clean and\n"
+               "    you would rather not have to place anything by hand.\n"
+"  •  WHICH CHANNEL GETS MEASURED — the one carrying the largest area in\n"
+               "    your span, among the channels that are switched ON.  There is no\n"
+               "    channel picker: the peak you are pointing at is normally the big\n"
+               "    one, so the drag takes the big one.  The Channels row is how you\n"
+               "    choose -- switch off the internal standard and anything you are\n"
+               "    not measuring, and the drag takes the largest of what is left.\n"
+               "    Hiding a channel hides it from the picture AND from the\n"
+               "    measurement together, so what you can see is what gets measured.\n"
+               "    The channel used is named in the status line and written to the\n"
+               "    table's ch column.  Switching every channel off and then dragging\n"
+               "    says so, rather than pretending nothing rose above the baseline.\n"
+"  •  Typical use: a run has four channels but you only want the sample, so\n"
+               "    switch the standard off once and leave it off for the whole\n"
+               "    batch.  On the T9 DyeSet2 traces (Dye order ACTG) Ch3 is the T\n"
+               "    internal standard and Ch2 is the sample, so unticking Ch3 leaves\n"
+               "    you measuring sample peaks only.  Confirm what your run is --\n"
+               "    Comments ▸ Run info… prints the dye order and the per-channel\n"
+               "    signal, and the checkboxes are labelled Ch1..Ch4 in that order.\n"
+"  •  The two are radio buttons in effect — the tick in the Genotyping menu\n"
+               "    shows which mode is live, ticking one switches to it, and\n"
+               "    unticking returns to the normal trace viewer.  Both page the batch,\n"
+               "    and Undo / Clear / Save work the same way in either.\n"
+               "  •  The picked-peaks table is sorted by scan (then channel) per\n"
+               "    well, whatever order you clicked in; Undo last pick still\n"
+               "    removes the most recent click.\n"
+               "  •  Mass-action MF (CTCE)  —  Tag duplex species for MF…\n"
+               "    (Genotyping menu) tags ONE allelic position (the last-picked\n"
+               "    main's own cluster, so two positions in a well stay apart) with\n"
+               "    the same HOM1/HOM2/HET1/HET2 names, and that position then\n"
+               "    reports the PCR mass-action fraction in the MF column:\n"
+               "        MF = (A_MUT + 1/2 A_HET) / (A_WT + A_MUT + A_HET)\n"
+               "    A_WT/A_MUT are the homoduplex areas, A_HET the combined\n"
+               "    heteroduplex area.  The 1/2 term is the point: a clean\n"
+               "    heterozygote reads 0.5, not the 0.25 a plain area ratio of\n"
+               "    the two homoduplexes gives, and below ~5% MF, where all the\n"
+               "    mutant strands have re-annealed and no mutant homoduplex is\n"
+               "    visible at all, the whole low fraction is carried by A_HET.\n"
+               "    The ai column adds the allelic imbalance\n"
+               "    A_HOMO1/(A_HOMO1+A_HOMO2), which needs no wild-type choice.\n"
+               "    Both stay blank until a position is tagged.  The peak count\n"
+               "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
+               "    3 = 1 + 2, 2 = 2 + 0.\n"
+               "  •  Auto-genotyping  —  Genotyping ▸ Auto-genotyping ▸ Auto-genotype\n"
+               "    selected wells… calls every selected well with no clicking:\n"
+               "    it finds the internal-standard quartet, measures the four\n"
+               "    sample duplexes, and returns a call per well.  Its own\n"
+               "    results table (well, call, frac, the four areas and their\n"
+               "    significances, flags and the reason for a no-call) sits below\n"
+               "    the plot and stays separate from the manual pick table, so\n"
+               "    the two never overwrite each other.\n"
+               "  •  Channel roles  —  which channel carries the internal\n"
+               "    standard and which the sample is a property of the assay\n"
+               "    on the plate, not of the dye order, so it is asked for in\n"
+               "    Channel roles (standard / sample)… rather than assumed.  It\n"
+               "    starts at the T9 kit's Ch3/Ch2.  Getting the pair wrong does\n"
+               "    not fail loudly — it scores the sample's own peaks as the\n"
+               "    standard and returns confident nonsense — so setting both to\n"
+               "    the same channel is refused before a well is scored.\n"
+               "  •  Channel identity follows the run's dye order everywhere:\n"
+               "    the checkboxes, both legends and the exported Ch column use\n"
+               "    the same mapping, so hiding Ch1 hides the same trace in the\n"
+               "    viewer and while picking.\n"
+               "  •  Mark start/end from the 2nd derivative  (on by default)\n"
+               "    places square ticks where each picked peak lifts off its\n"
+               "    baseline: the 2nd derivative of the (smoothed) trace crosses\n"
+               "    the noise floor from flat to concave-up at the true start,\n"
+               "    and concave-up again on the return at the end.  Uncheck it\n"
+               "    for a clean look.\n"
+              "  •  Add +A  (on by default) tags the strongest satellite TRAILING\n"
+              "    the main peak: the Taq A-addition a few scans later.  Nothing is\n"
+              "    tagged in front of the main peak -- for a single-base-extension\n"
+              "    product that leading shoulder is another A-addition on the\n"
+              "    GC-clamp side, not stutter.  Turn the option off when clicking\n"
+              "    allele peaks so the second allele is not swallowed by the +A\n"
+              "    tag.\n"
+"  • Internal standard — the four standard peaks are all ONE\n"
+               "    fragment (the same number of base pairs); cycling-temperature CE\n"
+               "    separates them by sequence into two homoduplexes (peaks 1-2,\n"
+               "    differing by the single SNP base of the rs number) and two\n"
+               "    heteroduplexes (peaks 3-4, made in the PCR when Watson and Crick\n"
+               "    strands pair wrongly, giving one mismatch base pair).  Pick the\n"
+"    four standard main peaks and use  Mark peaks as standard…\n"
+                "    (Genotyping menu): the earlier ones become HOM1/HOM2, the later\n"
+                "    HET1/HET2.  A single\n"
+                "    fragment length (bp) may be entered (optional, shared by all four).\n"
+                "    Variant ratios come from the RELATIVE areas of these duplex peaks,\n"
+                "    so no bp ladder is involved.\n"
+                "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
+                "    8 scans (classic heterozygote): small/(small+large).\n"
+"  • Undo last pick removes the most recent pick (with its +A\n"
+                 "    tags); Clear picks empties the whole table.  An area that is\n"
+                 "    already picked cannot be picked again: the click is refused and\n"
+                 "    the status bar says so — undo it first if you meant a re-pick\n"
+                 "    (neighbouring peaks, e.g. the two alleles of a heterozygote,\n"
+                 "    stay pickable).\n"
+                "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
+                "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
+                "    (main/+A), height (V), area (V·scan), duplex label\n"
+                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
+                "    grouped by sample (run folder, then well name) and ordered by\n"
+                "    scan inside each sample, never by click order, so one sample's\n"
+                "    peaks are never interleaved with another's.  That table is\n"
+                "    your labelled training library for ML — peak picking works with\n"
+                "    or without an internal standard.\n"
+              "7. EXPORT  (File menu)\n"
+            "  • Export sequence (FASTA)…   called bases per well.\n"
+            "  • Export peak table (CSV)…   well, base, scan position, quality.\n"
+            "  • Export trace text (V + µA)… raw values.\n"
+            "  • Save graph image…          the plot area as PNG/PDF/SVG.\n"
+            "  • Save / Load settings JSON…  remembers your caller setup.\n\n"
+            "7b. COMMENTS & RUN INFO  (Comments menu, between Genotyping and Help)\n"
+            "  • Run comments…  — write a note for the selected run; it is stored\n"
+            "    beside the data file as '<file>.comment.txt' (the .rsd header is\n"
+            "    left untouched) and shown under the sequence once saved.\n"
+            "  • Run info…  — read-only rundown of the selected run: well, source,\n"
+            "    scan count & run time, base order, basecaller preset, sequence\n"
+            "    statistics, per-channel signal maxima and the instrument current.\n\n"
+            "8. KEYBOARD SHORTCUTS\n"
+            "  ↑ / ↓ / PgUp / PgDn   page through wells\n"
+"  Space                 start / stop auto-tour\n"
+             "  Delete                remove selected sample(s)\n"
+             "  Ctrl+Z                undo last peak pick (in peak picking)\n"
+            "  Home / right-click    reset the X & Y view\n"
+            "  F1                    this manual\n"
+            "  F11                   zoom the window to full screen / restore\n"
+            "  Esc                   cancel a long job, or leave full screen\n\n"
+            "TIPS\n"
+            "  • Comparing the same well across runs? Sort by well and use\n"
+            "    Jump/well, then select the matching samples.\n"
+            "  • Large collections take a moment to list; plotting is lazy.\n"
+            "  • The empty graph area shows the project picture until you pick\n"
+            "    a sample.\n"
+        )
+        win = tk.Toplevel(self)
+        win.title("Limoncello CE Analyzer — User manual")
+        win.geometry("780x660")
+        win.minsize(520, 400)
+        box = scrolledtext.ScrolledText(win, wrap=tk.WORD,
+                                        font=("DejaVu Sans Mono", 10),
+                                        padx=14, pady=10, bg="#FBFBF4")
+        box.pack(fill=tk.BOTH, expand=True)
+        box.insert("1.0", text)
+        box.configure(state=tk.DISABLED)
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=6)
+        win.transient(self)
+
+    def show_about(self):
+        messagebox.showinfo(
+            "About",
+            "Limoncello CE Analyzer  —  CE trace viewer & base caller\n\n"
+            "Serves all instruments that produce CE traces:\n"
+            "Formats: .rsd, .scf, ABI .ab1, text/CSV traces\n"
+            "Current trace: µA (RSD raw ÷10); fluorescence in Volts.\n"
+            "Basecallers: mb1000/mb4000 × accuracy/length (pos_bonus07 and\n"
+             "            pos_profile are legacy aliases of those; hz_soften,\n"
+             "            raw_peaks remain), see the Basecall settings dialog.\n"
+            "Multi-folder load, multi-graph, auto-tour, well sort/filter.\n"
+            "ESD-style processed view under Base calling; manual peak picking\n"
+            "genotyping (click peaks, +A tagging, sizes via internal standard,\n"
+            "Excel/CSV/JSON export) under Genotyping.\n"
+            "Uses our own tuned spacing tracker.",
+        )
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Limoncello CE Analyzer")
+    ap.add_argument("--folder", action="append", type=Path, help="Data folder (repeatable)")
+    ap.add_argument("--check", action="store_true",
+                    help="report which dependencies are available and exit")
+    args = ap.parse_args()
+    if args.check:
+        from analyzer_core import environment_report
+        raise SystemExit(environment_report())
+    app = LimoncelloAnalyzerApp(initial_folders=args.folder)
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
