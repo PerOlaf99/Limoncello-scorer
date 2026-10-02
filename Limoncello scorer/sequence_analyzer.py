@@ -2289,6 +2289,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         from genotyping import save_table
         rows = []
+<<<<<<< HEAD
         if self.area_mode:
             # run folder first, then well, then left-to-right along the trace
             for key, pk in sorted(self._area_pickers.items(),
@@ -2304,6 +2305,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                   key=lambda kv: str(kv[1].path)):
                 if pk.records:
                     rows.extend(pk.export_rows())
+=======
+        # group by sample first (run folder, then well name) so one sample's
+        # peaks are never interleaved with another's, then scan order inside
+        for key, pk in sorted(self._gen_pickers.items(),
+                              key=lambda kv: str(kv[1].path)):
+            if pk.records:
+                rows.extend(pk.export_rows())
+>>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
         if not rows:
             messagebox.showinfo(
                 "Save peaks table" if not self.area_mode else "Save areas",
@@ -3438,13 +3447,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
                 "    (main/+A), height (V), area (V·scan), duplex label\n"
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
                 "    grouped by sample (run folder, then well name) and ordered by\n"
                 "    scan inside each sample, never by click order, so one sample's\n"
                 "    peaks are never interleaved with another's.  That table is\n"
+<<<<<<< HEAD
 =======
                 "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  That table is\n"
 >>>>>>> 037e63ec (genotyping: measure each peak between its own two valleys, tag only trailing +A, and show a live cursor readout)
+=======
+>>>>>>> 94de7b5e (genotyping: write the exported peaks grouped by sample and ordered by scan)
                 "    your labelled training library for ML — peak picking works with\n"
                 "    or without an internal standard.\n"
               "7. EXPORT  (File menu)\n"

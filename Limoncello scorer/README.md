@@ -265,7 +265,10 @@ scratch:**
   writes CSV (Excel-ready, UTF-8 BOM), Excel `.xlsx` or JSON: file, well, scan,
   channel, base, kind (`main`/`+A`), start/end scan (2nd derivative),
   height, area, duplex label (`HOM1`/`HOM2`/`HET1`/`HET2`), length (bp) and
-  fraction. That table is a labelled **training library for ML** — picking
+  fraction. Rows are written **grouped by sample** (run folder, then well name)
+  and **in scan order inside each sample**, never in click order, so one
+  sample's peaks are never interleaved with another's. That table is a
+  labelled **training library for ML** — picking
   works with or without an internal standard.
 - **Exit peak picking** returns to the normal trace viewer (the same menu item
   toggles back and forth).
