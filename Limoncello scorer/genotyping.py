@@ -293,6 +293,72 @@ def prime_plate_std_snr(model, wells):
     model.std_snr = [v for v in model.std_snr if v > 0]
 
 
+def prime_plate_co_migration(model, wells):
+    """Fill a model's sample/standard migration offsets from the marked wells.
+
+    *wells* is an iterable of ``(acgt, samp_col, scans)``, the same arguments
+    :func:`prime_plate_std_snr` takes.  For each duplex the offset of the
+    strongest peak near its band centre is recorded.
+
+    Only wells where that duplex is the *clearest* band present contribute a
+    reference.  This matters more than it sounds: on a plate that is mostly
+    hom-1 there is no H2 product anywhere, yet the H2 neighbourhood is full of
+    ordinary noise that clears any absolute threshold.  Letting those wells
+    teach the model where H2 lives produced a gate 300 scans wide -- wider than
+    the segment it was meant to constrain, and so wide that the very off-target
+    peak it was built to exclude fell back inside.  Requiring the duplex to be
+    the strongest band means H2 collects references only from the wells where
+    H2 really is present, which on that plate is too few to gate it.  A duplex
+    with too little reference keeps the old fixed-radius search, which is the
+    status quo and cannot regress a plate that was already working.
+    """
+    if model is None:
+        return
+    import scorer
+    collected = [[] for _ in range(4)]
+    for acgt, samp_col, scans in wells:
+        if not scans:
+            continue
+        y = np.asarray(acgt[:, samp_col], dtype=float)
+        sigma = _noise_sigma(y)
+        n = len(y)
+        if sigma <= 0:
+            continue
+        idx = np.arange(n)
+        segs = _quartet_segments(scans)
+        snrs = []
+        for k, (lo, hi) in enumerate(segs):
+            lo, hi = max(0, lo), min(n, hi)
+            if hi - lo < MIN_SEGMENT_SPAN:
+                snrs.append(0.0)
+                continue
+            m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
+                (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
+            base = float(np.median(y[m]))
+            ctr = int(scans[k])
+            a, b = max(0, ctr - CO_MIGRATION_SEARCH), min(n, ctr + CO_MIGRATION_SEARCH + 1)
+            win = y[a:b]
+            snrs.append((float(win.max()) - base) / sigma if b > a else 0.0)
+        if not snrs:
+            continue
+        loudest = max(range(len(snrs)), key=lambda i: snrs[i])
+        if snrs[loudest] < scorer.T9_MIN_DOMINANT_SIGMA:
+            continue
+        for k in range(len(model.co_mig)):
+            if k == loudest and len(snrs) > k:
+                ctr = int(scans[k])
+                a, b = max(0, ctr - CO_MIGRATION_SEARCH), min(n, ctr + CO_MIGRATION_SEARCH + 1)
+                lo, hi = max(0, segs[k][0]), min(n, segs[k][1])
+                if b > a and hi - lo >= MIN_SEGMENT_SPAN:
+                    m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
+                        (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
+                    base = float(np.median(y[m]))
+                    collected[k].append(
+                        float(int(np.argmax(y[a:b])) + a - ctr))
+    for k in range(len(model.co_mig)):
+        model.co_mig[k] = collected[k]
+
+
 def acgt_index_for_channel(base_order: str, channel: int) -> int:
     """Column of ``doc.acgt`` holding MegaBACE *channel* (1-based).
 
@@ -523,6 +589,13 @@ class PlateISModel:
         # pattern above and below and still recognises it.  An absolute cutoff
         # would throw away a well that is plainly readable in context.
         self.std_snr = []
+        # Per-duplex sample/standard migration offsets, in scans, relative to
+        # each fitted band centre.  The sample and its standard are in the same
+        # tube, so a real product lands a short, repeatable distance from the
+        # band it belongs to -- but the distance is not zero, and it is not the
+        # same for every duplex (a heteroduplex has its own mobility).  Filled
+        # by prime_plate_co_migration() from the marked wells.
+        self.co_mig = [[] for _ in range(4)]
 
     @classmethod
     def from_marks(cls, marks):
@@ -570,6 +643,32 @@ class PlateISModel:
             return None
         import statistics as _st
         return max(5.0, 0.25 * _st.median(self.std_snr))
+
+    def co_migration_window(self, duplex):
+        """Scans either side of a fitted band centre where its product sits.
+
+        Returns ``(lo, hi)`` as offsets from the band centre, or ``None`` when
+        this plate has too little reference material to gate that duplex.  The
+        gate exists because a duplex's segment is wide: with ``d1`` at 81 scans
+        the H2 window spans ~170, and a strong peak from somewhere else entirely
+        falls inside it and gets integrated as if it were the second allele.
+        Searching only where the product belongs removes that failure at the
+        source instead of trying to recognise the wrong peak afterwards.
+        """
+        refs = self.co_mig[duplex] if 0 <= duplex < len(self.co_mig) else []
+        if len(refs) < CO_MIGRATION_MIN_REFS:
+            return None
+        import statistics as _st
+        med = _st.median(refs)
+        mad = _st.median([abs(v - med) for v in refs])
+        span = max(CO_MIGRATION_MAD_K * mad, CO_MIGRATION_MIN_SPAN)
+        # A gate wider than any plausible product spread is not a measurement,
+        # it is a contaminated reference set.  Refuse it: the ungated fallback
+        # is strictly the old behaviour, so declining can only miss the
+        # improvement, never introduce a regression.
+        if span > CO_MIGRATION_MAX_HALF_SPAN:
+            return None
+        return med - span, med + span
 
     def window(self):
         """Half-width of the search window around the predicted centre."""
@@ -653,6 +752,22 @@ SEGMENT_APEX_RADIUS = 13     # scans either side of the standard peak to look fo
                             # identically, and the residual shift is what the
                             # sample's own height must be read at
 MIN_SEGMENT_SPAN = 3         # narrower than this and it is not a peak at all
+
+# Sample/standard co-migration.  The sample product does not sit on its
+# standard band: on ABCC2_N10 it lands a median 11 scans *before* the fitted
+# centre, and every genuine hom-1 there falls between -20 and -7.  These
+# describe how wide to allow that band, measured per plate and per duplex.
+CO_MIGRATION_MAD_K = 5.0     # robust spread multiplier for the gate
+CO_MIGRATION_MIN_SPAN = 8.0  # scans; floor so a tight plate cannot go knife-edge
+CO_MIGRATION_MIN_REFS = 8    # marked wells needed before a duplex is gated
+# Eight is deliberately above the five that would have let a noisy duplex
+# through.  At five, CYBA_N1 installed an H3 gate at +21..+41 from five
+# reference wells and thereby moved two real heteroduplexes below the
+# significance floor -- its own references contradicted the wells it changed.
+# A gate moves calls, so it has to rest on more than a handful of wells, and
+# too few references must leave the duplex ungated rather than guess.
+CO_MIGRATION_SEARCH = 50     # scans either side to search when a duplex has no gate
+CO_MIGRATION_MAX_HALF_SPAN = 40.0  # wider than this and the references are noise
 
 
 def _noise_sigma(y):
@@ -901,8 +1016,20 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
             (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
         base = float(np.median(y[m]))
-        a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
-        b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
+        # Look for this duplex's apex only where its product belongs.  The
+        # segment itself is far wider than the product (H2 spans ~170 scans
+        # when d1 is 81), so taking the segment maximum hands the measurement to
+        # whatever else happens to sit inside it -- which is how ABCC2 H01 grew
+        # a second allele it does not have, and how F12's off-target became its
+        # only "product".  With a calibrated gate the peak is sought inside the
+        # co-migration band; without one the old fixed radius stands.
+        gate = is_model.co_migration_window(k) if is_model is not None else None
+        if gate is not None:
+            a = max(0, int(round(scans[k] + gate[0])))
+            b = min(n, int(round(scans[k] + gate[1])) + 1)
+        else:
+            a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
+            b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
         apex = float(y[a:b].max()) if b > a else 0.0
         areas.append(max(0.0, float(np.trapz(y[lo:hi] - base, dx=1.0))))
         snrs.append((apex - base) / sigma if sigma > 0 else 0.0)

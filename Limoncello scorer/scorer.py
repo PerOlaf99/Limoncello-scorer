@@ -421,6 +421,8 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     sigmas = tuple(sigmas or ())
     dom = max(sigmas) if sigmas else None
     total = hom1 + hom2 + het1 + het2
+    s1 = sigmas[0] if len(sigmas) > 0 else None
+    s2 = sigmas[1] if len(sigmas) > 1 else None
     s3 = sigmas[2] if len(sigmas) > 2 else None
     s4 = sigmas[3] if len(sigmas) > 3 else None
     lo, hi = ((min(s3, s4), max(s3, s4))
@@ -459,10 +461,25 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
 
     # Homozygote: the labelled homoduplex says which allele, so unlike the
     # generic path this can distinguish the two homozygotes.
-    if hom1 > 0 and (hom2 <= 0 or hom1 >= hom2):
+    #
+    # A hom allele has to be *there*.  ``dom`` above only proves that *some*
+    # band is strong, and the two are not the same claim: a strong
+    # heteroduplex will happily carry a homozygous call that its own homoduplex
+    # does not support.  ABCC2 H12 reads hom1 at 8.5 sigma against het1 at 44,
+    # and was called hom-1 on the strength of a band belonging to a different
+    # molecule.  And H01 read hom-2 from area2 25282 carrying only 16.9 sigma --
+    # a segment-width artefact, since D07 has the same shape (area2 29354 at
+    # 13.0 sigma) and is a hom-1 purely because its real allele happened to be
+    # the larger area.  Ordering by area alone is not a substitute for asking
+    # whether the allele is present.
+    hom1_ok = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
+    hom2_ok = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
+    if hom1_ok and (not hom2_ok or hom1 >= hom2):
         return "hom-1", frac, flags
-    if hom2 > 0:
+    if hom2_ok:
         return "hom-2", frac, flags
+    if hom1_ok:
+        return "hom-1", frac, flags
     return "no-call", 0.0, flags
 
 
