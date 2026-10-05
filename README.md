@@ -30,6 +30,7 @@ wired to the plate-validated **best basecaller** configs.
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
 | Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Genotyping ▸ Auto-genotyping |
+| Fragment-length sizing — size PCR/ssDNA peaks against a ladder (bp), user-definable ladders | Yes — `scorer.py size` |
 
 ## Requirements
 
@@ -64,7 +65,8 @@ Limoncello-scorer/
 ├── sequence_analyzer.py       # Tk desktop viewer / basecaller GUI
 ├── analyzer_core.py           # loaders + basecaller wrapper (vendor discovery, --check)
 ├── genotyping.py              # headless PeakPicker engine + Tk picker dialog
-├── scorer.py                  # genotype calls, confidence, read QC, HTML report
+├── fragment_sizing.py         # ladder registry + fragment-length sizing (headless)
+├── scorer.py                  # genotype calls, read QC, fragment sizing, HTML report
 ├── basecall.py                # standalone FASTA/FASTQ basecaller CLI
 ├── configs.py                 # basecaller presets (GOLDEN / PRECISION / SOFT)
 ├── cimarron_basecaller/       # vendored base caller package (numpy/scipy)
@@ -350,7 +352,7 @@ The **Comments** menu sits between *Genotyping* and *Help*:
 ## Scoring, QC and reports (`scorer.py`)
 
 `scorer.py` is the headless half of the tool and needs neither tkinter nor
-matplotlib. It does two jobs:
+matplotlib. It does three jobs:
 
 - **Read QC** — base-call a trace and report length, Qmean/Qmin, the fraction of
   weak calls, N count, peak spacing (mean and CV), per-channel signal maxima and
@@ -360,6 +362,9 @@ matplotlib. It does two jobs:
   genotyping picker exports, and the ML training library) into a per-position
   `call` (`het` / `hom-major` / `no-call`), the minor-allele `fraction` and a
   0–100 `confidence`, plus a one-line genotype per well.
+- **Fragment-length sizing** — find a ladder's peaks, match them to the kit's
+  known lengths, and read every sample peak back through the resulting
+  `scan -> bp` curve. See the next section.
 
 There is also a third job, still library-only:
 
@@ -402,6 +407,87 @@ Confidence is a documented **heuristic**, not a calibrated probability: 70% of
 the score is how far the minor-allele fraction sits from the call boundary, 30%
 is how well the two alleles stand clear of the noise, and an internal-standard
 (HOM/HET duplex) match pins it to at least 80.
+
+## Fragment-length sizing (`scorer.py size`)
+
+The other half of genotyping: a PCR/ssDNA sample is co-run with a **size
+standard** (ladder) labelled with a different fluorophore, and every sample
+peak's length in bp is read off the ladder. This is *sizing*, not allele
+calling — it needs no internal standard and no prior knowledge of the sample.
+
+```bash
+# what ladders are built in, and which MegaBACE kits are compatible
+python scorer.py ladders
+
+# size a lane against the bundled 400-1000 bp ROX ladder
+python scorer.py size well.rsd --ladder geneflo1000_rox \
+    --ladder-channel 4 --sample-channel 2 --out sizes.csv --report sizes.html
+
+# a ladder that is not bundled: inline lengths or a JSON file
+python scorer.py size well.rsd --lengths 50,100,150,200,250,300
+python scorer.py size well.rsd --ladder my_ladder.json
+```
+
+How it works, and what to watch:
+
+- **Channels are physical.** Ladder and sample live on different channels of
+  the same well. They are given as 1–4 in the plate's dye order (`--base-order`,
+  default `ACTG`), the *same* convention as the basecaller and the picker. The
+  default is sample on Ch2 and ladder on Ch4, which is the common
+  FAM-sample / ROX-ladder layout, but the pair is a property of the **kit** —
+  it cannot be guessed from the trace, so a run whose channels differ must say
+  so. `python scorer.py ladders` and `size` print the channels used.
+- **Matching is order-based.** Ladder peaks and the kit's lengths are aligned
+  monotonically (a Needleman–Wunsch alignment), so a missing or extra band is
+  skipped instead of shifting every length. The fit is a shape-preserving PCHIP
+  curve through the matched anchors — the classic `scan -> bp` size-call curve.
+- **Accuracy is reported honestly.** A residual on the fit is always zero, so
+  the tool reports the **leave-one-out RMS error** in bp (each anchor predicted
+  from the others). Below four anchors it reports `n/a` rather than a falsely
+  precise zero, and `size` warns when too few ladder peaks matched (usually a
+  wrong ladder channel or a wrong length table).
+- **Out-of-range peaks are flagged.** A peak whose scan falls outside the
+  ladder's span is extrapolated linearly and written with `in_range = False`;
+  those bp values are the least trustworthy.
+
+### Ladders: built in, or your own
+
+Two ROX standards are bundled by name (`python scorer.py ladders` lists them):
+**GeneScan 500 ROX** and **Geneflo 1000 ROX** (400–1000 bp, 25 bp steps). Any
+other kit is a JSON file:
+
+```json
+{"name": "My FAM ladder", "dye": "FAM",
+ "lengths": [50, 100, 150, 200, 250], "notes": "home-made"}
+```
+
+`dye` is free text (it only labels the report), so a lab can use a ladder with
+a fluorophore of its choice. The `lengths` are the only thing that matters.
+
+### MegaBACE-compatible standards
+
+The MegaBACE genotyping chemistry uses an **ET ROX** size standard (FAM donor /
+ROX acceptor) that is excited by the blue 488 nm laser; the recommended
+standards are **ET400-R, ET550-R and ET900-R**, and single-ROX standards also
+work but need more label. The validated genotyping dye sets are
+
+| Set | Channels (sample dyes) | Size standard |
+|-----|------------------------|---------------|
+| Genotyping filter set 1 | FAM · TET · HEX | ET ROX |
+| Genotyping filter set 2 | FAM · HEX · NED/TAMRA (or JOE · TAMRA) | ET ROX |
+
+(`MegaBACE Instrument Administrator's Guide`, Appendix A.) **The exact
+fragment tables of ET400-R / ET550-R / ET900-R are printed on the kit inserts
+and are not bundled here** — a half-remembered ladder sizes every peak wrongly,
+which is worse than none. Enter them once from your insert:
+
+```bash
+python scorer.py size well.rsd --lengths <your insert's sizes> \
+    --ladder-channel <ET-ROX channel> --sample-channel <FAM channel>
+```
+
+Then save them as a JSON file so the same plate can be sized repeatably. No
+single vendor ladder is required — the tool is ladder-agnostic by design.
 
 ## Development
 

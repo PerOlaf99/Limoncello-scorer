@@ -265,6 +265,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # the canvas, and the menu shows which one is live.
         self._mode_pick = tk.BooleanVar(value=False)
         self._mode_area = tk.BooleanVar(value=False)
+        self._gen_lock_var = tk.StringVar(value="any")
 
         # Shared X/Y view, stored as [first, last] fractions of the full data
         # range. One model drives every visible graph plus the axis bars.
@@ -462,12 +463,27 @@ class LimoncelloAnalyzerApp(tk.Tk):
             label="Mark start/end from the 2nd derivative",
             variable=self._gen_d2, command=self._sync_gen_opts)
         genotyping_m.add_separator()
+        # All channels are overlaid in one axes, so a click cannot say which
+        # trace it meant. When the standard shows on two channels a few scans
+        # apart this silently picks the wrong one, so offer an explicit lock.
+        genotyping_m.add_radiobutton(
+            label="Pick on any channel (auto)",
+            variable=self._gen_lock_var, value="any",
+            command=self._sync_gen_opts)
+        for _ci in (1, 2, 3, 4):
+            genotyping_m.add_radiobutton(
+                label=f"Lock picks to Ch{_ci}",
+                variable=self._gen_lock_var, value=str(_ci),
+                command=self._sync_gen_opts)
+        genotyping_m.add_separator()
         genotyping_m.add_command(label="Undo last pick / measurement",
                                  command=self._gen_undo)
         genotyping_m.add_command(label="Clear picks / measurements",
                                  command=self._gen_clear)
         genotyping_m.add_command(label="Mark peaks as standard…",
                                  command=self._gen_mark_std)
+        genotyping_m.add_command(label="Mark IS in all shown wells",
+                                 command=self._gen_mark_std_batch)
         genotyping_m.add_command(label="Tag duplex species for MF…",
                                  command=self._gen_mark_duplex)
         genotyping_m.add_separator()
@@ -1553,7 +1569,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except Exception as e:
             self.status_var.set(f"Could not load {path.name}: {e}")
             return
-        rec = pk.pick(xs, vol=vs)
+        rec = pk.pick(xs, vol=vs, only_col=self._gen_lock_col())
         if rec is None:
             if getattr(pk, "_reject", None) == "area":
                 self.status_var.set(f"That area is already picked on {path.name} "
@@ -1923,7 +1939,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
 
     def _gen_undo(self):
-        if not self.genotyping_active:
+        if not self._require_picking("Undo last pick"):
             return
         if self.area_mode:
             rec = None
@@ -1955,7 +1971,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_pick_table()
 
     def _gen_clear(self):
-        if not self.genotyping_active:
+        if not self._require_picking("Clear picks"):
             return
         store = self._area_pickers if self.area_mode else self._gen_pickers
         if store:
@@ -1966,8 +1982,93 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
         self._sync_pick_table()
 
+    def _gen_mark_std_batch(self):
+        """Auto-mark the IS quartet in every displayed well, then let the
+        operator fix outliers by hand.
+
+        96 wells is 384 clicks; nobody does that twice.  Detection is only a
+        starting point -- on the ABCC2 plate it locks onto noise in a third of
+        the wells -- so every result is marked with an "(auto)" label and the
+        table shows which wells came from detection, so a wrong one is obvious
+        and re-markable rather than silently trusted.
+        """
+        if not self._require_picking("Mark IS in all shown wells"):
+            return
+        paths = self._gen_paths()
+        if not paths:
+            self.status_var.set("Select the wells to mark first.")
+            return
+        channel = simpledialog.askinteger(
+            "Standard channel",
+            "Which physical channel carries the internal standard?\n\n"
+            "(ACTG plate: Ch1=A, Ch2=C, Ch3=G, Ch4=T)",
+            initialvalue=genotyping.DEFAULT_IS_CHANNEL,
+            minvalue=1, maxvalue=4, parent=self)
+        if channel is None:
+            return
+        marked, failed, skipped = [], [], []
+        self._gen_std_batch_progress = (0, len(paths))
+        for path in paths:
+            try:
+                pk = self._ensure_picker(path)
+            except Exception as e:
+                failed.append((path.stem, str(e)))
+                continue
+            if pk.std:
+                skipped.append(path.stem)
+                continue
+            try:
+                pk.auto_mark_std(channel=channel,
+                                 cut=genotyping.DEFAULT_IS_CUT)
+                marked.append(path.stem)
+            except ValueError as e:
+                failed.append((path.stem, str(e)))
+            self._gen_std_batch_progress = (len(marked) + len(failed),
+                                            len(paths))
+            self.update_idletasks()
+        self._build_pick_table()
+        self.redraw()
+        msg = (f"Marked {len(marked)} of {len(paths)} wells from Ch{channel}"
+               f" detection.")
+        if skipped:
+            msg += f"  {len(skipped)} already had an IS set (left alone)."
+        if failed:
+            msg += f"  {len(failed)} had no quartet found — click those by hand."
+            messagebox.showwarning(
+                "Mark IS in all shown wells",
+                msg + "\n\nNo quartet detected in:\n"
+                + ", ".join(w for w, _ in failed[:24])
+                + ("\n…" if len(failed) > 24 else "")
+                + "\n\nTurn on Manual peak picking… and click the four IS peaks "
+                  "on the standard channel, then Mark peaks as standard…")
+        else:
+            messagebox.showinfo("Mark IS in all shown wells", msg)
+
+    def _gen_lock_col(self):
+        """The locked acgt column for picking, or None to let the picker guess."""
+        v = (self._gen_lock_var.get() or "any").strip()
+        if not v.isdigit():
+            return None
+        return self._col_to_chan().get(int(v) - 1)
+
+    def _require_picking(self, what):
+        """Guard for the manual picking commands.
+
+        These all used to ``return`` silently when picking was off, so the menu
+        item looked dead with no explanation -- worst right after a restart,
+        where picking starts off and every manual command silently no-ops.
+        """
+        if self.genotyping_active:
+            return True
+        messagebox.showinfo(
+            what,
+            "Turn on Genotyping ▸ Manual peak picking… first.\n\n"
+            "Then click each of the four IS peaks on the standard channel,\n"
+            "then Genotyping ▸ Mark peaks as standard…")
+        return False
+
     def _gen_mark_std(self):
-        if not self.genotyping_active:
+        if not self._require_picking("Mark peaks as standard"):
             return
         pk = self._gen_picker_active()
         if pk is None:
@@ -2001,7 +2102,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _gen_mark_duplex(self):
         """Tag the active well's picked mains as the duplex species of one
         allelic position, so it reports the CTCE mass-action MF."""
-        if not self.genotyping_active:
+        if not self._require_picking("Tag duplex species for MF"):
             return
         pk = self._gen_picker_active()
         if pk is None:
@@ -2162,10 +2263,23 @@ class LimoncelloAnalyzerApp(tk.Tk):
                      "is_channel": is_c, "sample_channel": sa_c,
                      "std_scans": "", "reason": str(e)})
             else:
+                # Hand over the operator's own STD picks for this well when they
+                # exist.  find_is_quartet accepts any equimolar set, so on a
+                # weak-IS plate it can prefer four equal noise ripples to the
+                # real standard; the operator's marks are authoritative.
+                manual_std = None
+                try:
+                    pk = self._ensure_picker(path)
+                    if pk.std:
+                        # pk.std is [(scan, name), ...]; the engine wants scans.
+                        manual_std = [int(pair[0]) for pair in pk.std]
+                except Exception:
+                    manual_std = None
                 self._auto_rows.append(genotyping.auto_genotype(
                     doc, is_channel=is_c, sample_channel=sa_c,
                     base_order=base, cut=genotyping.DEFAULT_IS_CUT,
-                    run_name=path.parent.name))
+                    run_name=path.parent.name,
+                    std_scans_manual=manual_std))
             if i % 8 == 0 or i == len(targets):
                 self.status_var.set(f"Auto-genotyping… {i}/{len(targets)}")
                 self.update_idletasks()
@@ -2180,8 +2294,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
 
     def _build_auto_table(self):
-        """The auto-genotype results table, below the plot like the pick
-        table.  One row per well, no-call rows showing their reason."""
+        """The auto-genotype results table, stacked below the pick table.
+
+        It must not replace the pick table.  Manual STD picks are the ground
+        truth for this assay -- auto-genotyping defers to them -- and the pick
+        table is what ``_gen_save`` writes, so hiding it makes manual work
+        unsavable the moment auto-genotyping runs.
+        """
         if self._auto_tree is not None:
             try:
                 self._auto_tree.master.destroy()
@@ -2194,8 +2313,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         tblf.pack(fill=tk.X, padx=4, pady=2)
         hdr = ttk.Label(self.center, text="Auto-genotype results")
         hdr.pack(anchor="w", padx=4)
-        hdr.pack_forget()
-        self.pick_tree = None       # the pick table is not on screen in this mode
+        # The pick table has to exist and be visible for manual picks to stay
+        # saveable, so build it if auto-genotyping is the first thing run.
+        if self.pick_tree is None and self.genotyping_active and not self.area_mode:
+            self._build_pick_table()
         tree = ttk.Treeview(tblf, columns=cols, show="headings", height=8)
         widths = {"well": 56, "call": 74, "frac": 48, "hom1": 56, "hom2": 56,
                   "het1": 56, "het2": 56, "snr1": 46, "snr2": 46, "snr3": 46,
@@ -2251,8 +2372,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                             f"rows to {Path(path).name}.")
 
     def _gen_save(self):
-        if not self.genotyping_active:
-            return
         from genotyping import save_table
         rows = []
         if self.area_mode:

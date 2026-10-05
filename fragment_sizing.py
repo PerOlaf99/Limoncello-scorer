@@ -64,6 +64,12 @@ DEFAULT_SAMPLE_HEIGHT_FRAC = 0.03
 # (and its leave-one-out accuracy estimate) mean anything.
 MIN_LADDER_ANCHORS = 3
 
+# A size standard's bands have to stand clear of the baseline by a wide margin
+# before any of them may be believed.  Measured on this machine's M13 traces the
+# injection-region noise is 6-21 units against bands of 800-2100, so a real
+# ladder clears 100x comfortably; a channel holding nothing but noise does not.
+MIN_LADDER_SNR = 20.0
+
 
 @dataclass(frozen=True)
 class Ladder:
@@ -247,6 +253,27 @@ def load_ladder(spec) -> Ladder:
 # --------------------------------------------------------------------------- #
 # peak detection (numpy/scipy only -- mirrors genotyping's picker, not imports)
 # --------------------------------------------------------------------------- #
+def _baseline_noise(trace) -> float:
+    """Robust per-point noise SD of the flat injection region.
+
+    The first few hundred scans are before anything has entered the capillary,
+    so this is baseline.  Measured after the same median/Savitzky-Golay
+    smoothing ``detect_peaks`` applies, because that is the signal the
+    thresholds actually see.
+    """
+    from scipy.signal import medfilt, savgol_filter
+
+    y = np.asarray(trace, dtype=float).ravel()
+    if y.size < 32:
+        return 0.0
+    head = y[:min(400, y.size)]
+    if head.size >= 9:
+        head = savgol_filter(medfilt(head, 5), 9, 2, mode="interp")
+    # MAD -> SD, so a stray spike in the injection region does not set the scale
+    mad = float(np.median(np.abs(head - np.median(head))))
+    return mad * 1.4826
+
+
 def detect_peaks(trace, *, min_prominence_frac: float = 0.02,
                  min_height_frac: float = 0.03, cut: int = 0,
                  smooth: bool = True) -> List[Peak]:
@@ -532,6 +559,30 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
     ladder_peaks = detect_peaks(ladder_trace,
                                 min_prominence_frac=ladder_prominence_frac,
                                 min_height_frac=ladder_height_frac)
+
+    # Every threshold in ``detect_peaks`` is a fraction of the largest sample in
+    # its own channel, which is right for picking peaks out of a busy trace but
+    # leaves nothing to say "this channel holds no ladder".  A channel of bare
+    # noise still has a largest sample, so it still yields peaks, and a run with
+    # no size standard would be aligned against those and given confident
+    # lengths.  On this machine's own traces the injection-region baseline noise
+    # is ~6-21 units against bands of 800-2100, so require the largest ladder
+    # band to clear the baseline noise by a wide, measured margin.
+    noise = _baseline_noise(ladder_trace)
+    strongest = max((p.height for p in ladder_peaks), default=0.0)
+    if not ladder_peaks or noise <= 0.0 or strongest < MIN_LADDER_SNR * noise:
+        top = f"{strongest:.0f}" if noise > 0 else "n/a"
+        warnings.append(
+            f"no size standard in the ladder channel (largest peak {top} "
+            f"against noise {noise:.1f}, needs {MIN_LADDER_SNR:g}x); no lengths "
+            "were sized")
+        return SizingResult(ladder=ladder, ladder_channel=ladder_channel,
+                            sample_channel=sample_channel, base_order=order,
+                            anchors=[], quality=ladder_fit_quality([], []),
+                            rows=[], well=str(getattr(doc, "well", "")),
+                            file=Path(str(getattr(doc, "path", ""))).name,
+                            warnings=warnings)
+
     anchors = align_peaks([p.scan for p in ladder_peaks], ladder.lengths)
     quality = ladder_fit_quality([s for s, _ in anchors],
                                  [b for _, b in anchors])
