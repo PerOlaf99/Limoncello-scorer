@@ -355,31 +355,40 @@ The **Comments** menu sits between *Genotyping* and *Help*:
 
 ### Run conditions (voltage, time, temperature, PMT)
 
-These settings are **not stored in the `.rsd` file**. Its binary holds only the
-four channel traces, the current, and a short footer with the run/plate/sample
-identifiers, machine, application, base caller, chemistry and dye set. There is
-no temperature, voltage, injection or PMT field anywhere in it.
+These settings **are stored in the `.rsd`**, in a fixed-layout binary block that
+follows the text footer. Its first five `float32` values are, in order, the run
+voltage, run time, injection time, injection voltage and temperature; a 4-byte
+tag follows, then the two PMT voltages. No text export is needed.
 
-They live in the instrument's own raw-scan text export, which MegaBACE writes
-next to the traces in a `Text/` sub-folder as `Text/<well>.txt`:
+```
+Run Voltage       9        Run time          75 s
+Injection time   20 s      Injection voltage 10 kV
+Temperature      56 C      PMT Voltage1/2    750 / 750
+```
+
+The block is *located*, not read at a hard-coded offset, and a candidate is
+accepted only when all seven values fall in a range an electrophoresis run can
+actually take. That check matters: trace data can contain any bit pattern, so
+an unvalidated fixed-offset read eventually reports nonsense on some well. A
+scan of all 27,168 `.rsd` files in the sample runs (OY, SIDS, MB4000 demo)
+yields a value for every file and a consistent set within each of the 283 runs.
+
+If the instrument also left a raw-scan text export beside the trace
+(`Text/<well>.txt`), a few fields the binary does not carry are merged in — the
+plate name, instrument ID, `Number of lines` and the authoritative per-run
+`Base order` (dye per channel):
 
 ```
 Run Info for the file : D:\Data\plate01\A01.rsd
 Run Voltage : 9
-Run time : 60
-Injection time : 25
-Injection voltage : 10
-Temperature : 53
-PMT Voltage1: 750          <- separator spacing is inconsistent in the export
 Comment : Hel plate colo 829 DNA
-Grad 50_65C                <- free-text fields continue on following lines
+Grad 50_65C
 Inject 10KV, 60 sec, run 9kv, CTCE (53-50)x20
 ```
 
-When such an export is found beside the trace, Run info shows a **Run
-conditions** block with all of it, ordered with the headline settings first.
-The export is also the authoritative source for the per-run `Base order` (dye
-per channel) and `Number of lines`, which matches the `.rsd` scan count.
+Run info shows a **Run conditions** block with the headline settings first.
+Exports are optional (most OY runs have none), so those extras simply do not
+appear when the file is absent.
 
 Parsing notes: the encoding is detected (the files are UTF-8 in practice, but
 UTF-16 is handled), the key/value split uses the **first** colon only so that

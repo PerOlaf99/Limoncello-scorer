@@ -2686,15 +2686,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 if fld.get(key):
                     add(key, fld[key])
         add("Dye order (channels)", (self.base_order_var.get() or "ACTG").upper())
-        # Run voltage / time / temperature / PMT are not stored in the .rsd --
-        # they come from the instrument's own text export when one was written
-        # next to the traces.  Most OY/ runs have none, so say so plainly
-        # rather than showing blanks the user might read as "not recorded".
+        # Run voltage / time / temperature / PMT come out of the .rsd itself;
+        # a text export is merged in only for the extras it adds.
         rp = getattr(doc, "run_params", None) or {}
         rp_rows = run_params_summary(rp)
         chunks.append("")
         if rp_rows:
-            chunks.append("Run conditions (from text export)")
+            chunks.append("Run conditions (read from the .rsd)")
             for k, v in rp_rows:
                 if "\n" in v:
                     first, *rest = v.splitlines()
@@ -2712,7 +2710,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     break
             cur = (self.base_order_var.get() or "ACTG").upper()
             if exp_order and exp_order != cur:
-                add("Dye order note", f"export says {exp_order}, using {cur}")
+                add("Dye order note", f"run says {exp_order}, using {cur}")
             nl = ""
             for key, val in rp.items():
                 if key.strip().lower() == "number of lines" and val.strip().isdigit():
@@ -2723,8 +2721,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     f"export says {nl} lines, trace has {doc.n_scans}")
         else:
             chunks.append("Run conditions")
-            add("Voltage / time / temp", "not stored in the .rsd; no text "
-                                         "export found next to the trace")
+            add("Voltage / time / temp", "not recoverable from this file")
         add("Column layout", doc.base_order)
         add("Basecaller", self.basecaller.get())
         if doc.sequence:
@@ -3695,17 +3692,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "    These come from the file itself, so they are the record of what\n"
             "    was actually run — use them to tell two similar-looking plates\n"
             "    apart. RSD files without a footer simply show no Run block.\n"
-            "  • Run conditions are a separate block: Run Voltage, Run time,\n"
-            "    Injection time, Injection voltage, Temperature and PMT Voltage1/2\n"
-            "    are NOT stored inside the .rsd. They live in the instrument's own\n"
-            "    raw-scan text export, which it writes beside the traces in a\n"
-            "    'Text' sub-folder (Text/<well>.txt). When such an export sits next\n"
-            "    to the trace its settings are shown, along with the plate, run and\n"
-            "    comment text (including any CTCE cycle program). Most OY/ runs\n"
-            "    have no export, and then the block says so explicitly instead of\n"
-            "    showing blanks — export the run from the instrument again to fill\n"
-            "    it in. Note 'Base order' there is the authoritative per-run dye\n"
-            "    assignment; check it if a trace looks channel-swapped.\n\n"
+            "  • Run conditions are a separate block read out of the .rsd binary\n"
+            "    itself: Run Voltage, Run time, Injection time, Injection voltage,\n"
+            "    Temperature and PMT Voltage1/2. No text export is needed for them.\n"
+            "    When the instrument also left a raw-scan export beside the trace\n"
+            "    (Text/<well>.txt) a few extra fields are merged in, such as the\n"
+            "    plate name, instrument ID and the per-run base order — check the\n"
+            "    dye order there if a trace looks channel-swapped. A 'Dye order\n"
+            "    note' is shown when that disagrees with the order in use.\n\n"
             "8. KEYBOARD SHORTCUTS\n"
             "  ↑ / ↓ / PgUp / PgDn   page through wells\n"
 "  Space                 start / stop auto-tour\n"

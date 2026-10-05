@@ -228,3 +228,86 @@ def test_run_params_summary_puts_headline_fields_first(tmp_path):
     labels = [k for k, _ in rows]
     assert labels[:7] == list(analyzer_core.RUN_CONDITION_FIELDS)
     assert "Run Voltage" in labels and "Temperature" in labels
+
+
+# ---------------------------------------------------------------------------
+# Run conditions decoded from the .rsd binary
+# ---------------------------------------------------------------------------
+# The settings ARE in the .rsd: after the TLV text footer sits a fixed-layout
+# binary block whose first five floats are run voltage, run time, injection
+# time, injection voltage and temperature, with the two PMT voltages 24 bytes
+# later. These tests pin both the decoding and the range validation that keeps
+# arbitrary bit patterns in trace data from being reported as settings.
+
+def _rsd_with_settings(values=(9.0, 60.0, 25.0, 10.0, 53.0),
+                       pmt=(750.0, 750.0), pad_before=b""):
+    import struct as _struct
+    block = b"".join(_struct.pack("<f", v) for v in values)
+    block += b"\x02\x00\x00\x00"          # 4-byte tag, as in real files
+    block += b"".join(_struct.pack("<f", v) for v in pmt)
+    return pad_before + block
+
+
+def test_rsd_run_settings_decodes_all_seven_fields():
+    got = analyzer_core.parse_rsd_run_settings(_rsd_with_settings())
+    assert got["Run Voltage"] == "9"
+    assert got["Run time"] == "60"
+    assert got["Injection time"] == "25"
+    assert got["Injection voltage"] == "10"
+    assert got["Temperature"] == "53"
+    assert got["PMT Voltage1"] == "750"
+    assert got["PMT Voltage2"] == "750"
+
+
+def test_rsd_run_settings_found_at_any_offset():
+    """The block is located by content, not by a hard-coded file offset."""
+    for pad in (b"", b"\x00" * 3, b"\x00" * 17, b"abc\x00\x00"):
+        got = analyzer_core.parse_rsd_run_settings(_rsd_with_settings(pad_before=pad))
+        assert got.get("Temperature") == "53", pad
+
+
+def test_rsd_run_settings_rejects_implausible_values():
+    """Trace data can hold any bit pattern; bogus settings must be refused."""
+    # A run cannot be 3400 kV, or 900 s at 0 V, or 900 C.
+    assert analyzer_core.parse_rsd_run_settings(
+        _rsd_with_settings(values=(3400.0, 60.0, 25.0, 10.0, 53.0))) == {}
+    assert analyzer_core.parse_rsd_run_settings(
+        _rsd_with_settings(values=(9.0, 60.0, 25.0, 0.0, 53.0))) == {}
+    assert analyzer_core.parse_rsd_run_settings(
+        _rsd_with_settings(values=(9.0, 60.0, 25.0, 10.0, 900.0))) == {}
+    # Plausible voltages but nonsense PMT must not be accepted either.
+    assert analyzer_core.parse_rsd_run_settings(
+        _rsd_with_settings(pmt=(3.0, 0.5))) == {}
+
+
+def test_rsd_run_settings_ignores_nan_and_empty():
+    import struct as _struct
+    nan = b"".join(_struct.pack("<f", float("nan")) for _ in range(5))
+    assert analyzer_core.parse_rsd_run_settings(nan) == {}
+    assert analyzer_core.parse_rsd_run_settings(b"") == {}
+    assert analyzer_core.parse_rsd_run_settings(b"\x00" * 8) == {}
+
+
+def test_rsd_run_settings_allows_long_injection_time():
+    """One real plate used a 220 s injection -- the bound must not be tight."""
+    got = analyzer_core.parse_rsd_run_settings(
+        _rsd_with_settings(values=(9.0, 75.0, 220.0, 10.0, 53.0)))
+    assert got["Injection time"] == "220"
+
+
+def test_real_rsd_files_expose_run_conditions():
+    """Guards the decoder against the actual files on disk."""
+    cases = [
+        ("/media/per/SIDS/mt_nucl/130323_mt_nucl_#8_grad_50_65CRun01/A01.rsd",
+         {"Run Voltage": "9", "Run time": "60", "Temperature": "53",
+          "PMT Voltage1": "750"}),
+        ("/media/per/78B0C7DE1FA7081C/OY/OY_rs1695_N2_210910Run01/A04.rsd",
+         {"Run Voltage": "9", "Run time": "75", "Temperature": "56"}),
+    ]
+    for spec, want in cases:
+        p = Path(spec)
+        if not p.exists():
+            pytest.skip(f"sample data not present: {spec}")
+        doc = load_trace(p)
+        for key, val in want.items():
+            assert doc.run_params.get(key) == val, f"{p.name}:{key}"

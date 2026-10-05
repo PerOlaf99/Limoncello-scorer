@@ -277,6 +277,76 @@ def parse_rsd_footer(footer_raw) -> dict:
     return out
 
 
+# Field labels for the run-settings block recovered from the RSD binary, in
+# the order the values appear. The 0x01/0x02 byte plus two floats sit between
+# the settings and the PMT pair; that gap is why the PMT values are not simply
+# the next two floats after the temperature.
+_RSD_RUN_FIELDS = (
+    ("Run Voltage", "kV", 1.0, 25.0),      # float 0
+    ("Run time", "s", 20.0, 400.0),        # float 1
+    ("Injection time", "s", 1.0, 400.0),   # float 2
+    ("Injection voltage", "kV", 1.0, 40.0),  # float 3
+    ("Temperature", "C", 10.0, 100.0),     # float 4
+)
+_RSD_PMT_RANGE = (100.0, 2000.0)
+
+
+def parse_rsd_run_settings(footer_raw) -> dict:
+    """Recover Run Voltage / time / Temperature / PMT from the RSD binary.
+
+    The TLV footer ends at some offset and the remainder of the file is a
+    fixed-layout binary block. Its first five floats are, in order, the run
+    voltage, run time, injection time, injection voltage and temperature;
+    four bytes and two small floats later come the two PMT voltages.
+
+    The layout is *found*, not assumed: a candidate is accepted only when all
+    five settings fall in the range an electrophoresis run can actually take
+    (a capillary run is a few kV, tens of seconds, tens of degrees C) and the
+    two later floats are plausible PMT settings. Scanning with bounds is what
+    makes this safe -- trace data can contain any bit pattern, so an
+    unvalidated "read 5 floats at a fixed offset" would eventually report a
+    voltage of 3400 V on some well.
+
+    Returns ``{}`` when no plausible block is found. That is a real case:
+    a handful of wells have an unusual trailing structure, and the caller
+    shows nothing rather than guessing.
+    """
+    if not footer_raw:
+        return {}
+    if isinstance(footer_raw, str):
+        footer_raw = footer_raw.encode("latin-1", "replace")
+    b = bytes(footer_raw)
+    # The block spans base..base+31, so the last candidate base is len-32
+    # (inclusive). Anything shorter cannot hold a full block.
+    if len(b) < 32:
+        return {}
+    lo_pmt, hi_pmt = _RSD_PMT_RANGE
+    for base in range(0, len(b) - 31):
+        try:
+            vals = struct.unpack_from("<5f", b, base)
+        except struct.error:
+            break
+        ok = True
+        for v, (_label, _unit, lo, hi) in zip(vals, _RSD_RUN_FIELDS):
+            # Reject NaN/inf and out-of-range values. Comparing with a chain
+            # of bounds also rejects NaN, since every NaN comparison is False.
+            if not (lo <= v <= hi):
+                ok = False
+                break
+        if not ok:
+            continue
+        pmt = struct.unpack_from("<2f", b, base + 24)
+        if not (lo_pmt <= pmt[0] <= hi_pmt and lo_pmt <= pmt[1] <= hi_pmt):
+            continue
+        out = {}
+        for (label, unit, _lo, _hi), v in zip(_RSD_RUN_FIELDS, vals):
+            out[label] = f"{v:g}"
+        out["PMT Voltage1"] = f"{pmt[0]:g}"
+        out["PMT Voltage2"] = f"{pmt[1]:g}"
+        return out
+    return {}
+
+
 def rsd_footer_summary(fields: dict) -> str:
     """One short, readable line describing an RSD run for ``TraceDocument.meta``.
 
@@ -295,13 +365,14 @@ def rsd_footer_summary(fields: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# MegaBACE "raw scan" text export (run conditions)
+# MegaBACE "raw scan" text export (optional extras)
 # ---------------------------------------------------------------------------
-# The .rsd binary carries only a short footer (plate, sample, well, machine,
-# application, base caller, chemistry, dye).  The instrument settings a user
-# expects in "Run info" -- Run Voltage, Run time, Injection time/voltage,
-# Temperature, PMT Voltage1/2 -- are *not* in the .rsd at all.  They live in
-# the instrument's own tab-separated text export, written next to the traces
+# The settings a user expects in "Run info" -- Run Voltage, Run time,
+# Injection time/voltage, Temperature, PMT Voltage1/2 -- are read straight out
+# of the .rsd by :func:`parse_rsd_run_settings`, so no export is needed for
+# them. The instrument's tab-separated text export is still consulted when
+# present, because it carries a few things the binary does not (plate name,
+# instrument ID, base order, run start/stop). It is written next to the traces
 # in a per-run ``Text/`` folder (e.g. ``Text/A01.txt``):
 #
 #     Run Info for the file : D:\Data\<plate>\A01.rsd
@@ -319,7 +390,7 @@ def rsd_footer_summary(fields: dict) -> str:
 #   * free-text fields (notably "Comment") continue onto following lines
 #     that have no colon at all, e.g. the CTCE cycle program.
 #
-# These exports are optional: most OY/ runs here have none, so every reader
+# These exports are optional -- most OY/ runs here have none -- so every reader
 # below is best-effort and callers must cope with an empty result.
 
 # Fields the user looks for first, in display order.
@@ -848,14 +919,20 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
     cur = getattr(rsd, "current_raw", None)
     if cur is None:
         cur = getattr(rsd, "current", None)
-    fields = parse_rsd_footer(getattr(rsd, "footer_raw", b""))
+    footer_raw = getattr(rsd, "footer_raw", b"")
+    fields = parse_rsd_footer(footer_raw)
     meta = rsd_footer_summary(fields)
     # The instrument's own SAMPLE NAME / WELL ID are more trustworthy than the
     # filename (a plate can be renamed or re-exported), so prefer them.
     well = fields.get("WELL ID") or fields.get("SAMPLE NAME") or path.stem
-    # Run voltage/time/temperature/PMT are absent from the .rsd; they live in
-    # the sibling text export when the instrument wrote one.
-    run_params = load_run_params(path, well)
+    # Run voltage/time/temperature/PMT are *in* the .rsd, in the binary block
+    # after the text footer. A sibling text export is used only to fill in
+    # extras the binary does not carry (plate name, instrument ID, base order).
+    run_params = parse_rsd_run_settings(footer_raw)
+    export = load_run_params(path, well)
+    for k, v in export.items():
+        if not k.startswith("_"):
+            run_params.setdefault(k, v)
     return TraceDocument(
         path=path,
         well=well,
