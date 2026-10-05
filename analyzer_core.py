@@ -211,6 +211,7 @@ class TraceDocument:
     source: str = "rsd"  # rsd | abi | scf | text
     meta: str = ""       # free-form instrument/source info for exports
     footer_fields: dict = field(default_factory=dict)  # decoded RSD run fields
+    run_params: dict = field(default_factory=dict)  # run conditions from Text/ export
 
     @property
     def n_scans(self) -> int:
@@ -291,6 +292,202 @@ def rsd_footer_summary(fields: dict) -> str:
     parts = [f"{k}={fields[k]}" for k in order if fields.get(k)]
     # Keep it to one line: the full set is available in Run info.
     return "RSD | " + ", ".join(parts[:5])
+
+
+# ---------------------------------------------------------------------------
+# MegaBACE "raw scan" text export (run conditions)
+# ---------------------------------------------------------------------------
+# The .rsd binary carries only a short footer (plate, sample, well, machine,
+# application, base caller, chemistry, dye).  The instrument settings a user
+# expects in "Run info" -- Run Voltage, Run time, Injection time/voltage,
+# Temperature, PMT Voltage1/2 -- are *not* in the .rsd at all.  They live in
+# the instrument's own tab-separated text export, written next to the traces
+# in a per-run ``Text/`` folder (e.g. ``Text/A01.txt``):
+#
+#     Run Info for the file : D:\Data\<plate>\A01.rsd
+#     Sample name : A01
+#     Run Voltage : 9
+#     Temperature : 53
+#     PMT Voltage1: 750          <- note: no space before the colon
+#     Scan<TAB>Channel1<TAB>Channel2<TAB>Channel3<TAB>Channel4<TAB>Current
+#     0<TAB>...
+#
+# Two details that a naive "split on ':'" parser gets wrong:
+#   * the colon separator is inconsistently spaced ("Run Voltage :" vs
+#     "PMT Voltage1:"), and values such as the Windows source path contain
+#     their own colons -- split on the FIRST colon only;
+#   * free-text fields (notably "Comment") continue onto following lines
+#     that have no colon at all, e.g. the CTCE cycle program.
+#
+# These exports are optional: most OY/ runs here have none, so every reader
+# below is best-effort and callers must cope with an empty result.
+
+# Fields the user looks for first, in display order.
+RUN_CONDITION_FIELDS = (
+    "Run Voltage", "Run time", "Injection time", "Injection voltage",
+    "Temperature", "PMT Voltage1", "PMT Voltage2",
+)
+
+# Header row that ends the metadata block.
+_EXPORT_COL_HEADER = "channel1"
+
+_run_export_cache: Dict[Tuple[str, int, int], dict] = {}
+
+
+def _decode_export_bytes(raw: bytes) -> str:
+    """Decode a text export, tolerating UTF-16/UTF-8/latin-1 and stray NULs.
+
+    The encoding has to be *detected*, not guessed by try-order: Python's
+    ``utf-16`` codec does not raise when the byte stream lacks a BOM, it just
+    decodes as little-endian and yields silent garbage.  So decide from the
+    BOM first, then from the NUL-byte pattern, and only fall back to
+    single-byte decoders.
+    """
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        enc = "utf-16" if raw[:2] == b"\xff\xfe" else "utf-16-be"
+        return raw.decode(enc, errors="replace")
+    head = raw[:4096]
+    if head:
+        # Real UTF-16 (BOM stripped or not) puts a NUL in every other byte.
+        even_nul = head[0::2].count(0)
+        odd_nul = head[1::2].count(0)
+        pairs = len(head) // 2
+        if pairs and (even_nul + odd_nul) / (2.0 * pairs) > 0.3:
+            return raw.decode("utf-16-le" if odd_nul >= even_nul else "utf-16-be",
+                              errors="replace")
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        return text.replace("\x00", "")
+    return raw.decode("latin-1", errors="replace")
+
+
+def _split_export_key(line: str):
+    """Return (key, value) if *line* starts a new field, else None."""
+    if ":" not in line:
+        return None
+    key, _, value = line.partition(":")
+    key = key.strip()
+    # Guard against treating a continuation line that happens to contain a
+    # colon as a new key: real keys are short words, never paths.
+    if not key or len(key) > 40:
+        return None
+    if any(ch in key for ch in ("\\", "/")):
+        return None
+    return key, value.strip()
+
+
+def parse_run_export(path) -> dict:
+    """Parse the metadata block of a MegaBACE raw-scan text export.
+
+    Returns a dict of the ``Key : Value`` pairs found above the channel
+    header row.  Multi-line values (e.g. "Comment") are joined with newlines.
+    Returns ``{}`` if the file is missing or has no recognisable header --
+    callers must not assume any particular key is present.
+    """
+    path = Path(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    ck = (str(path), int(st.st_mtime), int(st.st_size))
+    if ck in _run_export_cache:
+        return _run_export_cache[ck]
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return {}
+    text = _decode_export_bytes(head)
+    fields: Dict[str, str] = {}
+    last: Optional[str] = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip("﻿")
+        if not line:
+            continue
+        if _EXPORT_COL_HEADER in line.lower() and line.lower().startswith("scan"):
+            break  # start of the numeric table; metadata ends here
+        kv = _split_export_key(line)
+        if kv is not None:
+            key, value = kv
+            if key in fields and value:
+                fields[key] = f"{fields[key]}\n{value}".strip()
+            else:
+                fields[key] = value
+            last = key
+        elif last is not None:
+            # Continuation of the previous (free-text) field.
+            fields[last] = f"{fields[last]}\n{line}".strip()
+    _run_export_cache[ck] = fields
+    return fields
+
+
+def find_run_export(run_dir, well: str) -> Optional[Path]:
+    """Locate the text export for *well* inside run folder *run_dir*.
+
+    The instrument writes them as ``<run_dir>/Text/<well>.txt``; a couple of
+    alternative spellings/extensions are accepted so hand-copied exports are
+    still picked up.  Returns ``None`` when the run has no export -- which is
+    the normal case for the OY/ runs.
+    """
+    if not run_dir or not well:
+        return None
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        return None
+    names = [f"{well}.txt", f"{well}.csv", f"{well}.TXT", f"{well.lower()}.txt"]
+    for sub in ("Text", "text", "TXT", "txt"):
+        for name in names:
+            cand = run_dir / sub / name
+            if cand.is_file():
+                return cand
+    for name in names:
+        cand = run_dir / name
+        if cand.is_file():
+            return cand
+    return None
+
+
+def load_run_params(path, well: str = "") -> dict:
+    """Run conditions for the well at *path*, from its sibling text export.
+
+    ``path`` is the trace file itself (e.g. ``A01.rsd``); the export is looked
+    up beside it.  Returns ``{}`` when there is no export or no metadata.
+    """
+    path = Path(path)
+    export = find_run_export(path.parent, well or path.stem)
+    if export is None:
+        return {}
+    fields = parse_run_export(export)
+    if fields:
+        fields = dict(fields)
+        fields.setdefault("_export", export.name)
+    return fields
+
+
+def run_params_summary(params: dict) -> List[Tuple[str, str]]:
+    """Ordered ``(label, value)`` pairs for displaying run conditions.
+
+    The seven headline fields come first, in the order a user reads them;
+    everything else follows in file order.  Empty values are dropped.
+    """
+    if not params:
+        return []
+    lookup = {k.strip().lower(): v for k, v in params.items()}
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    for key in RUN_CONDITION_FIELDS:
+        val = lookup.get(key.lower(), "")
+        if val:
+            out.append((key, val))
+            seen.add(key.lower())
+    for key, val in params.items():
+        if key.startswith("_") or not val or key.strip().lower() in seen:
+            continue
+        out.append((key, val))
+    return out
 
 
 RFD_EXTS = (".rsd", ".RSD")
@@ -656,6 +853,9 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
     # The instrument's own SAMPLE NAME / WELL ID are more trustworthy than the
     # filename (a plate can be renamed or re-exported), so prefer them.
     well = fields.get("WELL ID") or fields.get("SAMPLE NAME") or path.stem
+    # Run voltage/time/temperature/PMT are absent from the .rsd; they live in
+    # the sibling text export when the instrument wrote one.
+    run_params = load_run_params(path, well)
     return TraceDocument(
         path=path,
         well=well,
@@ -666,6 +866,7 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
         source="rsd",
         meta=meta,
         footer_fields=fields,
+        run_params=run_params,
     )
 
 

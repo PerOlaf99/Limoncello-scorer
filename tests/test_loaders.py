@@ -120,3 +120,111 @@ def test_loaded_rsd_exposes_decoded_run_fields():
     assert doc.well == (fields.get("WELL ID") or fields.get("SAMPLE NAME")
                         or doc.path.stem)
     assert "\\x" not in doc.meta
+
+
+# ---------------------------------------------------------------------------
+# Run conditions from the instrument's own text export
+# ---------------------------------------------------------------------------
+# Run Voltage / time / injection / temperature / PMT are NOT in the .rsd.
+# They only exist in the MegaBACE raw-scan export, so these tests pin the two
+# parsing traps: the inconsistent ": " separator and the free-text fields
+# that continue onto following lines.
+
+_EXPORT = """Run Info for the file : D:\\Data\\plate01\\A01.rsd
+Sample name : A01
+Plate name : plate01
+Comment : Hel plate colo 829 DNA
+Grad 50_65C
+Inject 10KV, 60 sec, run 9kv, CTCE (53-50)x20
+Chemistry name : ET Terminators
+Base Caller : Cimarron 3.12
+Run Voltage : 9
+Run time : 60
+Injection time : 25
+Injection voltage : 10
+Temperature : 53
+PMT Voltage1: 750
+PMT Voltage2: 750
+Base order : TGCA
+Number of lines : 12
+Scan\tChannel1\tChannel2\tChannel3\tChannel4\tCurrent
+0\t1\t2\t3\t4\t5
+1\t6\t7\t8\t9\t10
+"""
+
+
+def _write_export(tmp_path, text, encoding="utf-8"):
+    run = tmp_path / "plate01"
+    (run / "Text").mkdir(parents=True)
+    path = run / "Text" / "A01.txt"
+    path.write_bytes(text.encode(encoding))
+    return run
+
+
+def test_run_export_parses_the_seven_headline_fields(tmp_path):
+    run = _write_export(tmp_path, _EXPORT)
+    f = analyzer_core.parse_run_export(run / "Text" / "A01.txt")
+    assert f["Run Voltage"] == "9"
+    assert f["Run time"] == "60"
+    assert f["Injection time"] == "25"
+    assert f["Injection voltage"] == "10"
+    assert f["Temperature"] == "53"
+    assert f["PMT Voltage1"] == "750"   # note: no space before the colon
+    assert f["PMT Voltage2"] == "750"
+
+
+def test_run_export_keeps_colon_in_windows_path(tmp_path):
+    """'Run Info for the file : D:\\Data\\...' must split on the FIRST colon."""
+    run = _write_export(tmp_path, _EXPORT)
+    f = analyzer_core.parse_run_export(run / "Text" / "A01.txt")
+    assert f["Run Info for the file"] == "D:\\Data\\plate01\\A01.rsd"
+
+
+def test_run_export_joins_multiline_comment(tmp_path):
+    run = _write_export(tmp_path, _EXPORT)
+    f = analyzer_core.parse_run_export(run / "Text" / "A01.txt")
+    assert "CTCE (53-50)x20" in f["Comment"]
+    assert "Grad 50_65C" in f["Comment"]
+
+
+def test_run_export_stops_before_the_numeric_table(tmp_path):
+    """Data rows must not be mistaken for metadata keys."""
+    run = _write_export(tmp_path, _EXPORT)
+    f = analyzer_core.parse_run_export(run / "Text" / "A01.txt")
+    assert "0" not in f
+    assert "Channel1" not in f
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16-le", "utf-16"])
+def test_run_export_detects_encoding(tmp_path, encoding):
+    """utf-16 without a BOM must still decode, not silently become mojibake."""
+    run = _write_export(tmp_path, _EXPORT, encoding=encoding)
+    f = analyzer_core.parse_run_export(run / "Text" / "A01.txt")
+    assert f.get("Temperature") == "53"
+    assert f.get("Run Voltage") == "9"
+
+
+def test_find_run_export_and_load_run_params(tmp_path):
+    run = _write_export(tmp_path, _EXPORT)
+    found = analyzer_core.find_run_export(run, "A01")
+    assert found is not None and found.name == "A01.txt"
+    rp = analyzer_core.load_run_params(run / "A01.rsd")  # file need not exist
+    assert rp["Temperature"] == "53"
+
+
+def test_no_text_export_yields_empty_params(tmp_path):
+    """The common case (OY/ runs have none) must degrade quietly."""
+    run = tmp_path / "plate01"
+    run.mkdir()
+    assert analyzer_core.find_run_export(run, "A01") is None
+    assert analyzer_core.load_run_params(run / "A01.rsd") == {}
+    assert analyzer_core.run_params_summary({}) == []
+
+
+def test_run_params_summary_puts_headline_fields_first(tmp_path):
+    run = _write_export(tmp_path, _EXPORT)
+    rows = analyzer_core.run_params_summary(
+        analyzer_core.parse_run_export(run / "Text" / "A01.txt"))
+    labels = [k for k, _ in rows]
+    assert labels[:7] == list(analyzer_core.RUN_CONDITION_FIELDS)
+    assert "Run Voltage" in labels and "Temperature" in labels

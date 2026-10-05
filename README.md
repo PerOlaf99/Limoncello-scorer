@@ -353,6 +353,42 @@ The **Comments** menu sits between *Genotyping* and *Help*:
   beamsplitter/filter part numbers and the dye per channel — so two
   similar-looking plates can be told apart from the file itself.
 
+### Run conditions (voltage, time, temperature, PMT)
+
+These settings are **not stored in the `.rsd` file**. Its binary holds only the
+four channel traces, the current, and a short footer with the run/plate/sample
+identifiers, machine, application, base caller, chemistry and dye set. There is
+no temperature, voltage, injection or PMT field anywhere in it.
+
+They live in the instrument's own raw-scan text export, which MegaBACE writes
+next to the traces in a `Text/` sub-folder as `Text/<well>.txt`:
+
+```
+Run Info for the file : D:\Data\plate01\A01.rsd
+Run Voltage : 9
+Run time : 60
+Injection time : 25
+Injection voltage : 10
+Temperature : 53
+PMT Voltage1: 750          <- separator spacing is inconsistent in the export
+Comment : Hel plate colo 829 DNA
+Grad 50_65C                <- free-text fields continue on following lines
+Inject 10KV, 60 sec, run 9kv, CTCE (53-50)x20
+```
+
+When such an export is found beside the trace, Run info shows a **Run
+conditions** block with all of it, ordered with the headline settings first.
+The export is also the authoritative source for the per-run `Base order` (dye
+per channel) and `Number of lines`, which matches the `.rsd` scan count.
+
+Parsing notes: the encoding is detected (the files are UTF-8 in practice, but
+UTF-16 is handled), the key/value split uses the **first** colon only so that
+Windows paths survive, and fields such as `Comment` may span several lines.
+
+Most `OY/` runs on this system have no `Text/` export — only the `mt_nucl`
+runs do. When none is found, the block says so explicitly rather than showing
+empty values; re-export the run from the instrument software to populate it.
+
 ## Scoring, QC and reports (`scorer.py`)
 
 `scorer.py` is the headless half of the tool and needs neither tkinter nor
