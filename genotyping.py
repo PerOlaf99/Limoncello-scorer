@@ -98,42 +98,55 @@ class _Record(dict):
 # --------------------------------------------------------------------------- #
 # rs1695 internal-standard detection
 # --------------------------------------------------------------------------- #
-# On a CTC-CE run the internal standard is always present as four equimolar
-# peaks, so it can be found without the click-pick dance that ``mark_std``
-# otherwise needs.  The geometry is fixed by the chemistry: the two homoduplexes
-# are one SNP base apart, the heteroduplexes are one mismatch base from
-# Watson/Crick re-annealing, so d1 ~ d3 and d2 is roughly 2.5x either.
+# The internal standard is always present as four equimolar bands (the two
+# homoduplexes plus the two heteroduplexes of one and the same fragment).  That
+# equimolarity is the load-bearing prior and it is the only one that is
+# assay-general: it holds whatever the fragment, whatever the run temperature.
 #
-# The equimolar prior matters as much as the spacing.  Requiring the weakest of
-# the four to be at least 40% of the strongest is what keeps an arbitrary run of
-# four peaks from being read as a standard.
-IS_MIN_SPACING = 25.0        # scans; d1 and d3 (one SNP base)
-IS_OUTER_TOL = 0.75          # |d1 - d3| <= this * dm
-IS_MID_LO, IS_MID_HI = 1.7, 3.3   # d2, in units of dm
-IS_EQUIMOLAR_MIN = 0.40      # min(height) / max(height) across the four
+# There is deliberately NO hard-coded geometry here.  An earlier version carried
+# T9's measured d1=25, d3=25, d2=2.5*d1 as a fallback, on the reasoning that
+# those spacings are set by the chemistry.  They are not: the operator's own
+# marks on other assays break all three at once.
+#
+#   IS_MIN_SPACING  25.0   but ABCC2's d3 (the one-SNP gap HET1->HET2) is 12
+#   IS_MID_HI        3.3   but ABCC2's d2/d1 is 3.36
+#   IS_SAT_SKIP  (10, 32)  and ABCC2's HET2 sits 12 scans behind HET1
+#
+# The one-SNP gap is a *migration* distance and depends on the fragment's
+# length, the gel and the temperature; the heteroduplexes can be anywhere from
+# merged to 116 scans apart.  So the shape is learned per plate from a few
+# operator marks (PlateISModel) and the position drifts per capillary on top of
+# that.  Where no shape is known yet, detection falls back on equimolarity plus
+# "all bands are the same fragment, so they cluster" -- see
+# :func:`_search_equimolar_group` -- which makes no claim about spacing.
+IS_EQUIMOLAR_MIN = 0.40      # min(height) / max(height) across the standard
+# Widest peak-to-peak span still accepted as one fragment's standard, when no
+# shape is known. Measured over the 327 operator-marked wells in IS.csv across
+# five plates: median 305 scans, 99th percentile 589, widest 650 (all on
+# GSTA1_N11). 750 leaves headroom over the widest real standard seen while
+# still refusing equimolar peaks that belong to different species.
+IS_GROUP_SPAN = 750.0
+# How far the shape tolerances are widened, in order, when the fitted geometry
+# does not match a capillary. Applied to the shape only -- the position window
+# is never widened with them, because position is what the operator's marks
+# pinned down and shape is what drifted.
+SHAPE_RELAX_FACTORS = (1.6, 2.5, 4.0)
+# Absolute floor for a band to count as a standard at all, in units of the
+# channel's noise. This is not a quality cutoff -- it only separates "there is a
+# standard here" from "there is no signal on this channel", and is applied even
+# when the plate has enough references to judge relatively, because a plate
+# average cannot detect that an individual well is empty.
+STD_ABS_SNR_FLOOR = 12.0
+# Once this many wells contribute to a shape fit, the tolerance is set from the
+# trimmed spread rather than the widest deviation, so a few mis-assigned wells
+# cannot widen the search past the point where it discriminates.
+TRIM_MIN_WELLS = 8
+TRIM_FRACTION = 0.05
 IS_PROMINENCE_FRAC = 0.010
 IS_HEIGHT_FRAC = 0.020
 IS_SAT_SKIP = (10, 32)       # a +A tail sits this many scans behind its parent
 IS_SAT_RATIO = 1.15
-IS_MAX_CANDIDATES = 60       # keep the O(n^4) search bounded
-
-# --- plate-learned geometry -------------------------------------------------
-#
-# The four constants above are NOT assay-general.  They were fitted to the T9
-# rs1695 plate, and on the ABCC2 N10 plate the operator's own hand marks break
-# all three of them at once:
-#
-#   IS_MIN_SPACING  25.0   but ABCC2's d3 (the one-SNP gap HET1->HET2) is 12
-#   IS_MID_HI        3.3   but ABCC2's d2/d1 is 3.36
-#   IS_SAT_SKIP  (10, 32)  and ABCC2's HET2 sits 12 scans behind HET1, slightly
-#                          shorter -- so it was being deleted as a +A satellite
-#                          before the quartet search ever ran
-#
-# The measured spacings are very stable (d1 IQR 7, d3 IQR 2 scans across 22
-# wells) while the whole quartet slides 418 scans across the plate.  So the
-# *shape* is a property of the assay and belongs in a model fitted from the
-# operator's marks; only the *position* drifts per capillary.  T9 stays the
-# fallback so an unmarked plate still behaves exactly as it did.
+IS_MAX_CANDIDATES = 60       # keep the search bounded
 
 
 class ISGeometry:
@@ -180,11 +193,19 @@ class ISGeometry:
 
     @classmethod
     def from_quartets(cls, quartets, center_tol=None):
-        """Fit a template from the operator's marked quartets.
+        """Fit a template from a set of four-band wells.
 
         Each entry is four ascending scan positions.  Robust spreads (median
         absolute deviation) rather than min/max, so one mis-marked well widens
         the window slightly instead of blowing it open.
+
+        Which spread is used depends on how much evidence there is.  From a
+        couple of operator marks, the widest deviation observed is used, because
+        a tolerance that rejects a well the operator marked by hand is worse
+        than useless.  From many machine-found wells the extremes are trimmed
+        instead: a handful of mis-assigned wells would otherwise set the
+        tolerance several times wider than the real spread, and the search would
+        stop discriminating between a standard and any other three peaks.
         """
         qs = [sorted(int(x) for x in q) for q in quartets
               if q is not None and len(q) == 4]
@@ -199,14 +220,19 @@ class ISGeometry:
         med = _st.median(ctr)
         # cover every marked well, then a margin for an unmarked capillary
         span = max(abs(c - med) for c in ctr) + 25.0
+        trim = len(qs) >= TRIM_MIN_WELLS
 
         def _tol(i, floor):
-            # Widest deviation actually observed, not a robust spread estimate.
-            # MAD*2 came out narrower than the operator's own marks (d1 needed
-            # 12 scans and the fit gave 10, d3 needed 5 and the fit gave 3), and
-            # a tolerance that rejects a hand-marked well is worse than useless.
-            return max(floor, max(abs(q[i + 1] - q[i] - _st.median(
-                [x[i + 1] - x[i] for x in qs])) for q in qs) * 1.25)
+            devs = sorted(abs(q[i + 1] - q[i] - _st.median(
+                [x[i + 1] - x[i] for x in qs])) for q in qs)
+            if trim:
+                # Drop the worst few on each side. Measured on a 96-well plate
+                # the true d1 spread was 88-110 (p5-p95); letting a single
+                # outlier set the tolerance gave +-28 and admitted quartets that
+                # belonged to other species.
+                keep = devs[:max(1, int(len(devs) * (1.0 - TRIM_FRACTION)))]
+                return max(floor, keep[-1] * 1.25)
+            return max(floor, devs[-1] * 1.25)
 
         return cls(d1, d2, d3,
                    tol1=_tol(0, 4.0), tol2=_tol(1, 6.0), tol3=_tol(2, 4.0),
@@ -237,11 +263,6 @@ class ISGeometry:
         g.tol2 = max(6.0, max(abs(t[2] - t[1] - d2) for t in ts) * 1.25)
         return g
 
-    @classmethod
-    def t9_default(cls):
-        """The shape implied by the original T9 constants."""
-        return cls(IS_MIN_SPACING, 2.5 * IS_MIN_SPACING, IS_MIN_SPACING)
-
     def describe(self):
         d3 = "het merged" if self.merged else f"d3={self.d3:.0f}±{self.tol3:.0f}"
         return (f"d1={self.d1:.0f}±{self.tol1:.0f} "
@@ -270,6 +291,17 @@ class ISGeometry:
         return (abs(d1 - self.d1) <= self.tol1
                 and abs(d2 - self.d2) <= self.tol2
                 and abs(d3 - self.d3) <= self.tol3)
+
+
+def _band_heights(y, scans):
+    """Smallest and largest apex height among *scans*, for the equimolarity
+    ratio. Returns ``(0.0, 0.0)`` for an empty selection so callers get a
+    ratio of 0 rather than a ZeroDivisionError."""
+    hs = [float(np.max(y[max(0, int(s) - 6):int(s) + 7]))
+          for s in scans if len(y)]
+    if not hs:
+        return 0.0, 0.0
+    return min(hs), max(hs)
 
 
 def weakest_std_band_snr(acgt, is_col, scans):
@@ -456,35 +488,46 @@ def _is_candidates(trace, cut=1900, geometry=None):
     return sorted(kept, key=lambda c: c[0])[:IS_MAX_CANDIDATES]
 
 
-def _legacy_matches(a, b, c, d):
-    """The original hard-coded T9 geometry test, kept for unmarked plates."""
-    d1, d2, d3 = b - a, c - b, d - c
-    if d1 < IS_MIN_SPACING or d3 < IS_MIN_SPACING:
-        return False
-    dm = (d1 + d3) / 2.0
-    return (abs(d1 - d3) <= IS_OUTER_TOL * dm
-            and IS_MID_LO * dm <= d2 <= IS_MID_HI * dm)
-
-
 def _equimolar(heights):
     lo, hi = min(heights), max(heights)
     return lo > 0 and lo / hi >= IS_EQUIMOLAR_MIN
 
 
-def _search_legacy_quartet(pk):
-    """Best quartet under the original hard-coded T9 geometry."""
+def _search_equimolar_group(pk, want=None):
+    """Best equimolar cluster of one fragment's bands, with no shape assumed.
+
+    This is what runs on a plate whose geometry has not been learned yet.  It
+    claims nothing about spacing, because spacing is what varies between
+    fragments -- only two things are assumed, and both are properties of the
+    assay rather than of any one run:
+
+      * the standard is equimolar (a stoichiometric duplex mixture), and
+      * all of its bands belong to one fragment, so they migrate within a
+        bounded window of each other.
+
+    *want* is the number of bands to return, or ``None`` to take the strongest
+    group of 3 or 4 -- three because the heteroduplexes normally co-migrate and
+    a resolved HET2 is optional.  Scoring is by summed prominence, so among
+    equally-shaped candidates the strongest real bands win over a marginal
+    noise ripple.
+    """
+    n = len(pk)
+    if n < 3:
+        return None
     best = None
-    for combo in combinations(range(len(pk)), 4):
-        picks = [pk[i] for i in combo]
-        scans = [p[0] for p in picks]
-        if not _legacy_matches(*scans):
-            continue
-        h = [p[1] for p in picks]
-        if not _equimolar(h):
-            continue
-        score = sum(p[2] for p in picks)
-        if best is None or score > best[0]:
-            best = (score, scans, h)
+    sizes = (3, 4) if want is None else (want,)
+    for size in sizes:
+        for combo in combinations(range(n), size):
+            picks = [pk[i] for i in combo]
+            scans = [p[0] for p in picks]
+            if scans[-1] - scans[0] > IS_GROUP_SPAN:
+                continue
+            h = [p[1] for p in picks]
+            if not _equimolar(h):
+                continue
+            score = sum(p[2] for p in picks)
+            if best is None or score > best[0]:
+                best = (score, scans, h)
     return None if best is None else (best[1], best[2])
 
 
@@ -550,7 +593,7 @@ def _search_core(pk, geometry):
 def _search_quartets(pk, geometry, want=4):
     """Backwards-compatible entry point used by the unmarked-plate path."""
     if geometry is None:
-        return _search_legacy_quartet(pk)
+        return _search_equimolar_group(pk)
     return _search_core(pk, geometry)
 
 
@@ -575,12 +618,15 @@ def find_is_quartet(trace, cut=1900, geometry=None, center=None, center_tol=None
     pk = _is_candidates(trace, cut, geometry=geometry)
     if center is not None and center_tol:
         span = (geometry.d1 + (geometry.d3 or 0.0) + geometry.d2) / 2.0 \
-            if geometry else 0.0
+            if geometry else IS_GROUP_SPAN / 2.0
         lo, hi = center - center_tol - span, center + center_tol + span
         pk = [c for c in pk if lo <= c[0] <= hi]
     if geometry is None:
-        # Unmodelled plate: the legacy T9 test still requires a full quartet.
-        return _search_legacy_quartet(pk) if len(pk) >= 4 else None
+        # No shape learned for this plate yet. Fall back on equimolarity plus
+        # "one fragment, one cluster", which asserts nothing about spacing --
+        # see _search_equimolar_group. A shape-constrained search is preferred
+        # and PlateISModel.find() always tries that first.
+        return _search_equimolar_group(pk)
     if len(pk) < 3:
         return None
     core = _search_core(pk, geometry)
@@ -604,7 +650,7 @@ class PlateISModel:
     """
 
     def __init__(self, geometry, centers, n_marked=0, merged_geometry=None,
-                 merged_seen=False):
+                 merged_seen=False, scaled=None):
         import statistics as _st
         self.geometry = geometry
         self.centers = sorted(float(c) for c in centers)
@@ -632,6 +678,10 @@ class PlateISModel:
         # Strongest sample band per marked well, so a well whose standard did
         # not form can be judged against this plate instead of a fixed floor.
         self.sample_snr = []
+        # Tolerance scale factor this instance was relaxed to, or None when it
+        # is the model as fitted. Recorded so a row can be traced back to how
+        # permissive the match that produced it was.
+        self.scaled = scaled
 
     @classmethod
     def from_marks(cls, marks):
@@ -661,6 +711,52 @@ class PlateISModel:
     @classmethod
     def from_quartets(cls, quartets):
         return cls.from_marks(quartets)
+
+    @classmethod
+    def from_wells(cls, wells):
+        """Fit the plate model from ``(acgt, is_col, scans)`` triples.
+
+        This is the semi-automatic entry point: the operator marks the
+        internal standard in a handful of wells, and *wells* carries those
+        traces alongside their marks so the model can also learn this plate's
+        noise floor and sample/standard co-migration -- the two references that
+        cannot be read off scan positions alone.
+
+        Marks are pooled across wells, not intersected, and the two templates
+        (split / merged heteroduplexes) are fitted independently so a capillary
+        that happens to resolve HET2 does not widen the shape of the ones that do
+        not.  Requires at least two marked wells: one well cannot distinguish
+        "this shape" from "this well", and a one-well model would propagate a
+        single mistake across the plate.
+        """
+        ms, std_refs, samp_refs = [], [], []
+        for entry in wells:
+            acgt, is_col, scans = entry[0], entry[1], entry[2]
+            scans = sorted({int(x) for x in (scans or [])})
+            if len(scans) < 2:
+                continue
+            ms.append(scans)
+            std_refs.append((np.asarray(acgt, dtype=float), is_col, scans))
+            samp_refs.append((np.asarray(acgt, dtype=float), None, scans))
+        model = cls.from_marks(ms)
+        if model is None:
+            return None
+        prime_plate_std_snr(model, std_refs)
+        return model
+
+    def describe_plate(self):
+        """One-line summary of what was learned, for the UI to show back."""
+        parts = [f"d1={self.geometry.d1:.0f}", f"d2={self.geometry.d2:.0f}"]
+        parts.append("het merged" if self.geometry.merged
+                     else f"d3={self.geometry.d3:.0f}")
+        txt = ("learned from " + (f"{self.n_marked} marked well"
+                                  f"{'s' if self.n_marked != 1 else ''}")
+               + ": " + "/".join(parts))
+        c = self.center
+        txt += (f", centre {c:.0f} +/-{self.window():.0f} scans")
+        if self.merged_geometry is not None:
+            txt += ", split + merged templates"
+        return txt
 
     @property
     def center(self):
@@ -724,40 +820,235 @@ class PlateISModel:
         lo = min(abs(c - self.centers[0]), abs(self.centers[-1] - c))
         return max(self.geometry.center_tol or 0.0, 40.0) + max(lo, 0.0)
 
-    def find(self, trace, cut=1900):
-        """Anchored search, then widened.  Heteroduplexes are never load-bearing.
+    def relaxed(self, factor):
+        """A copy of this model's geometry with every tolerance scaled up.
 
-        A single template covers both three- and four-band wells, so there is no
-        split/merged branch to get wrong: the search matches H1 + H2 + the
-        heteroduplex region, then attaches HET2 only if the trace actually
-        resolves it.  ``merged_geometry`` is still consulted afterwards for a
-        plate whose homoduplex gaps genuinely differ between capillaries.
+        Shape is not a constant even within one plate: the same fragment run
+        twice, or on a neighbouring capillary, shifts each gap a little, and
+        the one-SNP gap moves most because it is the shortest and so the most
+        sensitive to temperature.  Scaling the tolerances together is the honest
+        way to admit that -- it widens the shape without ever widening the
+        *position* window, which is what stops a relaxed search from wandering
+        off onto some unrelated equimolar-looking pair of peaks.
         """
-        found = find_is_quartet(trace, cut=cut, geometry=self.geometry,
-                                center=self.center, center_tol=self.window())
-        if found is not None:
-            return found[0], found[1], "anchored"
-        found = find_is_quartet(trace, cut=cut, geometry=self.geometry)
-        if found is not None:
-            return found[0], found[1], "anchored-wide"
+        g = self.geometry
+        wide = ISGeometry(
+            g.d1, g.d2, g.d3,
+            tol1=g.tol1 * factor, tol2=g.tol2 * factor, tol3=g.tol3,
+            center_tol=g.center_tol)
         if self.merged_geometry is not None:
-            found = find_is_quartet(trace, cut=cut, geometry=self.merged_geometry,
+            m = self.merged_geometry
+            merged = ISGeometry(
+                m.d1, m.d2, m.d3,
+                tol1=m.tol1 * factor, tol2=m.tol2 * factor, tol3=m.tol3,
+                center_tol=m.center_tol)
+        else:
+            merged = None
+        return PlateISModel(wide, self.centers, self.n_marked, merged,
+                            self.merged_seen, scaled=factor)
+
+    def find(self, trace, cut=1900):
+        """Locate the internal standard, reporting how the shape was matched.
+
+        Returned ``source`` says which evidence placed the bands, and is the
+        thing the semi-automatic pass reports back to the operator:
+
+        ``anchored``/``anchored-wide``/``anchored-merged``/``anchored-merged-wide``
+            the learned geometry for this fragment, at its learned position.
+        ``relaxed``/``relaxed-wide``
+            the same geometry with tolerances scaled, for a capillary whose
+            shape drifted a little further than the seeds showed.
+        ``shape-free``
+            equimolarity plus "one fragment, one cluster", searched inside the
+            learned *position* window. This is the last resort and it is still
+            far stricter than the old T9 test, because the position comes from
+            the operator's marks: it asserts nothing about spacing, but it does
+            insist the standard be where this plate's standards always are.
+
+        Each stage only runs after the previous one fails, so a well that the
+        learned shape explains is never overridden by a looser guess.
+        """
+        stages = [(self.geometry, "anchored")]
+        if self.merged_geometry is not None:
+            stages.append((self.merged_geometry, "anchored-merged"))
+        for g, base in stages:
+            found = find_is_quartet(trace, cut=cut, geometry=g,
                                     center=self.center, center_tol=self.window())
             if found is not None:
-                return found[0], found[1], "anchored-merged"
-            found = find_is_quartet(trace, cut=cut, geometry=self.merged_geometry)
+                return found[0], found[1], base
+            found = find_is_quartet(trace, cut=cut, geometry=g)
             if found is not None:
-                return found[0], found[1], "anchored-merged-wide"
+                return found[0], found[1], f"{base}-wide"
+        # Shape drifted beyond what the seeds showed. Widen tolerances only.
+        for factor in SHAPE_RELAX_FACTORS:
+            wide = self.relaxed(factor)
+            found = find_is_quartet(trace, cut=cut, geometry=wide.geometry,
+                                    center=self.center, center_tol=self.window())
+            if found is not None:
+                return found[0], found[1], f"relaxed-{factor:g}"
+            found = find_is_quartet(trace, cut=cut, geometry=wide.geometry)
+            if found is not None:
+                return found[0], found[1], f"relaxed-{factor:g}-wide"
+        # Nothing shape-based fitted. Fall back to equimolarity alone, but only
+        # inside the position window this plate's own marks establish -- and
+        # only if the bands are actually above the noise, since without a shape
+        # there is nothing left to stop three noise ripples inside that window
+        # from passing as a standard.
+        y = np.asarray(trace, dtype=float)
+        found = find_is_quartet(trace, cut=cut, geometry=None,
+                                center=self.center, center_tol=self.window())
+        if found is not None:
+            if weakest_std_band_snr(y[:, None], 0, found[0]) >= STD_ABS_SNR_FLOOR:
+                return found[0], found[1], "shape-free"
         return None
+
+    def confidence(self, trace, scans, source):
+        """How much to trust one well's standard, as a short label and a number.
+
+        Three things are checked, all of them relative to this model rather than
+        to an absolute cutoff, because a weak-but-correct standard is still
+        readable in the company of its neighbours and an absolute floor would
+        throw it away:
+
+        * the weakest band's height over the channel noise,
+        * how evenly the bands match (equimolarity), and
+        * for the shape-matched sources, how far the measured gaps sit from the
+          fitted ones -- which is what separates "this is the standard, slightly
+          shifted" from "this happens to have three peaks near each other".
+
+        Returns ``(label, score)`` where score is 0-1 and label is one of
+        ``strong``/``fair``/``weak``/``positional``.
+        """
+        if not scans:
+            return "none", 0.0
+        y = np.asarray(trace, dtype=float)
+        snr = weakest_std_band_snr(y[:, None], 0, scans)
+        lo, hi = _band_heights(y, scans)
+        eq = (lo / hi) if hi > 0 else 0.0
+        thr = self.weak_std_threshold()
+        # Two separate questions, and they must not be folded into one number.
+        # "Is there a standard here at all?" is absolute: it is answered against
+        # the channel's own noise. "Is it weak for this plate?" is relative: it
+        # is answered against the operator's marked wells, and needs a reference
+        # to mean anything. Mixing them made a hand-marked but faint standard
+        # come back as "absent" -- the operator had just said it was there.
+        if snr < STD_ABS_SNR_FLOOR:
+            label = "absent"
+        elif thr is not None and snr < thr:
+            label = "weak"
+        elif snr >= STD_ABS_SNR_FLOOR * 4:
+            label = "strong"
+        else:
+            label = "fair"
+        # A shape-free match is positional evidence only, and is always labelled
+        # as such no matter how tall the peaks are: it is the operator's marks
+        # saying "the standard is around here", not the trace confirming a shape.
+        if source == "shape-free":
+            return "positional", min(1.0, 0.5 * max(0.0, min(1.0, snr / 400.0)))
+        score = 0.5 * max(0.0, min(1.0, (snr - STD_ABS_SNR_FLOOR)
+                                 / (STD_ABS_SNR_FLOOR * 4.0)))
+        score += 0.3 * max(0.0, min(1.0, (eq - IS_EQUIMOLAR_MIN) / 0.6))
+        score += 0.2 * self._shape_agreement(scans)
+        return label, max(0.0, min(1.0, score))
+
+    def _shape_agreement(self, scans):
+        """1.0 when the measured gaps agree with the fitted ones, else less."""
+        g = self.geometry
+        want = [g.d1, g.d2] + ([g.d3] if not g.merged else [])
+        if len(scans) - 1 > len(want):
+            want = want + [want[-1]] * (len(scans) - 1 - len(want))
+        got = [scans[i + 1] - scans[i] for i in range(len(scans) - 1)][:len(want)]
+        if not got:
+            return 0.0
+        tot = 0.0
+        for g_meas, g_want, tol in zip(got, want,
+                                       [g.tol1, g.tol2, g.tol3 or 0.0][:len(got)]):
+            denom = max(tol, 1.0)
+            tot += max(0.0, 1.0 - abs(g_meas - g_want) / (3.0 * denom))
+        return tot / max(1, len(got))
+
+
+# Sources whose match came from the fitted shape, so that well may be used to
+# refit that shape.  A relaxed or shape-free match must never feed back into the
+# fit: that is how one wrong early guess turns into a self-fulfilling one.
+STRICT_SOURCES = ("anchored", "anchored-wide",
+                  "anchored-merged", "anchored-merged-wide")
+
+
+def semi_auto_plate_model(traces, seeds, is_col, max_rounds=6):
+    """Learn this plate's internal standard from a few marked wells, then find
+    the standard in the rest.  This is the whole semi-automatic idea.
+
+    *traces* is ``{well: acgt}`` for the wells in the batch, *seeds* is
+    ``{well: [scans]}`` for the handful the operator marked, and *is_col* is the
+    ``acgt`` column the standard sits on.
+
+    The refinement loop matters more than the single fit.  Two hand marks give a
+    shape whose tolerance is measured only from the disagreement between those
+    two wells, which is far too tight -- on the rs1695 N2 plate the seeds
+    disagreed by 20 scans on d1 while the plate's real spread is 99+/-11, so the
+    first pass places the standard in only a third of the wells.  Each round
+    refits from the wells the *fitted* shape matched, never from a relaxed or
+    shape-free match, until the shape stops moving.  On that plate it converges
+    in four rounds, going from 35 to 59 wells placed, with the shape settling at
+    d1=103+/-9, d2=156+/-7, d3=52+/-26.
+
+    Returns ``(model, found)``, where *found* maps well -> ``(scans, how, label,
+    score)`` for every well a standard was placed in, seeds included.
+    """
+    ys = {w: np.asarray(a[:, is_col], float) for w, a in traces.items()}
+    first = {w: sorted({int(x) for x in s}) for w, s in seeds.items()
+             if s and len(s) >= 2}
+    if len(first) < 2:
+        raise ValueError(
+            "Mark the internal standard in at least two wells before learning "
+            "the plate. One well cannot tell this fragment's shape from this "
+            "well, and a one-well shape would spread a single mistake across "
+            "the whole plate.")
+    model = PlateISModel.from_wells(
+        [(traces[w], is_col, s) for w, s in first.items()])
+    if model is None:
+        raise ValueError("the marked wells gave no usable standard shape")
+
+    found = {}
+    for _round in range(max_rounds):
+        found = {}
+        learnable = {}
+        for well, y in ys.items():
+            hit = model.find(y)
+            if hit is None:
+                continue
+            scans, _heights, how = hit
+            label, score = model.confidence(y, scans, how)
+            if label == "absent":
+                continue          # under the noise floor: not a standard
+            found[well] = (scans, how, label, score)
+            if how in STRICT_SOURCES and label in ("strong", "fair"):
+                learnable[well] = scans
+        if len(learnable) < TRIM_MIN_WELLS or _round == max_rounds - 1:
+            break
+        refit = PlateISModel.from_wells(
+            [(traces[w], is_col, s) for w, s in learnable.items()])
+        if refit is None:
+            break
+        moved = max(
+            abs(getattr(refit.geometry, a) - getattr(model.geometry, a))
+            for a in ("d1", "d2"))
+        moved = max(moved, abs((refit.geometry.d3 or 0.0)
+                               - (model.geometry.d3 or 0.0)))
+        model = refit
+        if moved < 0.5:
+            break               # the shape has settled
+    return model, found
 
 
 # --------------------------------------------------------------------------- #
 # batch auto-genotyping: one well -> one call, plus the reason when it cannot
 # --------------------------------------------------------------------------- #
-# The manual path is ``auto_mark_std`` for the standard and four hand-measured
+# The manual path is ``mark_std`` for the standard and four hand-measured
 # duplexes for the sample.  That is fine for one well and unusable for a plate,
-# so this measures the same thing with no clicks: find the standard quartet,
-# read the sample channel in the four windows it defines, and call the well.
+# so this measures the same thing with no clicks: place the standard, read the
+# sample channel in the four windows it defines, and call the well.
 #
 # Which channel is which is a property of the KIT, not something a trace can be
 # asked to work out.  Measured over the 96 rs1695 T9 wells with this module's
@@ -776,8 +1067,8 @@ class PlateISModel:
 # plate, which is what a real amplicon looks like and the standard never does.
 #
 # On this plate's "ACTG" dye order (Ch1=A, Ch2=C, Ch3=T, Ch4=G) that makes the
-# standard Ch3 and the sample Ch2, i.e. ``auto_mark_std``'s ``channel=3``
-# default.  Both constants stay explicit because getting this pair wrong does
+# standard Ch3 and the sample Ch2.  Both constants stay explicit because
+# getting this pair wrong does
 # not fail loudly -- it scores the standard's own peaks as the sample and
 # returns confident nonsense -- and every result row records the channels it
 # was measured on.
@@ -959,6 +1250,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         "is_channel": is_channel, "sample_channel": sample_channel,
         "std_scans": "", "std_scans_manual": "", "std_source": "",
         "het_resolved": True, "std_snr": 0.0, "reason": "",
+        "std_conf": "", "std_score": 0.0,
     }
 
     try:
@@ -999,26 +1291,17 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
             scans, _heights, how = hit
             row["std_source"] = how
         else:
-            # Fallback 2: the original global T9 search -- but only on a plate
-            # nobody marked.  Once a fitted model exists its geometry is known
-            # to disagree with the T9 ratios, and falling back anyway is what
-            # produced every remaining false quartet on ABCC2 (13 hom-1 wells
-            # read as hom-2 off invented peaks near scan 2000).
-            found = (None if is_model is not None
-                     else find_is_quartet(acgt[:, is_col], cut=cut))
-            if found is None:
-                # No IS. hom1/hom2 are not scorable without one, but a four-peak
-                # sample pattern on its own is a heterozygote.
-                row["std_source"] = "none"
-                row["reason"] = f"no standard quartet on Ch{is_channel}"
-                return _no_is_het_chance(
-                    doc, row, acgt, is_col, samp_col, base_order, is_channel,
-                    sample_channel,
-                    geometry=(is_model.geometry if is_model is not None else None),
-                    center=(is_model.center if is_model is not None else None),
-                    center_tol=(is_model.window() if is_model is not None else None))
-            scans, _heights = found
-            row["std_source"] = "detected"
+            # The plate model knows this fragment's shape and position window
+            # and still could not place it, so an equimolar-only guess would be
+            # inventing a standard rather than finding one. Report the miss.
+            row["std_source"] = "none"
+            row["reason"] = f"no internal standard on Ch{is_channel}"
+            return _no_is_het_chance(
+                doc, row, acgt, is_col, samp_col, base_order, is_channel,
+                sample_channel,
+                geometry=(is_model.geometry if is_model is not None else None),
+                center=(is_model.center if is_model is not None else None),
+                center_tol=(is_model.window() if is_model is not None else None))
     row["std_scans"] = "/".join(str(x) for x in scans)
     # A standard showing three bands carries a merged heteroduplex, which is a
     # complete and equally valid standard.  Only a standard too short to fix
@@ -1150,6 +1433,17 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
                 row["flags"] = ",".join(sorted(
                     set(f for f in row["flags"].split(",") if f)
                     | {"std-weak"}))
+        # How the standard was found, and how far to trust it.  Recorded either
+        # way: a well matched only on position needs the operator's eye before
+        # its call is acted on.
+        label, score = is_model.confidence(acgt[:, is_col], scans,
+                                           row["std_source"])
+        row["std_conf"] = label
+        row["std_score"] = round(score, 3)
+        if label in ("weak", "positional"):
+            row["flags"] = ",".join(sorted(
+                set(f for f in row["flags"].split(",") if f)
+                | {f"std-{label}"}))
     if call == "no-call":
         if sigma <= 0:
             row["reason"] = f"no signal on Ch{sample_channel}"
@@ -1210,6 +1504,11 @@ class PeakPicker:
         self._reject = None
         self.std = None
         self.length_bp = None
+        # How this standard was set: None for a hand mark, else the source
+        # label the plate model reported ("anchored", "relaxed-1.6",
+        # "shape-free", ...). Kept so a learned mark can be told apart from a
+        # deliberate one in the pick table and in anything written out.
+        self.std_auto = None
         self.col_color = channel_colors(self.base_order, self.colors,
                                         theme_mode)
         self._d2_cache: dict[int, tuple] = {}
@@ -1591,33 +1890,6 @@ class PeakPicker:
         return float(max(6.0, self.doc.n_scans * 0.004))
 
     # ------------------------------------- internal-standard CTC-CE duplexes
-    def auto_mark_std(self, channel=3, cut=1900):
-        """Find the internal standard automatically and mark it as the duplex set.
-
-        The CTC-CE standard is always present, so on a real run there is no need
-        to click the four peaks by hand.  *channel* is the physical MegaBACE
-        channel (3 = the T channel on a standard "ACTG" plate); it is translated
-        to an ``acgt`` column here, because the two orderings differ and
-        confusing them silently swaps sample and standard.
-
-        Returns the same message :meth:`mark_std` returns, or raises ValueError
-        when no quartet is present (in which case the caller should fall back to
-        clicking).
-        """
-        col = acgt_index_for_channel(getattr(self.doc, "base_order", "ACTG"),
-                                     channel)
-        y = np.asarray(self.doc.acgt[:, col], dtype=float)
-        found = find_is_quartet(y, cut=cut)
-        if found is None:
-            raise ValueError(
-                f"No internal-standard quartet on channel {channel}; "
-                "pick the standard peaks by hand.")
-        scans, _heights = found
-        self.std = [(x, n) for x, n in zip(scans, ["HOM1", "HOM2", "HET1", "HET2"])]
-        self.length_bp = None
-        return "Standard set: " + ", ".join(f"{n}@{x}" for x, n in self.std) \
-            + "  (auto)"
-
     # ------------------------------------- internal-standard CTC-CE duplexes
     def _duplex_names(self, n):
         """CTC-CE duplex names for `n` picked peaks, in migration order.
@@ -1715,6 +1987,7 @@ class PeakPicker:
     def clear_std(self):
         self.std = None
         self.length_bp = None
+        self.std_auto = None
 
     def duplex_of(self, rec):
         """Duplex label (HOM1/HOM2/HET1/HET2) for a main peak that is one of

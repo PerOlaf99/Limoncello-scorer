@@ -253,6 +253,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._auto_is_channel = tk.IntVar(value=3)
         self._auto_sample_channel = tk.IntVar(value=2)
         self._auto_rows: list = []
+        # The plate model learned by the semi-automatic pass, if one has been
+        # run.  Auto-genotyping uses it when present and refuses to guess a
+        # standard when it is not: there is no built-in geometry to fall back
+        # on, because one plate's internal standard does not predict another's.
+        self._auto_is_model = None
+        self._auto_is_model_note = ""
         self._auto_tree = None
         self._pick_cid = None
         self._gen_motion_cid = None
@@ -502,6 +508,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                  command=self.exit_genotyping_picking)
 
         auto_m = tk.Menu(genotyping_m, tearoff=0)
+        auto_m.add_command(label="Semi automatic standard…",
+                           command=self.semi_auto_is)
+        auto_m.add_command(label="Forget learned standard",
+                           command=self.forget_plate_model)
+        auto_m.add_separator()
         auto_m.add_command(label="Auto-genotype selected wells…",
                            command=self.auto_genotype_wells)
         auto_m.add_command(label="Channel roles (standard / sample)…",
@@ -1984,15 +1995,21 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._sync_pick_table()
 
     def _gen_mark_std_batch(self):
-        """Auto-mark the IS quartet in every displayed well, then let the
-        operator fix outliers by hand.
+        """Place the IS in every displayed well from the plate's learned shape.
 
-        96 wells is 384 clicks; nobody does that twice.  Detection is only a
-        starting point -- on the ABCC2 plate it locks onto noise in a third of
-        the wells -- so every result is marked with an "(auto)" label and the
-        table shows which wells came from detection, so a wrong one is obvious
-        and re-markable rather than silently trusted.
+        96 wells is 384 clicks; nobody does that twice.  This uses the geometry
+        fitted by "Semi automatic standard…", so the wells are placed the way
+        the operator's own marks say rather than by whatever spacing detection
+        happens to guess on each trace -- the guess is wrong often enough
+        (it locks onto noise in a third of the ABCC2 wells) that leaning on it
+        for all 96 is not the same thing as semi-automatic.
+
+        Without a learned shape this refuses and points at the semi-automatic
+        item, which asks for marks first.  Every mark it writes is tagged
+        ``std_auto``, so it shows up in the table as detection rather than as
+        something the operator picked.
         """
+        import genotyping
         if not self._require_picking("Mark IS in all shown wells"):
             return
         paths = self._gen_paths()
@@ -2007,6 +2024,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
             minvalue=1, maxvalue=4, parent=self)
         if channel is None:
             return
+        if self._auto_is_model is None:
+            messagebox.showinfo(
+                "Mark IS in all shown wells",
+                "Mark a few wells by hand first, then use\n"
+                "Auto-genotyping → Semi automatic standard…\n\n"
+                "It learns this plate's standard from your marks and places it "
+                "everywhere. Nothing is placed here without a shape to place it "
+                "with, because the spacing is what varies between fragments.")
+            return
+        model = self._auto_is_model
         marked, failed, skipped = [], [], []
         self._gen_std_batch_progress = (0, len(paths))
         for path in paths:
@@ -2019,8 +2046,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 skipped.append(path.stem)
                 continue
             try:
-                pk.auto_mark_std(channel=channel,
-                                 cut=genotyping.DEFAULT_IS_CUT)
+                col = genotyping.acgt_index_for_channel(
+                    self.base_order_var.get(), channel)
+                found = self._model_mark(pk, model, col)
                 marked.append(path.stem)
             except ValueError as e:
                 failed.append((path.stem, str(e)))
@@ -2029,15 +2057,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.update_idletasks()
         self._build_pick_table()
         self.redraw()
-        msg = (f"Marked {len(marked)} of {len(paths)} wells from Ch{channel}"
-               f" detection.")
+        msg = (f"Marked {len(marked)} of {len(paths)} wells from this plate's "
+               f"learned standard.")
         if skipped:
             msg += f"  {len(skipped)} already had an IS set (left alone)."
         if failed:
             msg += f"  {len(failed)} had no quartet found — click those by hand."
             messagebox.showwarning(
                 "Mark IS in all shown wells",
-                msg + "\n\nNo quartet detected in:\n"
+                msg + "\n\nNo standard found in:\n"
                 + ", ".join(w for w, _ in failed[:24])
                 + ("\n…" if len(failed) > 24 else "")
                 + "\n\nTurn on Manual peak picking… and click the four IS peaks "
@@ -2225,6 +2253,169 @@ class LimoncelloAnalyzerApp(tk.Tk):
             f"Auto-genotyping: internal standard Ch{is_c}, sample Ch{sa_c} "
             f"({self.base_order_var.get()}).")
 
+    def semi_auto_is(self):
+        """Learn the plate's internal standard from a few marked wells, then
+        place it in the rest.
+
+        This is the semi-automatic mode.  There is deliberately no automatic
+        fallback to any built-in geometry: the internal standard's spacing is a
+        property of the fragment and the run, and one assay's numbers are wrong
+        for another.  So the operator marks it where they can see it, and this
+        propagates that knowledge to the wells they did not mark -- reporting
+        how each well was matched, so the ones found only by position can be
+        spotted and corrected rather than trusted blindly.
+
+        Every well the model places is written back into the pick table as an
+        ordinary IS mark, so it can be reviewed, moved or cleared like any
+        hand mark.  Nothing here overwrites a mark the operator made.
+        """
+        import genotyping
+        targets = self._auto_targets()
+        if not targets:
+            messagebox.showinfo(
+                "Semi automatic internal standard",
+                "Select the wells of one run in the list first.\n\nThe "
+                "standard is learned per plate, so pick one run's worth of "
+                "wells (or a subset of it).")
+            return
+        is_c = int(self._auto_is_channel.get())
+        try:
+            is_col = genotyping.acgt_index_for_channel(
+                self.base_order_var.get(), is_c)
+        except ValueError as e:
+            messagebox.showerror("Semi automatic internal standard", str(e))
+            return
+
+        runs = {p.parent.name for p in targets}
+        if len(runs) > 1:
+            messagebox.showerror(
+                "Semi automatic internal standard",
+                f"The selection spans {len(runs)} runs:\n"
+                f"{', '.join(sorted(runs)[:4])}"
+                f"{'…' if len(runs) > 4 else ''}\n\n"
+                "Each run has its own capillary drift and needs its own marks, "
+                "so\nlearn one run at a time.")
+            return
+
+        # Seeds = wells the operator already marked, by hand or by IS.csv.
+        seeds, traces, load_errors = {}, {}, []
+        for path in targets:
+            try:
+                doc = self._ensure_doc(path)
+            except Exception as e:
+                load_errors.append(f"{path.stem}: {e}")
+                continue
+            traces[path.stem] = np.asarray(doc.acgt, dtype=float)
+            try:
+                pk = self._ensure_picker(path)
+            except Exception:
+                continue
+            if pk.std:
+                seeds[path.stem] = [int(pair[0]) for pair in pk.std]
+        if load_errors:
+            self.status_var.set(
+                f"{len(load_errors)} of {len(targets)} wells could not be "
+                f"read; skipped.")
+        if len(seeds) < 2:
+            messagebox.showinfo(
+                "Semi automatic internal standard",
+                "Mark the internal standard in at least two wells first.\n\n"
+                "Use the pick table's Mark standard button (Genotyping ▸ "
+                "Peak\npicking) on two or three wells you can read yourself, "
+                "then come\nback to this command. Two is the minimum and "
+                "three to five is better:\nthe more you mark, the tighter the "
+                "learned shape and the fewer\nwells need checking afterwards.")
+            self.status_var.set(
+                f"Semi automatic: {len(seeds)} marked well"
+                f"{'s' if len(seeds) != 1 else ''}, need at least 2.")
+            return
+
+        self.status_var.set(
+            f"Learning the standard on {Path(targets[0]).parent.name} from "
+            f"{len(seeds)} marked well{'' if len(seeds) == 1 else 's'}…")
+        self.update_idletasks()
+        try:
+            model, found = genotyping.semi_auto_plate_model(traces, seeds, is_col)
+        except ValueError as e:
+            messagebox.showerror("Semi automatic internal standard", str(e))
+            return
+
+        # Write the learned standards back into the pickers, as ordinary marks.
+        names4 = ["HOM1", "HOM2", "HET1", "HET2"]
+        names3 = ["HOM1", "HOM2", "HET"]
+        added = 0
+        for well, (scans, how, label, _score) in found.items():
+            path = next((p for p in targets if p.stem == well), None)
+            if path is None:
+                continue
+            pk = self._ensure_picker(path)
+            if pk.std:
+                continue            # an operator mark is never overwritten
+            names = names4 if len(scans) >= 4 else names3
+            pk.std = [(x, names[i]) for i, x in enumerate(scans[:len(names)])]
+            pk.length_bp = None
+            pk.std_auto = how
+            added += 1
+
+        self._auto_is_model = model
+        self._auto_is_model_note = model.describe_plate()
+        self._build_pick_table()
+        self.redraw()
+
+        counts = {}
+        for _s, how, label, _sc in found.values():
+            counts[label] = counts.get(label, 0) + 1
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items()))
+        msg = (f"Learned the standard on {Path(targets[0]).parent.name}:\n\n"
+               f"  {model.describe_plate()}\n\n"
+               f"Placed it in {len(found)} of {len(traces)} wells "
+               f"({summary}).\n"
+               f"{added} of them are now marked in the pick table.\n\n")
+        if counts.get("positional"):
+            msg += (f"{counts['positional']} well(s) matched on position "
+                    "only --\nequimolar peaks near where this plate's "
+                    "standards always are,\nwithout a shape to confirm them. "
+                    "Check those by eye; they carry a\nstd-positional flag in "
+                    "the auto-genotype table.\n\n")
+        if counts.get("fair") or counts.get("weak"):
+            msg += ("A few wells are weak; they carry std-weak and are worth "
+                    "a look.\n\n")
+        msg += "Now run Genotyping ▸ Auto-genotyping ▸ Auto-genotype selected wells."
+        messagebox.showinfo("Semi automatic internal standard", msg)
+
+    def _model_mark(self, pk, model, col):
+        """Place the plate's learned standard on one picker, as a tagged mark.
+
+        Writes ``std`` and ``std_auto``, so the mark behaves like any other:
+        reviewable, movable and clearable in the pick table, but distinguishable
+        from something the operator picked.  Raises ValueError with a reason
+        when the well has no standard at that position.
+        """
+        import genotyping
+        y = np.asarray(pk.doc.acgt[:, col], dtype=float)
+        found = model.find(y, cut=genotyping.DEFAULT_IS_CUT)
+        if found is None:
+            raise ValueError("no standard at this well's usual position")
+        scans, _heights, how = found
+        names = (["HOM1", "HOM2", "HET1", "HET2"] if len(scans) >= 4
+                 else ["HOM1", "HOM2", "HET"][:len(scans)])
+        pk.std = [(x, names[i]) for i, x in enumerate(scans[:len(names)])]
+        pk.length_bp = None
+        pk.std_auto = how
+
+    def forget_plate_model(self):
+        """Drop the learned plate model and its marks, back to hand-marking.
+
+        The learned IS marks stay in the pick table until they are cleared
+        there; this only forgets the model that propagates to other wells, so
+        the operator can teach it again from a different set of seeds.
+        """
+        self._auto_is_model = None
+        self._auto_is_model_note = ""
+        self.status_var.set(
+            "Forgot the learned plate model. The IS marks already written to "
+            "the pick table\nremain until you clear them there.")
+
     def auto_genotype_wells(self):
         """Score every selected well with no clicking, and show the results.
 
@@ -2268,10 +2459,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 # exist.  find_is_quartet accepts any equimolar set, so on a
                 # weak-IS plate it can prefer four equal noise ripples to the
                 # real standard; the operator's marks are authoritative.
+                #
+                # Marks the semi-automatic pass wrote are NOT treated as manual.
+                # They came out of the plate model, so re-detecting them through
+                # it is what produces the source and confidence columns -- and
+                # feeding them back as "manual" would report every learned well
+                # as an operator mark and hide exactly the wells worth checking.
                 manual_std = None
                 try:
                     pk = self._ensure_picker(path)
-                    if pk.std:
+                    if pk.std and not pk.std_auto:
                         # pk.std is [(scan, name), ...]; the engine wants scans.
                         manual_std = [int(pair[0]) for pair in pk.std]
                 except Exception:
@@ -2280,7 +2477,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     doc, is_channel=is_c, sample_channel=sa_c,
                     base_order=base, cut=genotyping.DEFAULT_IS_CUT,
                     run_name=path.parent.name,
-                    std_scans_manual=manual_std))
+                    std_scans_manual=manual_std,
+                    is_model=self._auto_is_model))
             if i % 8 == 0 or i == len(targets):
                 self.status_var.set(f"Auto-genotyping… {i}/{len(targets)}")
                 self.update_idletasks()
@@ -2289,9 +2487,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
         for r in self._auto_rows:
             calls[r["call"]] = calls.get(r["call"], 0) + 1
         summary = ", ".join(f"{v} {k}" for k, v in sorted(calls.items()))
+        # Without a learned model, wells with no hand mark cannot be scored at
+        # all -- there is no built-in geometry to fall back on, deliberately.
+        # Say so up front rather than returning a table of no-calls the user has
+        # to work out the meaning of.
+        unplaced = sum(1 for r in self._auto_rows
+                       if r.get("std_source") in ("none", ""))
+        note = ""
+        if unplaced and self._auto_is_model is None:
+            note = (f"  {unplaced} well(s) had no hand-marked standard: run "
+                    "Genotyping ▸\n  Auto-genotyping ▸ Semi automatic "
+                    "standard first.")
+        elif unplaced:
+            note = f"  {unplaced} well(s) had no standard placed."
+        if self._auto_is_model_note:
+            note = f"  {self._auto_is_model_note}" + note
         self.status_var.set(
             f"Auto-genotyped {len(self._auto_rows)} wells "
-            f"(standard Ch{is_c}, sample Ch{sa_c}): {summary}.")
+            f"(standard Ch{is_c}, sample Ch{sa_c}): {summary}.{note}")
         self.redraw()
 
     def _build_auto_table(self):
@@ -2309,7 +2522,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 pass
             self._auto_tree = None
         cols = ("well", "call", "frac", "hom1", "hom2", "het1", "het2",
-                "snr1", "snr2", "snr3", "snr4", "flags", "reason")
+                "snr1", "snr2", "snr3", "snr4", "std", "conf",
+                "flags", "reason")
         tblf = ttk.Frame(self.center)
         tblf.pack(fill=tk.X, padx=4, pady=2)
         hdr = ttk.Label(self.center, text="Auto-genotype results")
@@ -2321,13 +2535,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         tree = ttk.Treeview(tblf, columns=cols, show="headings", height=8)
         widths = {"well": 56, "call": 74, "frac": 48, "hom1": 56, "hom2": 56,
                   "het1": 56, "het2": 56, "snr1": 46, "snr2": 46, "snr3": 46,
-                  "snr4": 46, "flags": 90, "reason": 200}
-        left = ("well", "call", "flags", "reason")
+                  "snr4": 46, "std": 104, "conf": 66,
+                  "flags": 90, "reason": 200}
+        left = ("well", "call", "std", "conf", "flags", "reason")
         for c in cols:
             tree.heading(c, text=c)
             tree.column(c, width=widths[c],
                         anchor="w" if c in left else "e",
-                        stretch=(c in ("reason", "flags")))
+                        stretch=(c in ("reason", "flags", "std")))
         for r in self._auto_rows:
             tree.insert("", tk.END, values=(
                 r.get("well", ""), r.get("call", ""),
@@ -2336,6 +2551,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 f"{r.get('het1', 0.0):.0f}", f"{r.get('het2', 0.0):.0f}",
                 f"{r.get('snr1', 0.0):.0f}", f"{r.get('snr2', 0.0):.0f}",
                 f"{r.get('snr3', 0.0):.0f}", f"{r.get('snr4', 0.0):.0f}",
+                r.get("std_source", ""),
+                (f"{r.get('std_conf', '')} {r.get('std_score', 0.0):.2f}").strip(),
                 r.get("flags", ""), r.get("reason", "")))
         vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=vs.set)

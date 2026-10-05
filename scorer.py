@@ -473,6 +473,11 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     # homs are below threshold.
     hom1_ok_sig = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
     hom2_ok_sig = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
+    # Note the first homoduplex is *not* required. On this assay a het routinely
+    # presents as one homoduplex plus its heteroduplexes (the 1+2 shape), and
+    # RS1695 A12 and G10 are reference hets with hom1 area 0. So the presence
+    # test below is on the second homoduplex, and requiring more than that costs
+    # real calls -- see test_co_migration.py.
     if both_present and hom2 > 0 and (s1 is None or hom1_ok_sig or hom2_ok_sig):
         if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
             flags.add("ai")

@@ -15,7 +15,7 @@ if not os.environ.get("DISPLAY"):
     pytest.skip("no DISPLAY for the GUI test", allow_module_level=True)
 
 import tkinter as tk  # noqa: E402
-from tkinter import filedialog, messagebox  # noqa: E402
+from tkinter import filedialog, messagebox, simpledialog  # noqa: E402
 
 import analyzer_core  # noqa: E402
 import genotyping  # noqa: E402
@@ -87,6 +87,53 @@ def test_the_menu_actually_offers_auto_genotyping(app):
     assert "Save auto-genotype table…" in sub_labels, sub_labels
 
 
+def test_mark_all_refuses_without_a_learned_shape(app, monkeypatch):
+    """96 unmarked wells is not a licence to guess each one separately.
+
+    The batch command used to fall back to bare equimolar detection, which is
+    what put noise in a third of the ABCC2 wells. With nothing learned it now
+    says so and points at the semi-automatic item.
+    """
+    shown = []
+    monkeypatch.setattr(messagebox, "showinfo",
+                        lambda title, msg="", **k: shown.append(msg))
+    monkeypatch.setattr(simpledialog, "askinteger",
+                        lambda *a, **k: genotyping.DEFAULT_IS_CHANNEL)
+    app.genotyping_active = True
+    app._auto_is_model = None
+    app._gen_mark_std_batch()
+    assert shown and "Semi automatic standard" in shown[0], shown
+    for well in WELLS:
+        assert not app._ensure_picker(RUN / f"{well}.rsd").std, well
+
+
+def test_mark_all_uses_the_learned_shape_and_tags_its_marks(app,
+                                                            monkeypatch):
+    """With a model, the batch places the standard from it -- and says so."""
+    app._auto_is_channel.set(genotyping.DEFAULT_IS_CHANNEL)
+    app._auto_sample_channel.set(genotyping.DEFAULT_SAMPLE_CHANNEL)
+    seed = {"A01": [2135, 2214, 2425, 2520], "A02": [2172, 2266, 2477, 2563]}
+    for well, scans in seed.items():
+        pk = app._ensure_picker(RUN / f"{well}.rsd")
+        pk.std = [(x, "") for x in scans]
+    app.semi_auto_is()
+    assert app._auto_is_model is not None
+
+    monkeypatch.setattr(simpledialog, "askinteger",
+                        lambda *a, **k: genotyping.DEFAULT_IS_CHANNEL)
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: "ok")
+    monkeypatch.setattr(messagebox, "showwarning", lambda *a, **k: "ok")
+    app._gen_mark_std_batch()
+
+    # Seed wells keep the operator's own marks; the rest are placed and, unlike
+    # a hand mark, are tagged as machine-found.
+    for well in WELLS:
+        pk = app._ensure_picker(RUN / f"{well}.rsd")
+        assert pk.std, well
+        if well not in seed:
+            assert pk.std_auto, well
+
+
 def test_same_channel_for_standard_and_sample_is_refused(app):
     """Swapping the two roles does not fail loudly -- it scores the sample's
     own peaks as the standard and returns confident nonsense. So the GUI has
@@ -142,18 +189,54 @@ def test_export_writes_the_auto_rows(app, tmp_path, monkeypatch):
         assert key in rows[0], list(rows[0])
 
 
-def test_the_real_t9_wells_match_the_recorded_ground_truth(app):
-    """The A-row calls through the GUI agree with tests/data/rs1695_expected.csv,
-    which is the manual ground truth the 95/96 validation was measured against.
+def test_without_learned_geometry_no_standard_is_invented(app):
+    """With no marks and no model there is no standard to find.
+
+    The old engine had T9's geometry baked in, so a bare call to
+    auto-genotype placed a standard on any plate that happened to share it.
+    That is the behaviour being removed: without something to learn from, the
+    wells must come back no-call rather than resting on another assay's
+    numbers.
+    """
+    app._auto_is_channel.set(genotyping.DEFAULT_IS_CHANNEL)
+    app._auto_sample_channel.set(genotyping.DEFAULT_SAMPLE_CHANNEL)
+    app.auto_genotype_wells()
+    got = {r["well"]: r for r in app._auto_rows}
+    assert all(r["std_scans"] == "" for r in got.values()), got
+    assert any(r["call"] == "no-call" for r in got.values()), got
+
+
+def test_semi_automatic_standard_then_calls_match_ground_truth(app):
+    """The real workflow on the real T9 wells: two operator marks, learn,
+    place the rest, call -- and agree with tests/data/rs1695_expected.csv,
+    the manual ground truth the 95/96 validation was measured against.
     Call names differ between the fixture ('hom2') and the engine ('hom-2')."""
     expected = {}
     with open(Path(__file__).parent / "data" / "rs1695_expected.csv",
               newline="") as f:
         for row in csv.DictReader(f):
             expected[row["well"]] = row["expected"]
+
     app._auto_is_channel.set(genotyping.DEFAULT_IS_CHANNEL)
     app._auto_sample_channel.set(genotyping.DEFAULT_SAMPLE_CHANNEL)
+
+    # Two wells marked by hand, taken from the operator's IS.csv for this run.
+    seed = {"A01": [2135, 2214, 2425, 2520], "A02": [2172, 2266, 2477, 2563]}
+    for well, scans in seed.items():
+        pk = app._ensure_picker(RUN / f"{well}.rsd")
+        pk.std = [(x, "") for x in scans]
+
+    app.semi_auto_is()
+    assert app._auto_is_model is not None
     app.auto_genotype_wells()
+
     got = {r["well"]: r["call"].replace("hom-", "hom") for r in app._auto_rows}
     want = {w: expected.get(w) for w in WELLS}
     assert got == want, (got, want)
+
+    # The wells the operator did not mark were placed, and are editable marks.
+    placed = {r["well"]: r for r in app._auto_rows}
+    for well in ("A03", "A04"):
+        assert placed[well]["std_scans"], placed[well]
+    assert "strong" in app._auto_is_model_note or "learned" in \
+        app._auto_is_model_note, app._auto_is_model_note

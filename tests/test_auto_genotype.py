@@ -29,6 +29,17 @@ STD_SCANS = [2100, 2130, 2215, 2250]
 DYE_ORDER = "ACTG"
 
 
+def std_model(centers=(sum(STD_SCANS) / 4.0,)):
+    """A plate model for the standard these synthetic wells carry.
+
+    Detection has no built-in geometry to fall back on, so every test that
+    expects a standard to be placed has to supply one -- which is the real
+    contract now: the shape comes from the operator's marks.
+    """
+    return g.PlateISModel.from_marks(
+        [[s + off for s in STD_SCANS] for off in (-2, 0, 2, 4)])
+
+
 class FakeDoc:
     """The bits of ``TraceDocument`` ``auto_genotype`` reads."""
 
@@ -110,7 +121,7 @@ def test_is_and_sample_channels_are_not_the_same():
 
 def test_default_channels_match_the_t9_plate_dye_order():
     # ACTG: Ch1=A, Ch2=C, Ch3=T, Ch4=G.  The standard is the T channel and the
-    # sample the C channel; this is the pair auto_mark_std's channel=3 implies.
+    # sample the C channel; this is the pair the menu's channel roles imply.
     assert g.acgt_index_for_channel(DYE_ORDER, g.DEFAULT_IS_CHANNEL) == \
         "ACGT".index("T")
     assert g.acgt_index_for_channel(DYE_ORDER, g.DEFAULT_SAMPLE_CHANNEL) == \
@@ -147,7 +158,7 @@ def test_four_equimolar_duplexes_read_as_a_heterozygote():
     # significance path is the one under test (a noiseless trace has sigma 0
     # and no-call on purpose)
     doc = FakeDoc(plate([1000] * 4, [1000] * 4, noise=2.0, seed=11))
-    row = g.auto_genotype(doc, base_order=DYE_ORDER)
+    row = g.auto_genotype(doc, base_order=DYE_ORDER, is_model=std_model())
     assert row["call"] == "het"
     assert 0.4 < row["frac"] < 0.6
     assert row["reason"] == ""
@@ -155,14 +166,14 @@ def test_four_equimolar_duplexes_read_as_a_heterozygote():
 
 def test_one_strong_duplex_alone_reads_as_a_homozygote():
     doc = FakeDoc(plate([1000] * 4, [1000, 0, 0, 0], noise=2.0, seed=12))
-    row = g.auto_genotype(doc, base_order=DYE_ORDER)
+    row = g.auto_genotype(doc, base_order=DYE_ORDER, is_model=std_model())
     assert row["call"] in ("hom-1", "no-call")
     assert row["frac"] > 0.8
 
 
 def test_areas_are_ordered_by_duplex_and_roughly_equal():
     doc = FakeDoc(plate([1000] * 4, [1000, 800, 600, 400], noise=2.0, seed=13))
-    row = g.auto_genotype(doc, base_order=DYE_ORDER)
+    row = g.auto_genotype(doc, base_order=DYE_ORDER, is_model=std_model())
     got = [row["hom1"], row["hom2"], row["het1"], row["het2"]]
     assert got == sorted(got, reverse=True)
     assert all(v > 0 for v in got)
@@ -170,7 +181,8 @@ def test_areas_are_ordered_by_duplex_and_roughly_equal():
 
 def test_rows_record_the_channels_they_were_measured_on():
     row = g.auto_genotype(FakeDoc(plate([1000] * 4, [1000] * 4)),
-                          base_order=DYE_ORDER, run_name="R1")
+                          base_order=DYE_ORDER, run_name="R1",
+                          is_model=std_model())
     assert row["run"] == "R1"
     assert row["is_channel"] == g.DEFAULT_IS_CHANNEL
     assert row["sample_channel"] == g.DEFAULT_SAMPLE_CHANNEL
@@ -179,9 +191,9 @@ def test_rows_record_the_channels_they_were_measured_on():
 
 def test_significance_falls_when_the_sample_is_quieter_than_the_noise():
     loud = g.auto_genotype(FakeDoc(plate([1000] * 4, [4000] * 4, noise=2.0, seed=7)),
-                           base_order=DYE_ORDER)
+                           base_order=DYE_ORDER, is_model=std_model())
     quiet = g.auto_genotype(FakeDoc(plate([1000] * 4, [200] * 4, noise=2.0, seed=7)),
-                            base_order=DYE_ORDER)
+                            base_order=DYE_ORDER, is_model=std_model())
     assert min(loud["snr1"], loud["snr2"]) > min(quiet["snr1"], quiet["snr2"])
 
 
@@ -231,7 +243,7 @@ def test_trace_too_narrow_for_the_channel_gives_a_reason():
 
 def test_weak_sample_reports_why_rather_than_a_confident_call():
     doc = FakeDoc(plate([1000] * 4, [30, 30, 30, 30], noise=20.0, seed=3))
-    row = g.auto_genotype(doc, base_order=DYE_ORDER)
+    row = g.auto_genotype(doc, base_order=DYE_ORDER, is_model=std_model())
     assert row["call"] == "no-call"
     assert "noise" in row["reason"]
 
