@@ -2668,9 +2668,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
         add = lambda k, v: chunks.append(f"{k:<20} {v}")
         chunks = ["Run info", "   " + str(path), ""]
         add("Well", doc.well)
-        add("Source", f"{doc.source} — {doc.meta}")
+        add("Source", doc.source)
         add("Scans", f"{doc.n_scans}  ({doc.n_scans / SCAN_RATE_HZ / 60:.1f} min "
                      f"at {SCAN_RATE_HZ:.2f} Hz)")
+        # The instrument's own run fields, decoded from the RSD footer. These
+        # are the record of what was actually run: plate, sample, machine,
+        # method and base caller. Anything already in `meta` is redundant now.
+        fld = getattr(doc, "footer_fields", None) or {}
+        if fld:
+            chunks.append("")
+            add("Run", fld.get("R CODE") or fld.get("PLATE ID") or "-")
+            for key in ("PLATE ID", "SAMPLE NAME", "WELL ID", "MACHINE ID",
+                        "APPLICATION", "BASE CALLER", "NAME", "COMMENT",
+                        "LASER MODE", "BEAMSPLITTER A", "BEAMSPLITTER B",
+                        "FILTER", "DYE", "BASE"):
+                if fld.get(key):
+                    add(key, fld[key])
         add("Dye order (channels)", (self.base_order_var.get() or "ACTG").upper())
         add("Column layout", doc.base_order)
         add("Basecaller", self.basecaller.get())
@@ -3342,7 +3355,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "WHAT IT IS\n"
             "  A viewer and base caller for capillary-electrophoresis traces.\n"
             "  Supports .rsd, .scf, ABI .ab1 and text/CSV traces.\n"
-            "  Fluorescence is shown in Volts; instrument current in µA.\n\n"
+            "  Fluorescence is shown in Volts; instrument current in µA.\n"
+            "  It also does three analyses that are easy to confuse with each\n"
+            "  other, so they are kept apart on purpose:\n"
+            "    • Base calling   (6a)  reads letters from a sequencing trace.\n"
+            "    • Peak picking / genotyping (6b)  records peaks by hand on a\n"
+            "      CTCE run — click one peak, drag a span, tag duplex species\n"
+            "      and read MF, or auto-genotype a whole run.\n"
+            "    • Fragment-length sizing (6c)  gives peak sizes in bp against a\n"
+            "      real ladder. NOT for CTCE: a CTCE internal standard is not a\n"
+            "      size ladder, and it can be mistaken for one, so it must never\n"
+            "      be sized this way.\n\n"
             "1. OPEN YOUR DATA\n"
             "  File ▸ Add data folder…  (or the  ⊕ Add…  button)\n"
             "    • Pick ONE run folder to load just that run.\n"
@@ -3584,6 +3607,34 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    peaks are never interleaved with another's.  That table is\n"
                 "    your labelled training library for ML — peak picking works with\n"
                 "    or without an internal standard.\n"
+              "6c. FRAGMENT-LENGTH SIZING  (Genotyping ▸ Fragment-length sizing…)\n"
+            "  Sizes the sample's peaks in bp against a ladder run in its own\n"
+            "  channel. This is a DIFFERENT analysis from peak picking and from\n"
+            "  CTCE genotyping: it needs a real multi-fragment size standard, not\n"
+            "  an internal standard, and it never uses picked peaks or MF.\n"
+            "  • Select one or more wells, then Genotyping ▸ Fragment-length\n"
+            "    sizing (ladder)…\n"
+            "  • Choose the ladder: a built-in name (genescan500_rox,\n"
+            "    geneflo1000_rox, …), a comma-separated length list, or a path to\n"
+            "    a ladder JSON file. `python scorer.py ladders` lists the bundled\n"
+            "    MegaBACE standards.\n"
+            "  • Channels are PHYSICAL (1-4 in this run's dye order), asked for\n"
+            "    explicitly because the ladder/sample pair is a property of the\n"
+            "    kit — the common layout is ladder on Ch4, sample on Ch2.\n"
+            "  • The fit is reported honestly: it uses leave-one-out accuracy\n"
+            "    (rms/max error in bp), because a residual on the fitted curve is\n"
+            "    always zero and would look perfect.\n"
+            "  • If a channel holds no ladder, or only one fragment is matched,\n"
+            "    sizing WARNS and returns NO lengths rather than guessing. Treat\n"
+            "    a warning as 'not measured', never as a short fragment.\n"
+            "  • IMPORTANT — do not size CTCE runs this way. A CTCE channel's\n"
+            "    internal standard is a handful of same-size conformers, not a\n"
+            "    size ladder, so any bp values it produced would be meaningless.\n"
+            "    The program cannot always detect this for you: such a channel\n"
+            "    can align to the GeneScan 500 table as neatly as a real ladder,\n"
+            "    so check the run's own method and dyes before you trust the\n"
+            "    numbers. Use peak picking + MF (section 6b) for CTCE instead.\n"
+            "  • Results go to a CSV/JSON table or an HTML report.\n\n"
               "7. EXPORT  (File menu)\n"
             "  • Export sequence (FASTA)…   called bases per well.\n"
             "  • Export peak table (CSV)…   well, base, scan position, quality.\n"
@@ -3596,7 +3647,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "    left untouched) and shown under the sequence once saved.\n"
             "  • Run info…  — read-only rundown of the selected run: well, source,\n"
             "    scan count & run time, base order, basecaller preset, sequence\n"
-            "    statistics, per-channel signal maxima and the instrument current.\n\n"
+            "    statistics, per-channel signal maxima and the instrument current.\n"
+            "    For .rsd it also shows the run fields decoded from the instrument\n"
+            "    footer: run/plate ID, sample & well name, machine ID, application,\n"
+            "    the base caller used, method name/comment, laser mode,\n"
+            "    beamsplitter and filter part numbers, and the dye per channel.\n"
+            "    These come from the file itself, so they are the record of what\n"
+            "    was actually run — use them to tell two similar-looking plates\n"
+            "    apart. RSD files without a footer simply show no Run block.\n\n"
             "8. KEYBOARD SHORTCUTS\n"
             "  ↑ / ↓ / PgUp / PgDn   page through wells\n"
 "  Space                 start / stop auto-tour\n"

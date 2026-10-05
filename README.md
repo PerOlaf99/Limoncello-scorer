@@ -347,7 +347,11 @@ The **Comments** menu sits between *Genotyping* and *Help*:
 - **Run info…** gives a read-only rundown of the selected well: source, scan
   count and run time, base order, basecaller preset, sequence statistics
   (length, Qmean/Qmin, N, peak spacing), per-channel signal maxima and the
-  instrument current.
+  instrument current. For `.rsd` it also decodes the run fields written in the
+  instrument footer — run/plate ID, sample and well name, machine ID,
+  application, the base caller used, method name/comment, laser mode,
+  beamsplitter/filter part numbers and the dye per channel — so two
+  similar-looking plates can be told apart from the file itself.
 
 ## Scoring, QC and reports (`scorer.py`)
 
@@ -414,6 +418,16 @@ The other half of genotyping: a PCR/ssDNA sample is co-run with a **size
 standard** (ladder) labelled with a different fluorophore, and every sample
 peak's length in bp is read off the ladder. This is *sizing*, not allele
 calling — it needs no internal standard and no prior knowledge of the sample.
+
+> **Do not size CTCE runs this way.** A CTCE channel's internal standard is
+> four same-length conformers of one labelled fragment, not a size ladder, so
+> any bp values read off it are meaningless. This cannot be reliably detected
+> automatically: on this project's own OY/CTCE data such a channel aligns to
+> 15–16 of the 16 GeneScan 500 bands with a leave-one-out error as low as 3.8%,
+> *better* than a genuinely realistic GeneScan trace (5.0%). So sizing warns
+> when the ladder is weak or few bands match, but a CTCE channel can look like
+> a good fit — check the run's method and dyes. Use peak picking and MF for
+> CTCE.
 
 ```bash
 # what ladders are built in, and which MegaBACE kits are compatible

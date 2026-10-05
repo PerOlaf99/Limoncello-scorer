@@ -210,6 +210,7 @@ class TraceDocument:
     settings_used: Optional[AnalysisSettings] = None
     source: str = "rsd"  # rsd | abi | scf | text
     meta: str = ""       # free-form instrument/source info for exports
+    footer_fields: dict = field(default_factory=dict)  # decoded RSD run fields
 
     @property
     def n_scans(self) -> int:
@@ -227,6 +228,69 @@ class TraceDocument:
             hi = float(np.nanpercentile(c, 99.9))
             c = np.clip(c, lo, hi)
         return c
+
+
+def parse_rsd_footer(footer_raw) -> dict:
+    """Decode a MegaBACE RSD footer into ``{label: value}``.
+
+    The footer is a run of length-prefixed, NUL-terminated text fields in the
+    order the instrument wrote them, e.g. ``R CODE``, ``PLATE ID``,
+    ``SAMPLE NAME``, ``WELL ID``, ``BASE CALLER``, ``MACHINE ID`` and one
+    ``BASE``/``DYE``/``FILTER`` group per channel.  Each field is stored as
+
+        <label> NUL 0x05 <len> <value...>
+
+    where ``0x05`` is the "string" type tag and ``<len>`` counts the value
+    bytes (which include their own trailing NUL).
+
+    Returns an empty dict for anything that is not a recognisable footer --
+    a file with no footer is normal, so this never raises.
+    """
+    if not footer_raw:
+        return {}
+    if isinstance(footer_raw, str):
+        footer_raw = footer_raw.encode("latin-1", "replace")
+    b = bytes(footer_raw)
+    out: dict = {}
+    i = 0
+    while i < len(b):
+        end = b.find(b"\x00", i)
+        if end < 0:
+            break
+        # A field is only valid if the byte after its NUL is the string tag
+        # 0x05 and a length byte follows; anything else is padding between
+        # fields, so resume one byte along instead of giving up.
+        if b[end + 1: end + 2] != b"\x05" or end + 3 > len(b):
+            i = end + 1
+            continue
+        n = b[end + 2]
+        value = b[end + 3: end + 3 + n]
+        label = b[i:end].decode("latin-1").strip()
+        # Between fields the writer leaves type/length bytes (e.g. 0x01, 0x12)
+        # that end up glued to the front of the next label; drop them so
+        # "PLATE ID" is a key rather than "\x05\tPLATE ID".
+        label = label.lstrip("".join(chr(c) for c in range(0x20))).strip()
+        if label:
+            out[label] = value.decode("latin-1").rstrip("\x00").strip()
+        i = end + 3 + n
+    return out
+
+
+def rsd_footer_summary(fields: dict) -> str:
+    """One short, readable line describing an RSD run for ``TraceDocument.meta``.
+
+    The raw footer bytes used to be shown verbatim in Comments -> Run info,
+    which surfaced ``b'\\x00\\x00\\x00\\x00'`` for the header and a truncated
+    ``b'R CODE\\x00\\x05\\x17...'`` for the footer instead of anything a user
+    could read.  Prefer the fields that identify the run and its chemistry.
+    """
+    if not fields:
+        return "RSD"
+    order = ("R CODE", "PLATE ID", "SAMPLE NAME", "WELL ID", "MACHINE ID",
+             "APPLICATION", "BASE CALLER", "NAME", "COMMENT")
+    parts = [f"{k}={fields[k]}" for k in order if fields.get(k)]
+    # Keep it to one line: the full set is available in Run info.
+    return "RSD | " + ", ".join(parts[:5])
 
 
 RFD_EXTS = (".rsd", ".RSD")
@@ -587,23 +651,21 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
     cur = getattr(rsd, "current_raw", None)
     if cur is None:
         cur = getattr(rsd, "current", None)
-    meta = "RSD"
-    for block, label in (("header_raw", "header"), ("footer_raw", "footer")):
-        b = getattr(rsd, block, None)
-        if b:
-            try:
-                meta += f" | {label}: {b[:28]!r}"
-            except Exception:
-                pass
+    fields = parse_rsd_footer(getattr(rsd, "footer_raw", b""))
+    meta = rsd_footer_summary(fields)
+    # The instrument's own SAMPLE NAME / WELL ID are more trustworthy than the
+    # filename (a plate can be renamed or re-exported), so prefer them.
+    well = fields.get("WELL ID") or fields.get("SAMPLE NAME") or path.stem
     return TraceDocument(
         path=path,
-        well=path.stem,
+        well=well,
         raw=acgt.copy(),
         base_order=order,
         acgt=acgt,
         current=None if cur is None else np.asarray(cur, float),
         source="rsd",
         meta=meta,
+        footer_fields=fields,
     )
 
 
