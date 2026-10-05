@@ -10,7 +10,9 @@ pytest.importorskip("tkinter")
 pytest.importorskip("matplotlib")
 
 if not os.environ.get("DISPLAY"):
-    pytest.skip("no DISPLAY for the GUI test")
+    # Module-level skip needs allow_module_level, otherwise recent pytest treats
+    # it as a collection error and aborts the whole run instead of skipping.
+    pytest.skip("no DISPLAY for the GUI test", allow_module_level=True)
 
 import tkinter as tk  # noqa: E402
 from tkinter import filedialog, messagebox  # noqa: E402
