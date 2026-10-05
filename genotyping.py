@@ -32,6 +32,11 @@ from pathlib import Path
 
 import numpy as np
 
+# numpy 2.0 removed ``trapz`` and renamed it ``trapezoid``. Peak areas are read
+# with whichever exists, so this works on the whole supported range (>=1.20)
+# instead of crashing on a fresh install that resolved numpy 2.x.
+_trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+
 import matplotlib
 
 matplotlib.use("TkAgg")
@@ -1090,7 +1095,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
             a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
             b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
         apex = float(y[a:b].max()) if b > a else 0.0
-        areas.append(max(0.0, float(np.trapz(y[lo:hi] - base, dx=1.0))))
+        areas.append(max(0.0, float(_trapz(y[lo:hi] - base, dx=1.0))))
         snrs.append((apex - base) / sigma if sigma > 0 else 0.0)
 
     while len(areas) < 4:
