@@ -179,6 +179,10 @@ class TestHetRequiresTheSecondAllele:
     Across every het call carrying a reference genotype, 0 of 31 genuine
     heterozygotes had an empty second homoduplex against 5 of 11 false ones, so
     requiring that area costs no true call.
+
+    The floor on that second allele is significance, not area, and the second
+    homoduplex is held to it too -- see
+    test_a_second_allele_must_be_visible_not_merely_present.
     """
 
     def test_taq_conformer_is_not_a_second_allele(self):
@@ -202,8 +206,26 @@ class TestHetRequiresTheSecondAllele:
         assert call == "het"
 
     def test_requirement_is_presence_not_magnitude(self):
-        # A second homoduplex any area at all still counts; only an empty one
-        # disqualifies the call.  Real hets carry tens of thousands.
-        call, _frac, _flags = scorer.t9_call(190067, 1, 10722, None,
-                                             (2714.3, 0.4, 100.9))
+        # The second allele does not have to match the first in size.  A band
+        # carrying a thousandth of the dominant's area is still a band, and a
+        # het whose minor allele is faint is a normal het.
+        call, _frac, _flags = scorer.t9_call(190067, 1200, 10722, None,
+                                             (2714.3, 45.0, 100.9))
         assert call == "het"
+
+    def test_a_second_allele_must_be_visible_not_merely_present(self):
+        # RS1695_N2 A04, which called het on this: heteroduplex peaks clear of
+        # the noise at 40 and 56 sigma, a dominant homoduplex at 6447, and a
+        # first homoduplex at 7.5 sigma -- 0.7% of the real peak.  Real hets on
+        # the same plate clear 30 sigma on both homoduplexes (tightest: G10 at
+        # 46.0), so this is what separates the two without costing a true call.
+        call, _frac, _flags = scorer.t9_call(611754, 6130, 0, 4465,
+                                             (7.5, 6447.3, 40.3, 56.2))
+        assert call == "hom-2"
+
+    def test_the_second_allele_floor_is_shared_with_the_heteroduplexes(self):
+        # One threshold decides "this band is real", so the minor homoduplex
+        # and the heteroduplex bands are held to the same bar.  If these two
+        # ever drift apart the constant stops meaning what its comment says.
+        assert (scorer.T9_MIN_SECOND_ALLELE_SIGMA
+                == scorer.T9_MIN_HET_SIGMA)

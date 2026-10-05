@@ -378,6 +378,18 @@ def well_summary(rows: List[dict]) -> dict:
 T9_MIN_HET_SIGMA = 30.0        # each heteroduplex must clear this, in sigmas
 T9_HET_RATIO_MIN = 0.5         # min/max of the two heteroduplexes
 T9_MIN_DOMINANT_SIGMA = 40.0   # a well below this everywhere is no-call
+# A second allele has to be a band you can see, not merely an area above zero.
+# Deliberately the same 30 sigma the heteroduplexes must clear: one floor for
+# "this band is real", applied to every duplex a het call rests on.
+#
+# Fitted on the rs1695 plate. All 44 reference hets clear 30 sigma on *both*
+# homoduplexes -- the tightest is G10 at 46.0 / 1044.9, then A12 at 74.2 /
+# 3300.5 -- so this costs no true call there. It fixes RS1695_N2 A04, which
+# called het off heteroduplex peaks at 40 and 56 sigma while its first
+# homoduplex read 7.5: 0.7% of the real peak, sitting in the very window a het
+# needs a second allele in. It cannot create a het either, since a well with no
+# heteroduplex evidence is rejected before this is reached.
+T9_MIN_SECOND_ALLELE_SIGMA = 30.0
 T9_MIN_TOTAL_AREA = 3000.0
 T9_AI_DEVIATION = 0.25         # a het outside f1 in (0.25, 0.75) is AI
 
@@ -470,15 +482,22 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     # ones do, so this costs no true call and rejects half the false ones.
     # Also require at least one homoduplex to be significant when sigma info
     # is available; a strong het band should not create a het call when both
-    # homs are below threshold.
+    # homs = below threshold.
     hom1_ok_sig = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
     hom2_ok_sig = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
-    # Note the first homoduplex is *not* required. On this assay a het routinely
-    # presents as one homoduplex plus its heteroduplexes (the 1+2 shape), and
-    # RS1695 A12 and G10 are reference hets with hom1 area 0. So the presence
-    # test below is on the second homoduplex, and requiring more than that costs
-    # real calls -- see test_co_migration.py.
-    if both_present and hom2 > 0 and (s1 is None or hom1_ok_sig or hom2_ok_sig):
+    # Both homoduplexes must clear T9_MIN_SECOND_ALLELE_SIGMA.  A het's evidence
+    # is the *minor* allele, so it arrives in the weaker of the two homoduplex
+    # windows -- the one most likely to be a ripple rather than a product, which
+    # is why the floor is applied to both and not to the dominant band.  Note
+    # this is measured in significance, not area: the 1+2 shape is ordinary on
+    # this assay (RS1695 A12 and G10 are reference hets with hom1 area 0), so
+    # area cannot carry the test, while the bands themselves are plainly there.
+    # It is deliberately ``hom*_ok_sig``'s sibling rather than those predicates,
+    # which also require non-zero area.
+    if both_present and hom2 > 0 and (
+            s1 is None or s2 is None
+            or (s1 >= T9_MIN_SECOND_ALLELE_SIGMA
+                and s2 >= T9_MIN_SECOND_ALLELE_SIGMA)):
         if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
             flags.add("ai")
         return "het", frac, flags
