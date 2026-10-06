@@ -213,6 +213,22 @@ def test_empty_trace_gives_a_reason():
     assert row["reason"]
 
 
+def test_no_is_on_a_merged_plate_does_not_raise():
+    """A well with no standard on a plate whose shape is three-band (d3 None).
+
+    Regression: the merged geometry's d3 is None, and the no-IS fallback used to
+    add all three gaps to span the centre window -- a TypeError that killed the
+    whole auto-genotype run on the first unreadable well of such a plate.
+    """
+    model = g.PlateISModel.from_marks(
+        [STD_SCANS[:3], [s - 2 for s in STD_SCANS[:3]],
+         [s + 2 for s in STD_SCANS[:3]], [s + 4 for s in STD_SCANS[:3]]])
+    assert model is not None and model.geometry.merged
+    doc = FakeDoc(plate([0, 0, 0, 0], [1000, 1000, 1000, 1000]))
+    row = g.auto_genotype(doc, base_order=DYE_ORDER, is_model=model)
+    assert row["call"] in ("het", "no-call")
+
+
 def test_standard_and_sample_on_the_same_channel_is_refused():
     row = g.auto_genotype(FakeDoc(plate([1000] * 4, [1000] * 4)),
                           is_channel=2, sample_channel=2, base_order=DYE_ORDER)

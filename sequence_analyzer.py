@@ -2323,14 +2323,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 f"{len(load_errors)} of {len(targets)} wells could not be "
                 f"read; skipped.")
         if len(seeds) < 2:
+            if seeds:
+                where = "Only " + ", ".join(sorted(seeds))
+            else:
+                where = "No marked wells found"
             messagebox.showinfo(
                 "Semi automatic internal standard",
+                f"{where}.\n\n"
                 "Mark the internal standard in at least two wells first.\n\n"
-                "Use the pick table's Mark standard button (Genotyping ▸ "
-                "Peak\npicking) on two or three wells you can read yourself, "
-                "then come\nback to this command. Two is the minimum and "
-                "three to five is better:\nthe more you mark, the tighter the "
-                "learned shape and the fewer\nwells need checking afterwards.")
+                "On the standard channel, pick the standard's main peaks and "
+                "hit\nGenotyping ▸ Mark peaks as standard… for each well. "
+                "Two is\nthe minimum and three to five is better: the more "
+                "you mark, the\ntighter the learned shape and the fewer wells "
+                "need checking.")
             self.status_var.set(
                 f"Semi automatic: {len(seeds)} marked well"
                 f"{'s' if len(seeds) != 1 else ''}, need at least 2.")

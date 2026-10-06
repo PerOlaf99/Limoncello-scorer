@@ -1226,7 +1226,7 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
         from itertools import combinations
         pk = _is_candidates(y, DEFAULT_IS_CUT, geometry=geometry)
         if center is not None and center_tol:
-            span = (geometry.d1 + geometry.d2 + geometry.d3) / 2.0
+            span = (geometry.d1 + geometry.d2 + (geometry.d3 or 0.0)) / 2.0
             lo, hi = center - center_tol - span, center + center_tol + span
             pk = [c for c in pk if lo <= c[0] <= hi]
         for combo in combinations(range(len(pk)), 4):
