@@ -713,7 +713,7 @@ class PlateISModel:
         return cls.from_marks(quartets)
 
     @classmethod
-    def from_wells(cls, wells):
+    def from_wells(cls, wells, samp_col=None):
         """Fit the plate model from ``(acgt, is_col, scans)`` triples.
 
         This is the semi-automatic entry point: the operator marks the
@@ -721,6 +721,14 @@ class PlateISModel:
         traces alongside their marks so the model can also learn this plate's
         noise floor and sample/standard co-migration -- the two references that
         cannot be read off scan positions alone.
+
+        *samp_col* is the ``acgt`` column the sample product sits on, in the
+        same convention as *is_col*.  It must be given for the co-migration
+        calibration to run: without it the model builds no gate for where the
+        sample product sits relative to each standard band, and inherited code
+        falls back to a fixed search radius.  A product co-migrates with the
+        standard it was spiked beside, so how far it sits is a property of the
+        fragment -- measured here, never assumed.
 
         Marks are pooled across wells, not intersected, and the two templates
         (split / merged heteroduplexes) are fitted independently so a capillary
@@ -737,11 +745,13 @@ class PlateISModel:
                 continue
             ms.append(scans)
             std_refs.append((np.asarray(acgt, dtype=float), is_col, scans))
-            samp_refs.append((np.asarray(acgt, dtype=float), None, scans))
+            samp_refs.append((np.asarray(acgt, dtype=float), samp_col, scans))
         model = cls.from_marks(ms)
         if model is None:
             return None
         prime_plate_std_snr(model, std_refs)
+        if samp_col is not None:
+            prime_plate_co_migration(model, samp_refs)
         return model
 
     def describe_plate(self):
@@ -809,10 +819,29 @@ class PlateISModel:
         # A gate wider than any plausible product spread is not a measurement,
         # it is a contaminated reference set.  Refuse it: the ungated fallback
         # is strictly the old behaviour, so declining can only miss the
-        # improvement, never introduce a regression.
-        if span > CO_MIGRATION_MAX_HALF_SPAN:
+        # improvement, never introduce a regression.  The cap is the fixed
+        # apex radius because a gate half-span beyond it has stopped saying
+        # "where the product sits" and started saying "wherever the segment
+        # points" -- ABCC2_T1's -38..+22 gate came off a bad run and moved
+        # two real no-calls to hom-1.
+        if span > CO_MIGRATION_MAX_HALF_SPAN or span > SEGMENT_APEX_RADIUS:
             return None
         return med - span, med + span
+
+    def co_migration_median(self, duplex):
+        """Plate home of a duplex's product, or ``None`` when unknown.
+
+        The verdict that decides whether a well's bands are real products uses
+        this median as the outside reference point: a lone band that sits
+        impossibly far from every marked well's band on the same plate is an
+        orphan (an un-run reaction's off-target product), no matter how strong
+        it reads.
+        """
+        refs = self.co_mig[duplex] if 0 <= duplex < len(self.co_mig) else []
+        if len(refs) < CO_MIGRATION_MIN_REFS:
+            return None
+        import statistics as _st
+        return _st.median(refs)
 
     def window(self):
         """Half-width of the search window around the predicted centre."""
@@ -975,13 +1004,15 @@ STRICT_SOURCES = ("anchored", "anchored-wide",
                   "anchored-merged", "anchored-merged-wide")
 
 
-def semi_auto_plate_model(traces, seeds, is_col, max_rounds=6):
+def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
     """Learn this plate's internal standard from a few marked wells, then find
     the standard in the rest.  This is the whole semi-automatic idea.
 
     *traces* is ``{well: acgt}`` for the wells in the batch, *seeds* is
-    ``{well: [scans]}`` for the handful the operator marked, and *is_col* is the
-    ``acgt`` column the standard sits on.
+    ``{well: [scans]}`` for the handful the operator marked, *is_col* is the
+    ``acgt`` column the standard sits on, and *samp_col* the ``acgt`` column
+    the sample product sits on (see :meth:`PlateISModel.from_wells`; omitted,
+    no co-migration gate is learned).
 
     The refinement loop matters more than the single fit.  Two hand marks give a
     shape whose tolerance is measured only from the disagreement between those
@@ -1006,7 +1037,7 @@ def semi_auto_plate_model(traces, seeds, is_col, max_rounds=6):
             "well, and a one-well shape would spread a single mistake across "
             "the whole plate.")
     model = PlateISModel.from_wells(
-        [(traces[w], is_col, s) for w, s in first.items()])
+        [(traces[w], is_col, s) for w, s in first.items()], samp_col=samp_col)
     if model is None:
         raise ValueError("the marked wells gave no usable standard shape")
 
@@ -1028,7 +1059,8 @@ def semi_auto_plate_model(traces, seeds, is_col, max_rounds=6):
         if len(learnable) < TRIM_MIN_WELLS or _round == max_rounds - 1:
             break
         refit = PlateISModel.from_wells(
-            [(traces[w], is_col, s) for w, s in learnable.items()])
+            [(traces[w], is_col, s) for w, s in learnable.items()],
+            samp_col=samp_col)
         if refit is None:
             break
         moved = max(
@@ -1107,6 +1139,15 @@ CO_MIGRATION_MIN_REFS = 8    # marked wells needed before a duplex is gated
 # too few references must leave the duplex ungated rather than guess.
 CO_MIGRATION_SEARCH = 50     # scans either side to search when a duplex has no gate
 CO_MIGRATION_MAX_HALF_SPAN = 40.0  # wider than this and the references are noise
+# A duplex only counts as a real product when it is clear of the noise floor.
+# The verdict below then asks whether the plateau it sits on co-migrates with
+# the well's own kin -- per-well self-consistency instead of a plate gate,
+# because the gate is only wide enough for the plate's typical drift and a
+# genuine run reshuffles the deltas as a *set* (F05's +8/+8/+17 stayed a real
+# heterozygote while G08's -39/+32 was junk).
+
+CO_MIGRATION_PRESENT_SIGMA = 10.0  # scans; a band must clear noise by this to exist
+CO_MIGRATION_SET_TOL = 16.0        # scans; duplex bands agreeing within this share a delta
 
 
 def _noise_sigma(y):
@@ -1219,6 +1260,111 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
         if len(peaks) > 3:
             row["hom2"] = float(y[peaks[3]])
     return row
+
+
+def _well_product_candidates(y, sigma, centres, bases):
+    """Strongest clear-of-noise peak per duplex, offset from its band centre.
+
+    A real product never strays far from its own standard band, so a duplex's
+    best evidence of a product is the strongest peak within
+    ``CO_MIGRATION_SEARCH`` scans of the fitted centre -- but not a single
+    scan of a neighbour's: on a clean well every band carries a product, so the
+    raw window holds a peak per duplex and the tallest one has no way to tell
+    whose it is except where it sits relative to the band pitch.  Each duplex
+    therefore searches only out to half the gap to its nearest neighbour -- the
+    product belongs within that, however far the run drifted (F05's CYBA ran
+    +8/+8/+17), while the neighbour's equally tall peak stays on its own side
+    of the boundary.
+
+    Returns ``{duplex: (offset, height)}`` for the duplexes with something
+    clear of the noise floor; the quiet ones are left out.
+    """
+    from scipy.signal import find_peaks
+    out = {}
+    throws = [float("inf")] + [centres[i + 1] - centres[i]
+                               for i in range(len(centres) - 1)] + [float("inf")]
+    for k, ctr in enumerate(centres):
+        radius = min(throws[k], throws[k + 1]) / 2.0
+        if radius < 1.0:
+            continue
+        w0 = max(0, int(round(ctr)) - CO_MIGRATION_SEARCH)
+        w1 = min(len(y), int(round(ctr)) + CO_MIGRATION_SEARCH + 1)
+        if w1 - w0 < MIN_SEGMENT_SPAN:
+            continue
+        yw = y[w0:w1]
+        floor = float(bases[k]) + CO_MIGRATION_PRESENT_SIGMA * sigma
+        pk, _ = find_peaks(yw, height=floor, distance=max(3, int(round(0.5 * sigma))))
+        best = None
+        for p in pk:
+            off = w0 + p - ctr
+            if abs(off) > radius:
+                continue
+            h = float(yw[p])
+            if best is None or h > best[1]:
+                best = (float(off), h)
+        if best is not None:
+            out[k] = best
+    return out
+
+
+def _co_migration_verdict(cands, snrs, is_model):
+    """Which of a well's duplexes are real products, on this well's own terms.
+
+    A well is read from the inside out, not from the plate's average: the
+    capillary that ran this sample shifted the migration, but it shifted every
+    band of the duplex together (F05's CYBA products all landed +8/+8/+17 past
+    the IS from a warm capillary and stayed a genuine heterozygote, while
+    G08's GSTA1 read +32 on the second allele, nowhere near the first's -39,
+    and was junk between the bands).
+
+    The well's dominant band -- the one carrying the most signal -- is where
+    the call starts, because it is the strongest product the well demonstrably
+    has.  Everything kept has to agree with it:
+
+    * duplexes within ``CO_MIGRATION_SET_TOL`` of the dominant's own offset are
+      the same run's product in another duplex -- all of them are real;
+    * the dominant on its own is that run's product only where the plate's
+      marked wells put products, otherwise the lone strong peak is an orphan
+      (an un-run reaction's off-target product, exactly F12's decoy): a band
+      out on its own and off the plate's home has nothing behind it.  A plate
+      with no reference material at all has no vote, so the historical call
+      stands there.
+
+    A second, internally consistent pair that does not include the dominant is
+    not the well talking -- E11's T9 hom-2 kept two residual peaks in the
+    heteroduplex region (both at about -39) that agreed with each other but
+    contradicted the plate's -11, and they must not outvote the real allele.
+
+    Returns ``None`` when there is no plate model -- the historical
+    measurement then stands untouched -- else the list of duplexes judged real.
+    """
+    if not is_model:
+        return None
+    present = [k for k, c in cands.items() if snrs[k] >= CO_MIGRATION_PRESENT_SIGMA]
+    if not present:
+        return []
+    offsets = {k: cands[k][0] for k in present}
+    if len(present) == 1:
+        k = present[0]
+        med = is_model.co_migration_median(k)
+        if med is not None and abs(offsets[k] - med) > SEGMENT_APEX_RADIUS:
+            return []
+        return [k]
+    dom = max(present, key=lambda k: snrs[k])
+    cluster = sorted(k for k in present
+                     if abs(offsets[k] - offsets[dom]) <= CO_MIGRATION_SET_TOL)
+    if len(cluster) >= 2:
+        return cluster
+    # The dominant band stands alone.  When the rest of the well carries no
+    # other product the plate's own measurement is the only referee -- the
+    # lone-band case above rejects a strong peak that contradicts it (F12's
+    # +12 decoy against a plate whose products live at -11), which has nothing
+    # real behind it.  But when other duplexes do hold signal, that signal is
+    # the endorsement that this well genuinely ran: the dominant is its best
+    # product whatever the plate's average says, because a run that drifted
+    # (D07's T9 hom-2 at -33 against the plate's -11) shifted every band
+    # together and the plate average cannot speak for this well then.
+    return [dom]
 
 
 def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
@@ -1350,36 +1496,69 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
     # and leave the fourth slot empty rather than inventing a second one.  The
     # call then rests on that band alone, which is conclusive for the genotype
     # but reports no separate HET2 area.
-    areas, snrs = [], []
+    areas, snrs, bases = [], [], []
     for k, (lo, hi) in enumerate(segs):
         lo, hi = max(0, lo), min(n, hi)
-        if hi - lo < MIN_SEGMENT_SPAN:
-            areas.append(0.0)
-            snrs.append(0.0)
-            continue
         # Baseline from the quiet trace either side of this duplex, not from its
         # own peak: a peak sitting on a raised baseline would otherwise measure
         # the step under it as signal.
         m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
             (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
-        base = float(np.median(y[m]))
-        # Look for this duplex's apex only where its product belongs.  The
-        # segment itself is far wider than the product (H2 spans ~170 scans
-        # when d1 is 81), so taking the segment maximum hands the measurement to
+        base = float(np.median(y[m])) if m.any() else 0.0
+        bases.append(base)
+        if hi - lo < MIN_SEGMENT_SPAN:
+            areas.append(0.0)
+            snrs.append(0.0)
+            continue
+        # Look for this duplex's apex a fixed short radius round the band
+        # centre, never across the whole segment.  The radius exists because
+        # the segment is far wider than the product (H2 spans ~170 scans when
+        # d1 is 81), so taking the segment maximum hands the measurement to
         # whatever else happens to sit inside it -- which is how ABCC2 H01 grew
         # a second allele it does not have, and how F12's off-target became its
-        # only "product".  With a calibrated gate the peak is sought inside the
-        # co-migration band; without one the old fixed radius stands.
-        gate = is_model.co_migration_window(k) if is_model is not None else None
-        if gate is not None:
-            a = max(0, int(round(scans[k] + gate[0])))
-            b = min(n, int(round(scans[k] + gate[1])) + 1)
-        else:
-            a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
-            b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
+        # only "product".  Whether that apex is then a real product is decided
+        # by the co-migration verdict below, not by a plate gate: a gate
+        # reflects the plate's average drift and is blind to a run that shifted
+        # every delta together (F05 stayed a real heterozygote at +8/+8/+17
+        # past the IS while a gate read it as nothing).
+        a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
+        b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
         apex = float(y[a:b].max()) if b > a else 0.0
         areas.append(max(0.0, float(_trapz(y[lo:hi] - base, dx=1.0))))
         snrs.append((apex - base) / sigma if sigma > 0 else 0.0)
+
+    # Per-well self-consistency: a duplex is a real product only if it
+    # co-migrates with the well's own set -- or, on its own, with the plate's
+    # measured products.  Whatever the verdict rejects is zeroed so its area
+    # and significance cannot leak into a call as a phantom second allele.
+    # The duplexes it keeps are then measured at the peak the verdict chose,
+    # not at the fixed ``SEGMENT_APEX_RADIUS`` round the band centre: a run
+    # that shifted the products as a set would otherwise be read only through
+    # the shoulder of its real peak (H09's IL10 het keeps its minor allele 18
+    # scans off-centre, and the shoulder under-reads it below the significance
+    # floor).  The fixed radius still rules every *rejected* duplex, because
+    # an orphan's own peak must not carry a call.
+    cands = _well_product_candidates(y, sigma, list(scans), bases)
+    verdict = _co_migration_verdict(cands, snrs, is_model)
+    if verdict is not None:
+        keep = set(verdict)
+        for k in range(len(segs)):
+            if k in keep and cands.get(k) is not None:
+                # Measure at the peak the verdict chose, not at the fixed
+                # ``SEGMENT_APEX_RADIUS`` round the band centre: a run that
+                # shifted the products as a set would otherwise be read only
+                # through the shoulder of its real peak (H09's IL10 het keeps
+                # its minor allele 18 scans off-centre, and a fixed window
+                # under-reads it below the significance floor).  The candidate
+                # is the strongest local maximum in its duplex's own reach, so
+                # its height is the product's; not a window round it, which can
+                # reach a neighbouring peak's flank (ABCC2_T1 A02's bad run
+                # reads 69 sigma through the flank of an unrelated peak).
+                off, hgt = cands[k]
+                snrs[k] = (hgt - bases[k]) / sigma if sigma > 0 else 0.0
+            elif k not in keep:
+                areas[k] = 0.0
+                snrs[k] = 0.0
 
     while len(areas) < 4:
         areas.append(0.0)

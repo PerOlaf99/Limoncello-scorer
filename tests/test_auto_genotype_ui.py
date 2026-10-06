@@ -15,7 +15,7 @@ if not os.environ.get("DISPLAY"):
     pytest.skip("no DISPLAY for the GUI test", allow_module_level=True)
 
 import tkinter as tk  # noqa: E402
-from tkinter import filedialog, messagebox, simpledialog  # noqa: E402
+from tkinter import filedialog, messagebox, simpledialog, ttk  # noqa: E402
 
 import analyzer_core  # noqa: E402
 import genotyping  # noqa: E402
@@ -240,3 +240,92 @@ def test_semi_automatic_standard_then_calls_match_ground_truth(app):
         assert placed[well]["std_scans"], placed[well]
     assert "strong" in app._auto_is_model_note or "learned" in \
         app._auto_is_model_note, app._auto_is_model_note
+
+
+def _run_auto(app):
+    app._auto_is_channel.set(genotyping.DEFAULT_IS_CHANNEL)
+    app._auto_sample_channel.set(genotyping.DEFAULT_SAMPLE_CHANNEL)
+    app.auto_genotype_wells()
+    app.update()
+
+
+def _mark_two(app):
+    seed = {"A01": [2135, 2214, 2425, 2520], "A02": [2172, 2266, 2477, 2563]}
+    for well, scans in seed.items():
+        pk = app._ensure_picker(RUN / f"{well}.rsd")
+        pk.std = [(x, "") for x in scans]
+    app.semi_auto_is()
+    _run_auto(app)
+
+
+def _all_buttons(win):
+    out = []
+    for child in win.winfo_children():
+        try:
+            if isinstance(child, ttk.Button):
+                out.append(child)
+        except Exception:
+            pass
+        out.extend(_all_buttons(child))
+    return out
+
+
+def test_auto_table_has_its_own_save_button(app):
+    _mark_two(app)
+    labels = []
+    for b in _all_buttons(app.center):
+        try:
+            labels.append(b.cget("text"))
+        except Exception:
+            pass
+    assert any("Save table" in t for t in labels), labels
+
+
+def test_table_shows_flags_and_is_peak_positions(app):
+    _mark_two(app)
+    idx = {c: i for i, c in enumerate(app._auto_tree["columns"])}
+    assert "ispeaks" in idx and "flags" in idx, idx
+    first = app._auto_tree.item(app._auto_tree.get_children()[0])["values"]
+    # the IS peaks column carries the standard's scan positions, not a blank
+    assert first[idx["ispeaks"]].replace("/", "").isdigit(), first
+    # the two hand-marked wells are the tinted rows
+    assert "manual" in app._auto_tree.item(
+        app._auto_tree.get_children()[0], "tags")
+
+
+def test_double_click_edits_a_call_and_the_export_writes_the_override(
+        app, tmp_path, monkeypatch):
+    _mark_two(app)
+    tree = app._auto_tree
+    well0 = tree.item(tree.get_children()[0], "values")[0]
+    original = app._auto_rows[0]["call"]
+    assert original != "no-call", (original, well0)
+
+    # closing an open editor without applying leaves the call untouched
+    app._auto_edit_call_at(0)
+    assert app._auto_edit_win is not None
+    data = dict(app._auto_rows[0])
+    app._auto_edit_close()
+    assert app._auto_edit_win is None
+    assert app._auto_rows[0] == data
+
+    app._auto_edit_call_at(0)
+    win = app._auto_edit_win
+    assert win is not None
+    # the dialog lists the engine's vocabulary
+    om = win.winfo_children()[1]
+    assert isinstance(om, ttk.Combobox)
+    win._var.set("no-call")
+    win._apply()
+    assert app._auto_edit_win is None
+    assert app._auto_rows[0]["call"] == "no-call"
+    assert tree.item(tree.get_children()[0], "values")[1] == "no-call"
+
+    out = tmp_path / "auto.csv"
+    monkeypatch.setattr(filedialog, "asksaveasfilename",
+                        lambda *a, **k: str(out))
+    app.auto_genotype_save()
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    by_well = {r["well"]: r["call"] for r in rows}
+    assert by_well[well0] == "no-call", (by_well, well0, rows)

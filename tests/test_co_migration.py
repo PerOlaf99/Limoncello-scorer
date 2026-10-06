@@ -87,6 +87,58 @@ class TestCoMigrationWindow:
         assert model.co_migration_window(0) is None
 
 
+class TestModelBuildingPrimesTheGate:
+    """The gate has to be learned where the model is actually built.
+
+    ``prime_plate_co_migration`` is only useful if the production path calls
+    it: ``from_wells`` hands the marked wells straight to it, so a model built
+    the way the GUI builds one carries the calibration, while a caller that
+    knows only the standard column (and cannot name the sample column) is left
+    exactly as before -- ungated, fixed-radius search.
+    """
+
+    def _model(self, offsets, with_samp=True):
+        base = 2600.0
+        wells = []
+        for o in offsets:
+            acgt = np.zeros((3400, 4))
+            acgt[:, 3] = _trace([(base, 900), (base + 81, 900),
+                                 (base + 145, 900), (base + 155, 900)])
+            acgt[:, 1] = _trace([(base + o, 800)])
+            wells.append((acgt, 3, _quartoctet(
+                [base, base + 81, base + 145, base + 155])))
+        if with_samp:
+            return genotyping.PlateISModel.from_wells(wells, samp_col=1)
+        return genotyping.PlateISModel.from_wells(wells)
+
+    def test_from_wells_primes_the_gate(self):
+        model = self._model([-12] * 8 + [-9, -15, -11, -13])
+        win = model.co_migration_window(0)
+        assert win is not None
+        assert win[0] < -12 < win[1]
+
+    def test_omitting_samp_col_installs_no_gate(self):
+        # The GUI path that knows only is_col keeps the old behaviour -- no
+        # gate -- instead of silently gating to a column it does not own.
+        model = self._model([-12] * 12, with_samp=False)
+        assert model.co_migration_window(0) is None
+
+    def test_built_model_rejects_the_off_product_peak(self):
+        # The F12 shape end to end: the model built from from_wells, then the
+        # well carrying only a decoy peak, must read no-call.
+        model = self._model([-12] * 8 + [-9, -15, -11, -13])
+        row = TestGateRejectsOffProduct()._row(
+            TestGateRejectsOffProduct()._well(400, 12, 44), model)
+        assert row["call"] == "no-call"
+
+    def test_built_model_still_calls_the_co_migrating_peak(self):
+        # And the same model must not throw away the real product.
+        model = self._model([-12] * 8 + [-9, -15, -11, -13])
+        row = TestGateRejectsOffProduct()._row(
+            TestGateRejectsOffProduct()._well(-12, 400, 44), model)
+        assert row["call"] == "hom-1"
+
+
 class TestGateRejectsOffProduct:
     def _well(self, product_offset, decoy_offset, decoy_height):
         base = 2600.0
@@ -120,6 +172,59 @@ class TestGateRejectsOffProduct:
         model = _model_from([-12] * 8 + [-9, -15, -11, -13])
         row = self._row(self._well(-12, 400, 44), model)
         assert row["call"] == "hom-1"
+
+
+class TestWellSelfConsistency:
+    """The verdict reads a well from inside out, not through the plate gate.
+
+    A gate is the plate's *average* drift, and a genuine run that shifted every
+    delta together must not be read through an average that no longer applies
+    (F05's CYBA het at +8/+8/+17).  So the well's dominant band anchors the
+    call, the plate only referees the cases that cannot decide themselves.
+    """
+
+    def test_lone_band_off_the_plate_home_is_an_orphan(self):
+        # F12: only one band at all, +12 on a plate whose products live at
+        # -12.  Nothing else ran, so the plate is the only referee -- and the
+        # peak contradicts it.
+        model = _model_from([-12] * 8 + [-9, -15, -11, -13])
+        cands = {0: (12.0, 585.0)}
+        assert genotyping._co_migration_verdict(
+            cands, [43.9, 3.3, 2.5, 2.7], model) == []
+
+    def test_lone_band_on_the_plate_home_is_a_product(self):
+        model = _model_from([-12] * 8 + [-9, -15, -11, -13])
+        cands = {0: (-9.0, 585.0)}
+        assert genotyping._co_migration_verdict(
+            cands, [120.0, 0.1, 0.0, 0.0], model) == [0]
+
+    def test_dominant_beats_an_internal_pair_that_contradicts_it(self):
+        # E11: two residual peaks in the heteroduplex region agree with each
+        # other (both ~-39) but agree with nothing else -- and the well's real
+        # allele, its dominant band, sits at the plate's -13.  The pair must
+        # not outvote the dominant.
+        model = _model_from([-12] * 8 + [-9, -15, -11, -13])
+        cands = {0: (36.0, 1209.0), 1: (-13.0, 56588.0),
+                 2: (-45.0, 2312.0), 3: (-33.0, 1555.0)}
+        assert genotyping._co_migration_verdict(
+            cands, [19.2, 3785.9, 25.9, 24.4], model) == [1]
+
+    def test_drifted_hom_dominant_kept_when_other_signal_present(self):
+        # D07: a real T9 hom-2 whose product drifted to -33, 22 scans off the
+        # plate's -11.  A second band is present, so the well genuinely ran,
+        # and the plate's average no longer speaks for it: the dominant stands.
+        model = _model_from([-11] * 8 + [-9, -13, -12, -10])
+        cands = {1: (-33.0, 17638.0), 3: (16.0, 3702.0)}
+        assert genotyping._co_migration_verdict(
+            cands, [8.7, 223.0, -23.9, 23.2], model) == [1]
+
+    def test_drifted_set_is_all_kept(self):
+        # F05: every band shifted right together, so the whole set -- not the
+        # plate average -- is the well talking.
+        model = _model_from([-10] * 12)
+        cands = {0: (21.0, 1429.0), 1: (8.0, 1534.0), 2: (17.0, 1574.0)}
+        assert genotyping._co_migration_verdict(
+            cands, [75.4, 116.5, 51.5], model) == [0, 1, 2]
 
 
 class TestHomRequiresItsOwnSignal:

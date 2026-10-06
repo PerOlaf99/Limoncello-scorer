@@ -260,6 +260,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._auto_is_model = None
         self._auto_is_model_note = ""
         self._auto_tree = None
+        # Popup for editing a call cell off the auto-genotype table; the window
+        # is re-raised, not recreated, while one edit is in progress.
+        self._auto_edit_win = None
         self._pick_cid = None
         self._gen_motion_cid = None
         self._area_release_cid = None
@@ -2279,9 +2282,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "wells (or a subset of it).")
             return
         is_c = int(self._auto_is_channel.get())
+        sa_c = int(self._auto_sample_channel.get())
         try:
             is_col = genotyping.acgt_index_for_channel(
                 self.base_order_var.get(), is_c)
+            samp_col = genotyping.acgt_index_for_channel(
+                self.base_order_var.get(), sa_c)
         except ValueError as e:
             messagebox.showerror("Semi automatic internal standard", str(e))
             return
@@ -2335,7 +2341,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             f"{len(seeds)} marked well{'' if len(seeds) == 1 else 's'}…")
         self.update_idletasks()
         try:
-            model, found = genotyping.semi_auto_plate_model(traces, seeds, is_col)
+            model, found = genotyping.semi_auto_plate_model(
+                traces, seeds, is_col, samp_col=samp_col)
         except ValueError as e:
             messagebox.showerror("Semi automatic internal standard", str(e))
             return
@@ -2522,12 +2529,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 pass
             self._auto_tree = None
         cols = ("well", "call", "frac", "hom1", "hom2", "het1", "het2",
-                "snr1", "snr2", "snr3", "snr4", "std", "conf",
+                "snr1", "snr2", "snr3", "snr4", "ispeaks", "conf",
                 "flags", "reason")
         tblf = ttk.Frame(self.center)
         tblf.pack(fill=tk.X, padx=4, pady=2)
-        hdr = ttk.Label(self.center, text="Auto-genotype results")
-        hdr.pack(anchor="w", padx=4)
+        hdr = ttk.Frame(self.center)
+        hdr.pack(fill=tk.X, padx=4)
+        ttk.Label(hdr, text="Auto-genotype results  "
+                            "(double-click a call to change it)"
+                  ).pack(side=tk.LEFT)
+        ttk.Button(hdr, text="Save table\u2026",
+                   command=self.auto_genotype_save).pack(side=tk.RIGHT)
         # The pick table has to exist and be visible for manual picks to stay
         # saveable, so build it if auto-genotyping is the first thing run.
         if self.pick_tree is None and self.genotyping_active and not self.area_mode:
@@ -2535,31 +2547,124 @@ class LimoncelloAnalyzerApp(tk.Tk):
         tree = ttk.Treeview(tblf, columns=cols, show="headings", height=8)
         widths = {"well": 56, "call": 74, "frac": 48, "hom1": 56, "hom2": 56,
                   "het1": 56, "het2": 56, "snr1": 46, "snr2": 46, "snr3": 46,
-                  "snr4": 46, "std": 104, "conf": 66,
+                  "snr4": 46, "ispeaks": 104, "conf": 76,
                   "flags": 90, "reason": 200}
-        left = ("well", "call", "std", "conf", "flags", "reason")
+        left = ("well", "call", "ispeaks", "conf", "flags", "reason")
         for c in cols:
-            tree.heading(c, text=c)
+            tree.heading(c, text="IS peaks" if c == "ispeaks" else c)
             tree.column(c, width=widths[c],
                         anchor="w" if c in left else "e",
-                        stretch=(c in ("reason", "flags", "std")))
-        for r in self._auto_rows:
-            tree.insert("", tk.END, values=(
+                        stretch=(c in ("reason", "flags", "ispeaks")))
+        for i, r in enumerate(self._auto_rows):
+            # IS peak column: where the standard was found, so the operator can
+            # eyeball it against the traces -- ``std_scans`` is set for both
+            # detection and manual marks, ``std_scans_manual`` backs it up.
+            ispeaks = r.get("std_scans", "") or r.get("std_scans_manual", "")
+            conf = " ".join(x for x in (
+                r.get("std_source", ""),
+                r.get("std_conf", ""),
+                (f"{r.get('std_score', 0.0):.2f}" if r.get("std_score") else ""),
+            ) if x)
+            tree.insert("", tk.END, iid=str(i), values=(
                 r.get("well", ""), r.get("call", ""),
                 f"{r.get('frac', 0.0):.3f}",
                 f"{r.get('hom1', 0.0):.0f}", f"{r.get('hom2', 0.0):.0f}",
                 f"{r.get('het1', 0.0):.0f}", f"{r.get('het2', 0.0):.0f}",
                 f"{r.get('snr1', 0.0):.0f}", f"{r.get('snr2', 0.0):.0f}",
                 f"{r.get('snr3', 0.0):.0f}", f"{r.get('snr4', 0.0):.0f}",
-                r.get("std_source", ""),
-                (f"{r.get('std_conf', '')} {r.get('std_score', 0.0):.2f}").strip(),
+                ispeaks, conf,
                 r.get("flags", ""), r.get("reason", "")))
+            if r.get("std_source") == "manual":
+                tree.item(str(i), tags=("manual",))
+        # The operator's own standard marks are the ground truth this assay
+        # defers to; tint those rows so they stand apart from learned ones.
+        tree.tag_configure("manual", background="#EAF4FF")
+        tree.bind("<Double-1>", self._auto_edit_call)
         vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=vs.set)
         tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
         self._auto_tree = tree
         self._auto_table = tblf
+
+    def _auto_edit_call(self, event):
+        """Double-click on a call cell to change the operator's verdict.
+
+        The engine's call is a suggestion scored from one plate's noise and one
+        well's standard; the operator's eye and the clinical context override
+        it.  The override edits the row in place -- the same dict the Save
+        button writes -- so a corrected call survives export instead of living
+        only on screen.  A small dialog (not an inline widget) is used because
+        the combobox popdown steals focus and would clobber an inline editor.
+        """
+        if getattr(self, "_auto_tree", None) is None or \
+                getattr(self, "_auto_edit_win", None) is not None:
+            return
+        rowid = self._auto_tree.identify_row(event.y)
+        colid = self._auto_tree.identify_column(event.x)
+        if not rowid or colid != "#2":
+            return
+        i = int(rowid)
+        if 0 <= i < len(self._auto_rows):
+            self._auto_edit_call_at(i, event)
+
+    def _auto_edit_call_at(self, i, event=None):
+        """Build the genotype-edit dialog for auto-row *i*.
+
+        Positioned over the clicked cell when the table is really on screen;
+        near the pointer otherwise (headless runs have no cell geometry)."""
+        if getattr(self, "_auto_edit_win", None) is not None:
+            return
+        from scorer import CALLS
+        x = y = 0
+        if event is not None:
+            try:
+                bbox = self._auto_tree.bbox(str(i), "#2")
+                if bbox:
+                    x, y = bbox[0], bbox[1]
+            except tk.TclError:
+                pass
+        win = tk.Toplevel(self)
+        self._auto_edit_win = win
+        win.title(f"Genotype \u2014 {self._auto_rows[i].get('well', '')}")
+        win.transient(self)
+        win.grab_set()
+        ttk.Label(win, text="Genotype:").pack(side=tk.LEFT, padx=(8, 4), pady=6)
+        var = tk.StringVar(value=self._auto_rows[i]["call"])
+        om = ttk.Combobox(win, textvariable=var, values=list(CALLS),
+                          state="readonly", width=12)
+        om.pack(side=tk.LEFT, padx=(0, 8), pady=6)
+        win._apply = lambda: self._auto_edit_apply(i, var)
+        win._var = var
+        btn = ttk.Button(win, text="Apply", command=win._apply)
+        btn.pack(side=tk.LEFT, padx=2, pady=6)
+        btn = ttk.Button(win, text="Cancel", command=self._auto_edit_close)
+        btn.pack(side=tk.LEFT, padx=2, pady=6)
+        if event is not None and not x:
+            x = event.x_root
+            y = event.y_root
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        om.focus_set()
+
+    def _auto_edit_apply(self, i, var):
+        """Commit the operator's override into the row that Save writes."""
+        self._auto_rows[i]["call"] = var.get()
+        self._auto_tree.set(str(i), "#2", var.get())
+        self._auto_edit_close()
+
+    def _auto_edit_close(self):
+        win = getattr(self, "_auto_edit_win", None)
+        if win is None:
+            return
+        self._auto_edit_win = None
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
 
     def auto_genotype_save(self):
         """Write the auto-genotype rows out through the shared save_table, so
