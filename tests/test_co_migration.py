@@ -217,15 +217,18 @@ class TestHetRequiresTheSecondAllele:
         # RS1695_N2 A04, which called het on this: heteroduplex peaks clear of
         # the noise at 40 and 56 sigma, a dominant homoduplex at 6447, and a
         # first homoduplex at 7.5 sigma -- 0.7% of the real peak.  Real hets on
-        # the same plate clear 30 sigma on both homoduplexes (tightest: G10 at
-        # 46.0), so this is what separates the two without costing a true call.
+        # the same plate clear T9_MIN_DOMINANT_SIGMA on both homoduplexes
+        # (tightest: G10 at 46.0), so this is what separates the two without
+        # costing a true call.
         call, _frac, _flags = scorer.t9_call(611754, 6130, 0, 4465,
                                              (7.5, 6447.3, 40.3, 56.2))
         assert call == "hom-2"
 
-    def test_the_second_allele_floor_is_shared_with_the_heteroduplexes(self):
-        # One threshold decides "this band is real", so the minor homoduplex
-        # and the heteroduplex bands are held to the same bar.  If these two
-        # ever drift apart the constant stops meaning what its comment says.
-        assert (scorer.T9_MIN_SECOND_ALLELE_SIGMA
-                == scorer.T9_MIN_HET_SIGMA)
+    def test_a_minor_allele_pinned_to_the_window_edge_is_not_an_allele(self):
+        # RS1695_N2 A01, which called het on this: the sample carries one peak,
+        # in the hom2 window at 2334, and the only thing in the hom1 window is
+        # that peak's own rising flank reaching back past IS band 1. So the
+        # hom1 reading of 34 sigma is the same molecule counted twice.
+        call, _frac, _flags = scorer.t9_call(390123, 76560, 779, 7461,
+                                             (34.2, 7045.2, 89.1, 95.3))
+        assert call == "hom-2"
