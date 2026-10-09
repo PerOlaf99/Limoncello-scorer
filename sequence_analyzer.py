@@ -688,11 +688,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.file_list.bind("<space>", lambda e: self.toggle_tour())
         self.file_list.bind("<Down>", self._page_key)
         self.file_list.bind("<Up>", self._page_key)
+        self.file_list.bind("<Left>", self._page_key)
+        self.file_list.bind("<Right>", self._page_key)
         self.file_list.bind("<Page_Down>", self._page_key)
         self.file_list.bind("<Page_Up>", self._page_key)
-        self.file_list.bind("<Delete>", lambda e: self.remove_samples())
+
         self.bind("<Down>", self._page_key_root)
         self.bind("<Up>", self._page_key_root)
+        self.bind("<Left>", self._page_key_root)
+        self.bind("<Right>", self._page_key_root)
         self.bind("<Page_Down>", self._page_key_root)
         self.bind("<Page_Up>", self._page_key_root)
 
@@ -1185,16 +1189,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.redraw()
 
     def _page_key(self, event):
-        self._page_by(1 if event.keysym in ("Down", "Page_Down") else -1)
+        keys = event.keysym
+        if keys in ("Down", "Right", "Page_Down"):
+            self._page_by(1)
+        else:
+            self._page_by(-1)
         return "break"
 
     def _page_key_root(self, event):
-        if event.keysym not in ("Down", "Up", "Page_Down", "Page_Up"):
+        keys = event.keysym
+        if keys not in ("Down", "Up", "Left", "Right", "Page_Down", "Page_Up"):
             return None
         w = self.focus_get()
         if w is not None and w.winfo_class() in (
                 "Listbox", "Canvas", "FigureCanvasTkAgg"):
-            self._page_by(1 if event.keysym in ("Down", "Page_Down") else -1)
+            if keys in ("Down", "Right", "Page_Down"):
+                self._page_by(1)
+            else:
+                self._page_by(-1)
         return None
 
     # ------------------------------------------------------------------ tour
