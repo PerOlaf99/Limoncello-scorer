@@ -169,3 +169,30 @@ def test_helper_detects_ambiguity():
     sat = [r for r in rows if r["kind"] == "+A"][0]
     assert s.has_ambiguous_satellite([sat]) is True
     assert s.has_ambiguous_satellite([r for r in rows if r["kind"] == "main"]) is False
+
+
+# --------------------------------------------------------------------------- #
+# a satellite is a tag on its neighbour, never an area claim of its own
+# --------------------------------------------------------------------------- #
+def test_a_satellite_does_not_block_picking_the_peak_it_sits_on():
+    """The fourth standard band has to stay pickable.
+
+    On ABCC2 the standard's last two bands are 12 scans apart.  Picking the
+    first tagged the second as its +A satellite, and ``pick`` counted that
+    tag as "this area is already picked", so the fourth band was refused
+    every time -- the operator could never finish marking the well (D06).
+    """
+    p = _picker(0.5, spacing=12)
+    sat = [r for r in p.records if r["kind"] == "+A"]
+    assert sat and sat[0]["scan"] == 2012, [(r["scan"], r["kind"])
+                                            for r in p.records]
+    rec = p.pick(2012, only_col=0)
+    assert rec is not None, p._reject
+    assert rec["kind"] == "main" and rec["scan"] == 2012
+
+
+def test_a_picked_area_is_still_never_picked_twice():
+    """The rule the satellite exception must not weaken."""
+    p = _picker(0.5, spacing=12)
+    assert p.pick(2000, only_col=0) is None
+    assert p._reject == "area"

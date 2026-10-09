@@ -184,6 +184,75 @@ def test_shape_free_search_returns_none_on_a_flat_trace():
 
 
 # --------------------------------------------------------------------------- #
+# PlateISModel.find: every stage runs, and the best match is what comes back
+# --------------------------------------------------------------------------- #
+# ``LEARNED`` says d1=30 with a tolerance of 8.  TRUE is a standard whose d1
+# has drifted to 55 -- twice past what the fitted tolerance allows, so only the
+# widest relaxed stage reaches it, and it sits inside the position window the
+# marks establish.  GROUP matches the fitted shape exactly but is two hundred
+# scans early and has no fourth band: exactly the kind of match the old
+# first-hit rule reported, because the anchored stage searched without a window
+# before any relaxed stage ever looked inside one.
+TRUE = [2400, 2455, 2540, 2575]
+GROUP = [1900, 1930, 2015]
+# The same drift, from a model fitted from marks rather than handed LEARNED:
+# d1=43 against a two-mark tolerance of 4.
+DRIFT = [2400, 2443, 2528, 2563]
+SEEDS = {"A01": [2400, 2430, 2515, 2550],
+         "A02": [2404, 2434, 2519, 2554]}
+
+
+def plate_model(centers=(2440.0, 2520.0)):
+    return g.PlateISModel(LEARNED, list(centers), len(centers))
+
+
+def test_find_reports_the_standard_inside_the_window_not_the_early_group():
+    found = plate_model().find(synth(TRUE + GROUP, noise=4.0, seed=1))
+    assert found is not None, "the standard must still be placed"
+    assert list(found[0]) == TRUE
+    assert found[2] == "relaxed-4"
+
+
+def test_find_reports_the_group_when_it_is_all_the_well_has():
+    found = plate_model().find(synth(GROUP, noise=4.0, seed=1))
+    assert found is not None
+    assert list(found[0]) == GROUP
+
+
+def test_find_keeps_a_three_band_standard_when_the_fourth_band_is_absent():
+    """A three-band read is half a match, not a rejected one."""
+    found = plate_model().find(synth(TRUE[:3], noise=4.0, seed=1))
+    assert found is not None
+    assert list(found[0]) == TRUE[:3]
+
+
+def test_find_gives_up_on_a_flat_trace():
+    assert plate_model().find(np.full(N_SCANS, BASELINE)) is None
+
+
+def _acgt(y):
+    """One well's four columns, standard on column 3 (T), the rest flat."""
+    acgt = np.full((N_SCANS, 4), BASELINE)
+    acgt[:, g.acgt_index_for_channel("ACTG", 3)] = y
+    return acgt
+
+
+def test_semi_auto_plate_places_the_drifted_standard_not_the_early_group():
+    """The whole workflow, and the failure that was reported against it: a
+    well's real standard was ignored because an unwindowed three-band match
+    came first in the stage order."""
+    traces = {w: _acgt(synth(marks, noise=4.0, seed=i))
+              for i, (w, marks) in enumerate(SEEDS.items())}
+    traces["B08"] = _acgt(synth(DRIFT + GROUP, noise=4.0, seed=9))
+    model, found = g.semi_auto_plate_model(
+        traces, SEEDS, is_col=g.acgt_index_for_channel("ACTG", 3))
+    assert model is not None
+    assert list(found["B08"][0]) == DRIFT
+    assert found["B08"][1] == "relaxed-4"
+    assert found["B08"][2] in ("strong", "fair")
+
+
+# --------------------------------------------------------------------------- #
 # channel mapping
 # --------------------------------------------------------------------------- #
 def test_channel_to_acgt_index_on_a_megabace_plate():

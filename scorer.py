@@ -413,7 +413,7 @@ def t9_allele_fraction(hom1, hom2, het1, het2) -> float:
     return (hom1 + 0.5 * (het1 + het2)) / total
 
 
-def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
+def t9_call(hom1, hom2, het1, het2=None, sigmas=None, min_het_frac=0.0) -> tuple:
     """Genotype for one rs1695 position -> ``(call, fraction, flags)``.
 
     *sigmas* is the optional ``(hom1, hom2, het1, het2)`` peak significance
@@ -423,6 +423,16 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
 
     ``call`` is one of ``CALLS``.  ``flags`` is a set and may contain ``"ai"``
     for a heterozygote far off 50/50.
+
+    *min_het_frac* is the operator's floor on the minor allele: a het is only
+    called when the smaller of the two allele fractions reaches it.  0 keeps
+    the engine's own behaviour, where an off-balance het is still called and
+    only flagged ``"ai"``; above it, a bump beside the main peak reads as a
+    bump -- the call falls through to the homozygote tests below and the flags
+    carry ``"het-floor"``, so the table says why the well is not a het.  It is
+    asked for rather than built in because how small a peak still means "two
+    alleles" is a property of the operator's instrument and noise, not of the
+    assay.
 
     *het2* may be ``None``/omitted when the two heteroduplexes co-migrate and so
     measure as a single band.  That band carries the area of both heteroduplex
@@ -503,9 +513,17 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None) -> tuple:
     if both_present and hom2 > 0 and (s1 is None or s2 is None
                                       or (s1 >= T9_MIN_DOMINANT_SIGMA
                                           and s2 >= T9_MIN_DOMINANT_SIGMA)):
-        if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
-            flags.add("ai")
-        return "het", frac, flags
+        # The operator's floor on the minor allele: under it, a band beside
+        # the main peak is a bump rather than a second allele, so the call
+        # falls through to the homozygote tests below instead of reporting a
+        # het.  The flag says so, because a het the table does not show is a
+        # het the operator has to be told was ruled out on purpose.
+        if 0.0 < min_het_frac and min(frac, 1.0 - frac) < min_het_frac:
+            flags.add("het-floor")
+        else:
+            if frac < T9_AI_DEVIATION or frac > 1.0 - T9_AI_DEVIATION:
+                flags.add("ai")
+            return "het", frac, flags
 
     # Homozygote: the labelled homoduplex says which allele, so unlike the
     # generic path this can distinguish the two homozygotes.

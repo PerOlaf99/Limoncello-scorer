@@ -330,6 +330,44 @@ def prime_plate_std_snr(model, wells):
     model.std_snr = [v for v in model.std_snr if v > 0]
 
 
+def weakest_std_band_height(acgt, is_col, scans):
+    """Weakest band's apex over the channel baseline, in signal units.
+
+    Signal, not significance: a noise sigma scales with how noisy the channel
+    is, so two wells of the same standard on the same plate read different
+    significances and a plate that drifted noisy gets a *lower* bar for what
+    counts as a standard.  Height over baseline is the thing the operator is
+    actually looking at when they decide a peak is there.
+    """
+    y = np.asarray(acgt[:, is_col], dtype=float)
+    if not len(scans) or not y.size:
+        return 0.0
+    base = float(np.median(y[:400]))
+    return min(max(0.0, float(y[max(0, int(s) - 6):int(s) + 7].max()) - base)
+               for s in scans)
+
+
+def prime_plate_std_height(model, wells):
+    """Fill a model's *height* reference from the wells that were marked.
+
+    Same *wells* argument as :func:`prime_plate_std_snr`.  The snr reference
+    answers "is this standard weak for this plate?"; this one answers the
+    question in front of it -- "is there a standard here at all?" -- and the
+    two need separate numbers, because a plate whose channels ran noisy gives
+    a faint noise ripple the same sigma as a real band a few thousand counts
+    tall.
+
+    The reference is what the operator marked, so a well whose marks are flat
+    drags the bar down with it.  That is right: on a plate where every marked
+    standard reads two hundred counts, two hundred counts is a standard.
+    """
+    if model is None:
+        return
+    model.std_heights = [weakest_std_band_height(a, c, s)
+                         for a, c, s in wells if s]
+    model.std_heights = [v for v in model.std_heights if v > 0]
+
+
 def prime_plate_co_migration(model, wells):
     """Fill a model's sample/standard migration offsets from the marked wells.
 
@@ -668,6 +706,11 @@ class PlateISModel:
         # pattern above and below and still recognises it.  An absolute cutoff
         # would throw away a well that is plainly readable in context.
         self.std_snr = []
+        # The same reference measured in signal instead of significance: the
+        # weakest band's height over the channel baseline, per marked well.
+        # What decides whether an automatically placed standard is believed,
+        # see weak_std_height().
+        self.std_heights = []
         # Per-duplex sample/standard migration offsets, in scans, relative to
         # each fitted band centre.  The sample and its standard are in the same
         # tube, so a real product lands a short, repeatable distance from the
@@ -750,6 +793,7 @@ class PlateISModel:
         if model is None:
             return None
         prime_plate_std_snr(model, std_refs)
+        prime_plate_std_height(model, std_refs)
         if samp_col is not None:
             prime_plate_co_migration(model, samp_refs)
         return model
@@ -785,6 +829,37 @@ class PlateISModel:
             return None
         import statistics as _st
         return max(5.0, 0.25 * _st.median(self.std_snr))
+
+    def weak_std_height(self):
+        """Signal level below which an *automatically placed* standard is not
+        a standard at all.
+
+        A quarter of this plate's typical weakest marked band, with a floor so
+        a plate of flat marks cannot set the bar at zero.  Unlike
+        :meth:`weak_std_threshold` this one is load-bearing: nothing is
+        flagged on the threshold, a placement under it is believed not to
+        exist, and the well goes down the no-standard path (after the product
+        has had its say -- see ``_product_guided_std``).
+
+        The distinction from the snr reference is the whole point.  Significance
+        divides by the channel's noise, so a well that ran noisy reads its real
+        standard as unimpressive and a noise ripple as unimpressive too -- the
+        bar moves with the weather.  ABCC2_N1's E01 sits on a channel carrying
+        a raised plateau from 2500 to 2900, and the detector locked four bumps
+        off it at four hundred counts against a plate whose marked standards
+        read two thousand; on significance alone that read 44 sigma, better
+        than some real bands.  Measured in signal against the operator's own
+        marks it is plainly not the same object.
+
+        Hand marks are exempt, here and in :meth:`confidence`: the operator
+        saying "the standard is here" is the evidence, however faint the peak.
+        Returns None when the plate has too little marked material to judge.
+        """
+        hs = self.std_heights or []
+        if len(hs) < 4:
+            return None
+        import statistics as _st
+        return max(50.0, 0.25 * _st.median(hs))
 
     def min_sample_snr(self):
         """Sample signal a half-formed standard must still show to be called.
@@ -843,6 +918,42 @@ class PlateISModel:
         import statistics as _st
         return _st.median(refs)
 
+    def co_migration_conflict(self):
+        """Why this plate's sample channel cannot be read, or None.
+
+        The references behind :meth:`co_migration_median` all measure one
+        thing: how far the sample's dye runs from the standard's dye for this
+        fragment.  Two duplexes with enough references to speak must therefore
+        say the same thing about it.  When they do not, the plate has no
+        coherent product model, and a well whose peak lands between the two
+        answers is not evidence of a product -- it is evidence that the
+        answers are guesses.
+
+        ABCC2_N2 is that plate: H2's references read +45 and the
+        heteroduplexes' read -43, and of its 93 marked wells only 58 hold a
+        sample peak at all and just 4 of those sit within 15 scans of a
+        standard band (ABCC2_N1: 92 of 93).  Calling anything on it means
+        believing whichever of the two contradictory references the well
+        happened to fall near.
+
+        Returns a reason string when the references contradict each other,
+        else None.  A plate whose duplexes each hold too little reference to
+        compare returns None: it has no vote, not a quarrel, and the per-well
+        verdict keeps its say.
+        """
+        import statistics as _st
+        meds = [_st.median(refs)
+                for refs in self.co_mig if len(refs) >= CO_CONFLICT_MIN_REFS]
+        if len(meds) < 2:
+            return None
+        lo, hi = min(meds), max(meds)
+        if hi - lo <= CO_CONFLICT_TOL:
+            return None
+        return ("sample products do not sit where this plate's standard puts "
+                f"them -- its marked wells disagree by {hi - lo:.0f} scans "
+                f"({lo:+.0f} against {hi:+.0f}), so no well on this run can "
+                "be measured against it")
+
     def window(self):
         """Half-width of the search window around the predicted centre."""
         c = self.center
@@ -894,42 +1005,111 @@ class PlateISModel:
             the operator's marks: it asserts nothing about spacing, but it does
             insist the standard be where this plate's standards always are.
 
-        Each stage only runs after the previous one fails, so a well that the
-        learned shape explains is never overridden by a looser guess.
+        Every stage runs -- anchored at the learned position, then without one,
+        then each relaxed width in turn -- and the *best* match is reported,
+        not the first.  First-hit was the wrong rule: an early loose stage
+        returning three peaks that merely sat somewhere plausible won outright,
+        and the four-band standard a stage or two later was never looked at.
+        Ranking is by :meth:`confidence`, adjusted twice before comparison:
+
+        * a three-band match scores as half, because a four-band match is what
+          a standard is -- unless this plate's own marks are three-band
+          (``merged_seen``), in which case three bands is what one looks like
+          here and no penalty applies;
+        * a match found anywhere on the channel scores 0.05 less than one
+          found inside the position window, because that window is the
+          operator saying where the standards are.
+
+        Ties go to the in-window match, then to the stricter stage.
         """
         stages = [(self.geometry, "anchored")]
         if self.merged_geometry is not None:
             stages.append((self.merged_geometry, "anchored-merged"))
-        for g, base in stages:
-            found = find_is_quartet(trace, cut=cut, geometry=g,
-                                    center=self.center, center_tol=self.window())
-            if found is not None:
-                return found[0], found[1], base
-            found = find_is_quartet(trace, cut=cut, geometry=g)
-            if found is not None:
-                return found[0], found[1], f"{base}-wide"
-        # Shape drifted beyond what the seeds showed. Widen tolerances only.
         for factor in SHAPE_RELAX_FACTORS:
             wide = self.relaxed(factor)
-            found = find_is_quartet(trace, cut=cut, geometry=wide.geometry,
-                                    center=self.center, center_tol=self.window())
-            if found is not None:
-                return found[0], found[1], f"relaxed-{factor:g}"
-            found = find_is_quartet(trace, cut=cut, geometry=wide.geometry)
-            if found is not None:
-                return found[0], found[1], f"relaxed-{factor:g}-wide"
-        # Nothing shape-based fitted. Fall back to equimolarity alone, but only
-        # inside the position window this plate's own marks establish -- and
-        # only if the bands are actually above the noise, since without a shape
-        # there is nothing left to stop three noise ripples inside that window
-        # from passing as a standard.
+            stages.append((wide.geometry, f"relaxed-{factor:g}"))
+
+        best_key = None
+        best_hit = None
+        for stage_index, (geom, base) in enumerate(stages):
+            for centred, how in ((True, base), (False, f"{base}-wide")):
+                found = find_is_quartet(
+                    trace, cut=cut, geometry=geom,
+                    center=(self.center if centred else None),
+                    center_tol=(self.window() if centred else None))
+                if found is None:
+                    continue
+                key = self._rank(trace, found[0], how, centred, stage_index)
+                if best_key is None or key > best_key:
+                    best_key, best_hit = key, (found[0], found[1], how)
+
+        # Position-only evidence: equimolarity inside the window the operator's
+        # marks establish, with no shape asserted.  It competes on the same key
+        # as everything else, and because ``confidence`` caps a shape-free score
+        # at 0.5 it can only win where the shape stages found nothing worth
+        # much -- which is the "last resort" the docstring promises.  The noise
+        # floor is applied here because, unlike a shape match, nothing else
+        # stops three noise ripples inside that window from passing as bands.
         y = np.asarray(trace, dtype=float)
         found = find_is_quartet(trace, cut=cut, geometry=None,
                                 center=self.center, center_tol=self.window())
         if found is not None:
             if weakest_std_band_snr(y[:, None], 0, found[0]) >= STD_ABS_SNR_FLOOR:
-                return found[0], found[1], "shape-free"
-        return None
+                key = self._rank(trace, found[0], "shape-free", True,
+                                 len(stages))
+                if best_key is None or key > best_key:
+                    best_hit = (found[0], found[1], "shape-free")
+        return best_hit
+
+    def _rank(self, trace, scans, source, centred, stage_index):
+        """Sort key for one candidate standard; a larger tuple always wins.
+
+        The confidence score first -- with the half-penalty for a three-band
+        read and the small penalty for a match found outside the position
+        window -- then windowed over unwindowed, then the stricter stage over
+        the looser one.  Nothing is rejected here: ``find`` places the standard
+        and :meth:`confidence` is what the callers read to decide whether to
+        trust it, and folding the two together made a plate-wide placement
+        silently report nothing.
+        """
+        _label, score = self.confidence(trace, scans, source)
+        complete = len(scans) == 4 or self.merged_seen
+        adj = score if complete else 0.5 * score
+        if not centred:
+            adj -= 0.05
+        return adj, 1 if centred else 0, -stage_index
+
+    def height_says_absent(self, trace, scans, source):
+        """Is there no standard here at all?  The height question only.
+
+        Split out of :meth:`confidence`, which answers two different questions
+        with one label: a placement reads ``absent`` there either because it is
+        shorter than this plate's marked standards -- the load-bearing "those
+        are four bumps off whatever happens to sit in the position window" --
+        or because the channel is too noisy for it to reach the significance
+        floor, which is a well that has a standard nobody can see.  Only the
+        first is a statement about whether a standard exists, and only the
+        first may send a well off to be placed from its own product instead:
+        a trace with no measurable noise scores zero significance by
+        construction (``weakest_std_band_snr`` returns 0 when sigma is 0), so
+        routing on the label told a clean synthetic well its plainly present
+        standard was not there.
+
+        The carve-outs are the same two the label has always had: a hand mark
+        is the operator saying the standard is there, faint or not, and a
+        product-anchored placement has the well's own amplicon standing behind
+        it, which is stronger evidence than height.
+        """
+        if not scans or source in ("manual", "product-anchored"):
+            return False
+        hfloor = self.weak_std_height()
+        if hfloor is None:
+            return False
+        y = np.asarray(trace, dtype=float)
+        if not y.size:
+            return False
+        lo, _hi = _band_heights(y, scans)
+        return (lo - float(np.median(y[:400]))) < hfloor
 
     def confidence(self, trace, scans, source):
         """How much to trust one well's standard, as a short label and a number.
@@ -946,7 +1126,7 @@ class PlateISModel:
           shifted" from "this happens to have three peaks near each other".
 
         Returns ``(label, score)`` where score is 0-1 and label is one of
-        ``strong``/``fair``/``weak``/``positional``.
+        ``strong``/``fair``/``weak``/``positional`` (or ``absent``).
         """
         if not scans:
             return "none", 0.0
@@ -955,6 +1135,12 @@ class PlateISModel:
         lo, hi = _band_heights(y, scans)
         eq = (lo / hi) if hi > 0 else 0.0
         thr = self.weak_std_threshold()
+        # Height first, because it is the question "is there a standard here"
+        # and everything else answers "how good is it".  See
+        # height_says_absent() for why that test is its own predicate rather
+        # than part of the label this method returns.
+        if self.height_says_absent(y, scans, source):
+            return "absent", 0.0
         # Two separate questions, and they must not be folded into one number.
         # "Is there a standard here at all?" is absolute: it is answered against
         # the channel's own noise. "Is it weak for this plate?" is relative: it
@@ -1040,6 +1226,15 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
         [(traces[w], is_col, s) for w, s in first.items()], samp_col=samp_col)
     if model is None:
         raise ValueError("the marked wells gave no usable standard shape")
+    # The position window is the operator's, not the detector's.  A refit that
+    # recomputed ``centers`` from whatever the previous round placed would feed
+    # the detector's own guesses back into its prior: on ABCC2_N2 one round of
+    # unwindowed matches put the centre at 1946 instead of 2567, the window
+    # then covered the dye blob, and every later round "confirmed" it -- the
+    # flat wells F04/F07/G12/H04 came back as strong standards at ~1950 while
+    # the real quartet at ~2500 sat outside the search.  Shape may refine from
+    # the placements; where the standard lives may not.
+    seed_centers = list(model.centers)
 
     found = {}
     for _round in range(max_rounds):
@@ -1054,7 +1249,15 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
             if label == "absent":
                 continue          # under the noise floor: not a standard
             found[well] = (scans, how, label, score)
-            if how in STRICT_SOURCES and label in ("strong", "fair"):
+            # Only a match found *inside* the position window may teach the
+            # shape.  ``anchored-wide`` is the same shape searched over the
+            # whole channel, and it is where the off-model matches come from:
+            # two noise ripples 200 scans apart read as a plausible d1 to a
+            # shape that is only asked about spacing, not about position.  A
+            # well the window cannot vouch for can still be *reported* -- the
+            # operator sees it in the table -- it just cannot vote.
+            if (how in STRICT_SOURCES and not how.endswith("-wide")
+                    and label in ("strong", "fair")):
                 learnable[well] = scans
         if len(learnable) < TRIM_MIN_WELLS or _round == max_rounds - 1:
             break
@@ -1063,6 +1266,7 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
             samp_col=samp_col)
         if refit is None:
             break
+        refit.centers = seed_centers
         moved = max(
             abs(getattr(refit.geometry, a) - getattr(model.geometry, a))
             for a in ("d1", "d2"))
@@ -1149,6 +1353,27 @@ CO_MIGRATION_MAX_HALF_SPAN = 40.0  # wider than this and the references are nois
 CO_MIGRATION_PRESENT_SIGMA = 10.0  # scans; a band must clear noise by this to exist
 CO_MIGRATION_SET_TOL = 16.0        # scans; duplex bands agreeing within this share a delta
 
+# How far apart two duplexes' product references may sit before the plate
+# contradicts itself.  Every entry of co_mig is the same physical measurement
+# taken again -- the mobility difference between the standard's dye and the
+# sample's dye, for one fragment -- so duplexes must agree about it: ABCC2_N1
+# puts H1 at -10 and ABCC2's 200910 run puts its products at -11, while F05's
+# warm capillary moved every duplex together (+8/+8/+17).  Twice the
+# within-plate gate, because this compares two medians of that shift rather
+# than two peaks in one well.  ABCC2_N2 reads +45 on H2 and -43 on the
+# heteroduplexes -- 88 scans apart, which no single shift explains -- and
+# there the plate has no product model to measure any well against.
+CO_CONFLICT_TOL = 2 * CO_MIGRATION_SET_TOL
+
+# How many references a duplex needs before it may join that disagreement.
+# Deliberately half of CO_MIGRATION_MIN_REFS: there the question is whether a
+# reference is solid enough to *move* calls with, and five was found not to
+# be (CYBA_N1 built an H3 gate from five wells).  Here nothing is moved --
+# the plate is refused -- so the bar is only "enough to have an opinion",
+# and refusal still has to clear CO_CONFLICT_TOL, a gap medians of scattered
+# wells do not reach between them.
+CO_CONFLICT_MIN_REFS = 5
+
 
 def _noise_sigma(y):
     """Robust per-scan noise as 1.4826 x the MAD of a Savitzky-Golay residual.
@@ -1219,6 +1444,8 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
     on ABCC2 well B10, whose sample bands at 2419/2491/2728/2739 measure
     d1=72, d2=237, d3=11 against the standard's 76/257/12.
     """
+    import scorer
+
     y = np.asarray(acgt[:, samp_col], dtype=float)
     sigma = _noise_sigma(y)
     hits = []
@@ -1233,8 +1460,41 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
             a, b, c, d = (pk[i] for i in combo)
             if geometry.matches(a[0], b[0], c[0], d[0]):
                 h = [a[1], b[1], c[1], d[1]]
-                if min(h) > 0 and min(h) / max(h) >= IS_EQUIMOLAR_MIN:
-                    hits.append((a[0], b[0], c[0], d[0]))
+                if min(h) <= 0 or min(h) / max(h) < IS_EQUIMOLAR_MIN:
+                    continue
+                # Every one of the four must be a product, not a shape the
+                # spacing happens to permit.  The template test alone is far
+                # too permissive on a flat channel: ABCC2_N1's A06 tops out at
+                # 183 counts for the whole trace, and somewhere in its noise
+                # four ripples sit within d1/d2/d3 of each other in the right
+                # proportions -- a het out of nothing, on the same evidence a
+                # real heterozygote gives.  The bar is the call engine's own
+                # dominant-duplex threshold, so this path can no longer call a
+                # het weaker than t9_call would have needed to call one.
+                if min(h) < scorer.T9_MIN_DOMINANT_SIGMA * sigma:
+                    continue
+                # Height is height over the channel's baseline, which a bump
+                # riding on a slow rise has in full while the rise underneath
+                # it is all the bump is: ABCC2_N2's D11 reads 244 to 730
+                # counts (24 to 73 sigma) at a prominence of 5 to 6, because
+                # one uninterrupted slope is being sampled four times over.
+                # Prominence is the fall from the peak to the higher of the
+                # two saddles beside it -- the part that makes it a peak of
+                # its own -- and it is what the detector's own candidate bar
+                # fails to hold still: that bar is a fraction of the channel's
+                # tallest peak, so a quiet channel gets almost no bar at all.
+                # Three of the four must clear the engine's dominant-duplex
+                # significance, the same number the height test asks for.  The
+                # fourth may fall short legitimately: HET1 and HET2 sit a
+                # dozen scans apart, so the shorter of the pair measures its
+                # prominence against the valley between them and can read low
+                # while both are real.  Two of four short leaves no pattern.
+                # Genuine four-peak patterns clear it by two orders of
+                # magnitude (ABCC2_N1's F07 and B11 run 312 and 433 sigma).
+                if sorted((a[2], b[2], c[2], d[2]))[1] < \
+                        scorer.T9_MIN_DOMINANT_SIGMA * sigma:
+                    continue
+                hits.append((a[0], b[0], c[0], d[0]))
         if hits:
             best = min(hits, key=lambda q: abs(sum(q) / 4.0 - (center or q[0])))
             row["sample_peaks"] = "/".join(str(x) for x in best)
@@ -1245,6 +1505,12 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
             for key, val in zip(("hom1", "hom2", "het1", "het2"), best):
                 row[key] = float(y[val])
             return row
+        # The template is the test and it failed.  Falling through to an
+        # unconstrained peak count would throw away the very thing that just
+        # said no -- the count has no positions, no spacing and no window, and
+        # it is what called ABCC2_N2's E09 a het off a dye blob 900 scans from
+        # anywhere.  With a fitted plate the answer is no-call.
+        return row
     peaks = _sample_quadrature(y, samp_col, sigma, y.size)
     row["sample_peaks"] = "/".join(str(x) for x in peaks)
     if len(peaks) >= 4:
@@ -1262,7 +1528,8 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
     return row
 
 
-def _well_product_candidates(y, sigma, centres, bases):
+def _well_product_candidates(y, sigma, centres, bases,
+                             anchor_radius=SEGMENT_APEX_RADIUS):
     """Strongest clear-of-noise peak per duplex, offset from its band centre.
 
     A real product never strays far from its own standard band, so a duplex's
@@ -1276,34 +1543,69 @@ def _well_product_candidates(y, sigma, centres, bases):
     +8/+8/+17), while the neighbour's equally tall peak stays on its own side
     of the boundary.
 
+    The window is centred on the *well's own* offset, not on the standard's
+    position.  The run's migration shift applies to the sample and the standard
+    differently (they are different fluorophores on the same fragments), so the
+    product sits a few scans off the band -- harmless where a duplex has room,
+    fatal where it does not.  The heteroduplex pair is only a dozen scans apart,
+    each side gets six, and a ten-scan shift means HET1's window opens *onto*
+    HET2's peak while HET2's falls past the product altogether: ABCC2_N1 D02
+    measured 1070 versus 93 sigma on a well the operator calls heterozygous,
+    and read hom-2 for want of its second heteroduplex.  The two homoduplexes
+    are far enough apart to measure the shift first (their windows are
+    ``anchor_radius`` or more, well clear of a neighbour), and every duplex
+    then searches at ``centre + delta`` -- the gaps between the windows are
+    unchanged, so the neighbour-stealing guard still holds.
+
     Returns ``{duplex: (offset, height)}`` for the duplexes with something
-    clear of the noise floor; the quiet ones are left out.
+    clear of the noise floor; the quiet ones are left out.  Offsets are
+    reported against the unshifted band centre so they stay comparable with
+    the plate's own ``co_migration_median``.
     """
     from scipy.signal import find_peaks
-    out = {}
-    throws = [float("inf")] + [centres[i + 1] - centres[i]
-                               for i in range(len(centres) - 1)] + [float("inf")]
-    for k, ctr in enumerate(centres):
-        radius = min(throws[k], throws[k + 1]) / 2.0
+
+    def best_peak(ctr, radius, base):
         if radius < 1.0:
-            continue
+            return None
         w0 = max(0, int(round(ctr)) - CO_MIGRATION_SEARCH)
         w1 = min(len(y), int(round(ctr)) + CO_MIGRATION_SEARCH + 1)
         if w1 - w0 < MIN_SEGMENT_SPAN:
-            continue
+            return None
         yw = y[w0:w1]
-        floor = float(bases[k]) + CO_MIGRATION_PRESENT_SIGMA * sigma
+        floor = float(base) + CO_MIGRATION_PRESENT_SIGMA * sigma
         pk, _ = find_peaks(yw, height=floor, distance=max(3, int(round(0.5 * sigma))))
-        best = None
+        found = None
         for p in pk:
             off = w0 + p - ctr
             if abs(off) > radius:
                 continue
             h = float(yw[p])
-            if best is None or h > best[1]:
-                best = (float(off), h)
-        if best is not None:
-            out[k] = best
+            if found is None or h > found[1]:
+                found = (float(off), h)
+        return found
+
+    throws = [float("inf")] + [centres[i + 1] - centres[i]
+                               for i in range(len(centres) - 1)] + [float("inf")]
+    radii = [min(throws[k], throws[k + 1]) / 2.0 for k in range(len(centres))]
+
+    # Pass 1: the duplexes with room to spare say where this well's products
+    # actually landed.  Anchors that disagree among themselves describe no
+    # single shift, so the well keeps the status quo rather than a guess.
+    anchors = [best_peak(centres[k], radii[k], bases[k])
+               for k in range(len(centres)) if radii[k] >= anchor_radius]
+    anchors = [a for a in anchors if a is not None]
+    delta = 0.0
+    if anchors:
+        offs = sorted(a[0] for a in anchors)
+        if offs[-1] - offs[0] <= CO_MIGRATION_SET_TOL:
+            delta = float(offs[len(offs) // 2]) if len(offs) % 2 \
+                else 0.5 * (offs[len(offs) // 2 - 1] + offs[len(offs) // 2])
+
+    out = {}
+    for k, ctr in enumerate(centres):
+        hit = best_peak(ctr + delta, radii[k], bases[k])
+        if hit is not None:
+            out[k] = (hit[0] + delta, hit[1])
     return out
 
 
@@ -1367,11 +1669,162 @@ def _co_migration_verdict(cands, snrs, is_model):
     return [dom]
 
 
+# Weakest band the product-guided placement will accept, in units of the
+# standard channel's own noise.  Deliberately the noise test and nothing else:
+# the plate-relative height bar that rejects an automatic placement is what
+# sent this well here, so re-applying it would reject every answer it can give.
+# What makes the answer trustworthy is that it was derived from the well's own
+# amplicon, not from the standard channel at all.
+RESCUE_MIN_BAND_SIGMA = 15.0
+
+# A called product must reach this fraction of the standard band it sits
+# beside.  Half, because that is where the evidence points: measured across
+# ABCC2_N1 the weakest genuine product is 4.7x its standard, the synthetic
+# fixtures in the tests sit at 0.89, and the three false calls on ABCC2_N2
+# measure 0.09-0.13 -- the standard bleeding into the sample channel, which
+# is a few percent by nature.  Nothing real lives in between.
+PRODUCT_IS_RATIO_MIN = 0.5
+
+
+def _product_to_std_ratio(acgt, is_col, scans, snrs, sigma):
+    """Strongest kept product as a multiple of the standard band it belongs to.
+
+    *snrs* are the significances the call was built from, already zeroed for
+    any duplex the co-migration verdict rejected, so a rejected duplex cannot
+    vouch for itself.  Returns 0.0 when no duplex carries signal or no band
+    stands above the baseline -- a ratio of nothing, which fails every gate
+    that reads it.
+    """
+    is_y = np.asarray(acgt[:, is_col], dtype=float)
+    if not is_y.size:
+        return 0.0
+    base = float(np.median(is_y[:400]))
+    best = 0.0
+    for k in range(min(len(scans), len(snrs))):
+        if snrs[k] <= 0:
+            continue
+        s = int(scans[k])
+        band = float(is_y[max(0, s - 6):s + 7].max()) - base
+        if band <= 0:
+            continue
+        best = max(best, (snrs[k] * sigma) / band)
+    return best
+
+
+def _product_guided_std(is_y, samp_y, model):
+    """Place the standard from the well's own product, when the standard
+    channel shows nothing the detector can read.
+
+    The standard and the sample product are the same fragment, spiked into the
+    same reaction, so they arrive at fixed positions relative to each other --
+    the plate's own ``co_migration`` references say how far.  That goes both
+    ways: the detector needs the standard to find the product, but the product
+    alone says where the standard must be, and unlike four bumps off a raised
+    plateau this is a claim about a specific molecule that is demonstrably in
+    the well.
+
+    Every product peak in the position window is tried as if it were each of
+    the four duplexes' product in turn (strongest peak first, so the well's
+    dominant amplicon speaks before a shoulder of it does), and the quartet it
+    implies is looked for on the standard channel.  The first implied quartet
+    whose weakest band clears the noise is returned as scan positions; when no
+    product implies a readable standard, the well truly has none and the
+    caller reports that.
+
+    Only the *positions* are asserted -- the peaks themselves are often a few
+    scans off the ideal gaps, because this runs precisely where the standard
+    is faint or absent -- so the caller measures the sample against them the
+    same way it would against a detected quartet.
+
+    Returns a list of four scans, or None.
+    """
+    from scipy.signal import find_peaks
+
+    if model is None or model.geometry is None:
+        return None
+    g = model.geometry
+    if g.merged or not g.d3:
+        # A merged plate's template has no third gap to project from, and the
+        # product position tells us where H1 and H2 are but not how far the
+        # single heteroduplex band sits.  Declining costs nothing: the well
+        # falls to the honest no-standard report either way.
+        return None
+    y = np.asarray(is_y, dtype=float)
+    sy = np.asarray(samp_y, dtype=float)
+    if not y.size or sy.size != y.size:
+        return None
+    sig_is = _noise_sigma(y)
+    sig_s = _noise_sigma(sy)
+    if sig_is <= 0 or sig_s <= 0:
+        return None
+    base_is = float(np.median(y[:400]))
+    base_s = float(np.median(sy[:400]))
+    lo = int(y.size)
+    center = model.center
+    offsets = [model.co_migration_median(k) for k in range(4)]
+    if offsets[0] is None:
+        return None
+    # Only the offsets this plate measured.  A duplex with no reference of its
+    # own has no product position to derive from, and borrowing H1's for it
+    # invents quartets the plate never saw: on ABCC2_N1 the borrowed duplex-1
+    # offset read the tallest in-window peak (an off-target product at 2195)
+    # as H2's product and put E01's standard 300 scans early, while taking the
+    # plate's own -10 at face value walked straight past it to the faint
+    # standard the operator's ground truth has.
+    cum = [0.0]
+    for step in (g.d1, g.d2, g.d3):
+        cum.append(cum[-1] + float(step))
+    win = model.window()
+
+    delta, props = find_peaks(
+        sy - base_s,
+        height=max(10.0 * sig_s, 0.02 * float(np.max(np.abs(sy - base_s)))),
+        prominence=2.0 * sig_s)
+    if not len(delta):
+        return None
+    order = np.argsort(-props["peak_heights"])
+    tried = 0
+    for i in order:
+        p = int(delta[i])
+        if abs(p - center) > win:
+            continue
+        tried += 1
+        if tried > 8:
+            break
+        for k in range(4):
+            if offsets[k] is None:
+                continue
+            h1 = p - offsets[k] - cum[k]
+            pos = [h1 + c for c in cum]
+            if pos[0] < 400 or pos[-1] > lo - 1:
+                continue
+            # The standard lives where the plate's marks put it, and only
+            # there.  The window is the same one the detector searches, so a
+            # quartet that runs off its far edge is not a faint standard the
+            # detector missed -- it is the product's own position pretending
+            # to be one.  ABCC2_N1's E09 has its whole product sitting 140
+            # scans from the window's right edge, which puts the third and
+            # fourth bands of every reading outside it.
+            if not all(center - win <= q <= center + win for q in pos):
+                continue
+            hs = [float(y[max(0, int(round(q)) - 6):int(round(q)) + 7].max())
+                  - base_is for q in pos]
+            if min(hs) < RESCUE_MIN_BAND_SIGMA * sig_is:
+                continue
+            return [int(round(q)) for q in pos]
+    return None
+
+
 def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
                   sample_channel=DEFAULT_SAMPLE_CHANNEL,
                   base_order="ACTG", cut=DEFAULT_IS_CUT, run_name="",
-                  std_scans_manual=None, is_model=None):
+                  std_scans_manual=None, is_model=None, min_het_frac=0.0):
     """Genotype one well without any clicking -> a result row.
+
+    *min_het_frac* is the operator's floor on the minor allele, handed
+    straight to :func:`scorer.t9_call` -- 0 keeps the engine's own het
+    behaviour, anything above it stops a small bump being read as a second
+    allele and flags the well ``het-floor``.
 
     *std_scans_manual* is the operator's own four internal-standard picks for
     this well.  When given it wins over ``find_is_quartet``: that detector
@@ -1395,6 +1848,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         "snr1": 0.0, "snr2": 0.0, "snr3": 0.0, "snr4": 0.0,
         "is_channel": is_channel, "sample_channel": sample_channel,
         "std_scans": "", "std_scans_manual": "", "std_source": "",
+        "sample_scans": "",
         "het_resolved": True, "std_snr": 0.0, "reason": "",
         "std_conf": "", "std_score": 0.0,
     }
@@ -1433,21 +1887,55 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         # Fallback 1: the plate model fitted to the operator's own marks.
         hit = (is_model.find(acgt[:, is_col], cut=cut)
                if is_model is not None else None)
+        scans = None
+        keep = None                    # a position-only placement to fall back on
         if hit is not None:
             scans, _heights, how = hit
             row["std_source"] = how
-        else:
-            # The plate model knows this fragment's shape and position window
-            # and still could not place it, so an equimolar-only guess would be
-            # inventing a standard rather than finding one. Report the miss.
-            row["std_source"] = "none"
-            row["reason"] = f"no internal standard on Ch{is_channel}"
-            return _no_is_het_chance(
-                doc, row, acgt, is_col, samp_col, base_order, is_channel,
-                sample_channel,
-                geometry=(is_model.geometry if is_model is not None else None),
-                center=(is_model.center if is_model is not None else None),
-                center_tol=(is_model.window() if is_model is not None else None))
+            if is_model.height_says_absent(acgt[:, is_col], scans, how):
+                # Not a weak standard -- no standard.  The detector locked onto
+                # whatever sits in the position window, and the plate's own
+                # marked heights say it is noise.  Try the product instead.
+                # Asked of the height test alone: confidence() returns the
+                # same "absent" for a channel too noisy to measure, and a
+                # well whose standard is plainly there must not be sent
+                # looking for a replacement because its noise is high.
+                scans = None
+            elif how == "shape-free":
+                # The detector found the bands on position alone and says so.
+                # Where the well's own product can place the standard instead,
+                # that is the stronger statement: shape-free means "near here",
+                # and near is not it.  ABCC2_N1's E01 read 2765/2782/2870 from
+                # three peaks that merely sit in the window, which measures the
+                # product 25x the noise and calls nothing, while the product
+                # puts the standard 314 scans earlier and the well reads hom-1.
+                # Keep the positional placement only for when the product has
+                # nothing to say either.
+                keep = scans
+                scans = None
+        if scans is None:
+            scans = _product_guided_std(acgt[:, is_col], acgt[:, samp_col],
+                                        is_model)
+            if scans is not None:
+                row["std_source"] = "product-anchored"
+            elif keep is not None:
+                scans = keep
+            else:
+                # The plate model knows this fragment's shape and position
+                # window and still could not place it -- neither from the
+                # standard channel nor from the well's own product -- so an
+                # equimolar-only guess would be inventing a standard rather
+                # than finding one. Report the miss.
+                row["std_source"] = "none"
+                row["reason"] = f"no internal standard on Ch{is_channel}"
+                return _no_is_het_chance(
+                    doc, row, acgt, is_col, samp_col, base_order, is_channel,
+                    sample_channel,
+                    geometry=(is_model.geometry if is_model is not None
+                              else None),
+                    center=(is_model.center if is_model is not None else None),
+                    center_tol=(is_model.window() if is_model is not None
+                                else None))
     row["std_scans"] = "/".join(str(x) for x in scans)
     # A standard showing three bands carries a merged heteroduplex, which is a
     # complete and equally valid standard.  Only a standard too short to fix
@@ -1497,6 +1985,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
     # call then rests on that band alone, which is conclusive for the genotype
     # but reports no separate HET2 area.
     areas, snrs, bases = [], [], []
+    apex_at = []                     # scan of each duplex's own strongest peak
     for k, (lo, hi) in enumerate(segs):
         lo, hi = max(0, lo), min(n, hi)
         # Baseline from the quiet trace either side of this duplex, not from its
@@ -1509,6 +1998,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         if hi - lo < MIN_SEGMENT_SPAN:
             areas.append(0.0)
             snrs.append(0.0)
+            apex_at.append(None)
             continue
         # Look for this duplex's apex a fixed short radius round the band
         # centre, never across the whole segment.  The radius exists because
@@ -1524,6 +2014,7 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         a = max(0, int(scans[k]) - SEGMENT_APEX_RADIUS)
         b = min(n, int(scans[k]) + SEGMENT_APEX_RADIUS + 1)
         apex = float(y[a:b].max()) if b > a else 0.0
+        apex_at.append(a + int(np.argmax(y[a:b])) if b > a else None)
         areas.append(max(0.0, float(_trapz(y[lo:hi] - base, dx=1.0))))
         snrs.append((apex - base) / sigma if sigma > 0 else 0.0)
 
@@ -1560,6 +2051,26 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
                 areas[k] = 0.0
                 snrs[k] = 0.0
 
+    # Where this well's own products were measured: the peak the verdict chose
+    # for each duplex, or the band-centre apex when there is no verdict to ask.
+    # This is the "called peak" half of a result -- the call says what the well
+    # is, these say which peaks said so -- so the operator can check a call
+    # against the peaks that produced it in the table under the graphs, and it
+    # travels with the row into the machine-learning export.  A rejected duplex
+    # reports nothing rather than the orphan the verdict ruled out.
+    called = []
+    for k in range(len(segs)):
+        pos = None
+        if verdict is None or k in verdict:
+            if cands.get(k) is not None:
+                pos = int(round(scans[k] + cands[k][0]))
+            elif k < len(apex_at):
+                pos = apex_at[k]
+        called.append("" if pos is None else str(int(pos)))
+    while len(called) < 4:
+        called.append("")
+    row["sample_scans"] = "/".join(called)
+
     while len(areas) < 4:
         areas.append(0.0)
         snrs.append(0.0)
@@ -1568,7 +2079,8 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
         row["snr%d" % (i + 1)] = round(snrs[i], 1)
 
     call, frac, flags = scorer.t9_call(
-        areas[0], areas[1], areas[2], None if merged_het else areas[3], snrs)
+        areas[0], areas[1], areas[2], None if merged_het else areas[3], snrs,
+        min_het_frac=min_het_frac)
     if std_unresolved and is_model is not None and call != "no-call":
         # The windows came off a half-formed standard, so a call here rests on
         # positions that are themselves in doubt.  That is worth allowing when
@@ -1623,6 +2135,49 @@ def auto_genotype(doc, is_channel=DEFAULT_IS_CHANNEL,
             row["flags"] = ",".join(sorted(
                 set(f for f in row["flags"].split(",") if f)
                 | {f"std-{label}"}))
+    # Nothing above looked past this well, which is right for a well on a plate
+    # that reads.  It is wrong for a plate that does not: where the marked
+    # wells themselves place the products at two mutually exclusive offsets,
+    # every measurement below -- the segment, the apex, the verdict, the ratio
+    # -- is being made against a standard whose position the plate has already
+    # disowned, and the only honest answer is to refuse the run rather than
+    # report whichever contradiction this particular well landed near.
+    if is_model is not None:
+        conflict = is_model.co_migration_conflict()
+        if conflict:
+            # "ai" belongs to the call it qualified; there is no call to
+            # qualify here, and a no-call carrying an imbalance flag reads as
+            # a judgement about alleles this run never resolved.
+            row["flags"] = ",".join(sorted(
+                f for f in set(row["flags"].split(",")) - {"", "ai"}
+                | {"unreadable-run"}))
+            row["call"] = "no-call"
+            row["frac"] = 0.0
+            row["reason"] = conflict
+            return row
+    # A call needs a product, and this well's own standard is the only ruler
+    # it can be measured against: the standard is spiked in at a fixed amount,
+    # so an amplicon comes up alongside it while the standard bleeding into
+    # the sample channel comes up as a fraction of it.  ABCC2_N2's B11, C11
+    # and H09 read 69, 84 and 65 sigma through that ruler -- plainly
+    # significant, and every one of them is the standard reading itself at
+    # 0.09-0.13 of its own band -- while ABCC2_N1's weakest genuine product is
+    # 4.7 times its standard.  The bar sits at half, below any real product
+    # seen and far above any bleed; significance never gets a say here,
+    # because significance is exactly what let the bleed through.
+    if call != "no-call":
+        ratio = _product_to_std_ratio(acgt, is_col, scans, snrs, sigma)
+        if ratio < PRODUCT_IS_RATIO_MIN:
+            row["call"] = "no-call"
+            row["frac"] = 0.0
+            row["flags"] = ",".join(sorted(
+                set(f for f in row["flags"].split(",") if f)
+                | {"no-product"}))
+            row["reason"] = (
+                f"sample signal on Ch{sample_channel} is {ratio:.2f}x the "
+                f"internal standard on Ch{is_channel}, too small to be a "
+                "product rather than the standard's own bleed-through")
+            return row
     if call == "no-call":
         if sigma <= 0:
             row["reason"] = f"no signal on Ch{sample_channel}"
@@ -1706,9 +2261,14 @@ class PeakPicker:
 
         A peak whose area is already picked on the same channel is never
         picked again — undo it first if you need to (neighbouring peaks, e.g.
-        the two alleles of a heterozygote, stay pickable).  Returns the new
-        record (plus any +A record appended) or None; on a refused
-        re-pick, ``_reject`` is set to ``"area"`` for the UI message."""
+        the two alleles of a heterozygote, stay pickable).  Only *main*
+        records claim an area: a +A satellite is a tag on the peak beside it,
+        and on ABCC2 the standard's last two bands sit 12 scans apart, so the
+        first band's satellite lands right on the fourth — counting it as a
+        claim refused that band and the standard could never be marked.
+        Returns the new record (plus any +A record appended) or None; on a
+        refused re-pick, ``_reject`` is set to ``"area"`` for the UI
+        message."""
         self._reject = None
         radius = max(CLICK_RADIUS, int(self._spacing() * 2.0))
         cands = []
@@ -1735,6 +2295,10 @@ class PeakPicker:
         best = cands[0]
         tol = max(1, int(round(self._spacing() * 0.25)))
         for rec in self.records:
+            if rec.get("kind", "main") != "main":
+                # A +A tag describes its neighbour, so it claims no area of
+                # its own -- see the docstring.
+                continue
             if rec["col"] == best["col"] and abs(rec["scan"] - best["apex"]) <= tol:
                 self._reject = "area"
                 return None
@@ -1770,6 +2334,50 @@ class PeakPicker:
                     gid=self._gid,
                 )
                 self.records.append(rec2)
+        self.records.append(rec)
+        return rec
+
+    def add_std_mark(self, scan, col):
+        """Record a standard peak at *scan* on *col* as an ordinary main pick.
+
+        This is how a standard the plate model places becomes a visible, pick
+        table row like any hand mark -- drawing and duplex labels come from
+        ``records``, and ``mark_std`` only writes ``std``, so a placed standard
+        used to be invisible until it mattered at genotype time.  Idempotent: a
+        main already on that position is left alone, so re-running the
+        semi-automatic pass never stacks duplicates on top of the old marks.
+        """
+        n = self.doc.acgt.shape[0]
+        s = int(np.clip(int(round(scan)), 0, n - 1))
+        tol = max(1, int(round(self._spacing() * 0.25)))
+        for r in self.records:
+            if r["kind"] != "main":
+                continue
+            if r["col"] == col and abs(r["scan"] - s) <= tol:
+                return None
+        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        half = max(2, int(round(self._spacing() * 0.4)))
+        lo, hi = max(0, s - half), min(n - 1, s + half)
+        res = region_area(y, lo, hi)
+        if res is None:
+            win = y[lo:hi + 1]
+            if win.size == 0:
+                return None
+            apex = lo + int(np.argmax(win))
+            base = float(np.median(y[max(0, lo - 3):lo])) if lo else 0.0
+            res = {"peak_scan": apex, "start": lo, "stop": hi,
+                   "midpoint": apex, "height": float(np.max(win) - base),
+                   "area": float(np.sum(np.clip(win - base, 0.0, None)))}
+        self._gid += 1
+        rec = _Record(
+            file=str(self.path), well=self.doc.well,
+            scan=res["peak_scan"], start_scan=res["start"],
+            end_scan=res["stop"], midpoint=res["midpoint"],
+            channel=col + 1, base=CHANNEL_ORDER[col], kind="main",
+            height=round(res["height"], 4), area=round(res["area"], 3),
+            left=res["start"], right=res["stop"], onset=res["start"],
+            end=res["stop"], color=self.col_color[col], col=col,
+            gid=self._gid)
         self.records.append(rec)
         return rec
 

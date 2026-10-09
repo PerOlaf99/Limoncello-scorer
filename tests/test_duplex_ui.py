@@ -36,6 +36,10 @@ def app(tmp_path, monkeypatch):
     for name in ("showinfo", "showwarning", "showerror"):
         monkeypatch.setattr(messagebox, name, lambda *a, **k: "ok")
     monkeypatch.setattr(filedialog, "asksaveasfilename", lambda *a, **k: "")
+    # the durable library lives in the app folder: keep it out of the tests,
+    # otherwise one test's marks are restored into the next one's pickers
+    import mark_library
+    monkeypatch.setattr(mark_library, "LIBRARY_DIR", Path(tmp_path) / "library")
     try:
         app = LimoncelloAnalyzerApp()
     except tk.TclError as e:                       # no usable display
