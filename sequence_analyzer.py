@@ -207,6 +207,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.bind("<Home>", lambda e: self._reset_zoom())
         self.bind("<Control-z>", lambda e: self._gen_undo())
         self.bind("<Control-Z>", lambda e: self._gen_undo())
+        # Hold R and click a picked peak to remove it (its +A tag too).  Kept
+        # at the window level and checked in the plot click, because matplotlib
+        # does not carry a plain letter through a mouse event the way it does
+        # Shift/Ctrl/Alt.
+        self._remove_mod = False
+        self.bind("<KeyPress-r>", self._on_remove_key)
+        self.bind("<KeyPress-R>", self._on_remove_key)
+        self.bind("<KeyRelease-r>", self._on_remove_release)
+        self.bind("<KeyRelease-R>", self._on_remove_release)
 
         self.folders: List[Path] = list(initial_folders or [])
         self.files: List[Path] = []
@@ -271,6 +280,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # and each has its own drift, so the model is looked up by run rather
         # than assumed to be the only one there is.
         self._auto_models: dict = {}
+        # A standard fitted on one plate and loaded here to seed another, used
+        # only for a run that has no marks of its own to fit from.  Cleared by
+        # "Forget learned standard" like everything else.
+        self._auto_saved_model = None
+        self._auto_saved_run = ""
         # Saved marks on disk (library/), read per run on first use.
         self._library_cache: dict = {}
         self._auto_tree = None
@@ -481,8 +495,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         basecall_m.add_separator()
         basecall_m.add_command(label="Clear base calls (undo)", command=self.clear_basecalls)
 
+        # The picking workflow and the automated one used to share one menu,
+        # with Auto-genotyping buried under a cascade; an operator doing the
+        # automated pass never found it.  They are two jobs, so they get two
+        # top-level menus.
         genotyping_m = tk.Menu(self, tearoff=0)
-        # Manual workflow
         genotyping_m.add_command(label="Manual peak picking…",
                                  command=self.toggle_genotyping_picking)
         genotyping_m.add_command(label="Peak area by drag…",
@@ -515,9 +532,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m.add_command(label="Exit peak picking",
                                  command=self.exit_genotyping_picking)
 
-        auto_m = tk.Menu(genotyping_m, tearoff=0)
+        auto_m = tk.Menu(self, tearoff=0)
         auto_m.add_command(label="Semi automatic standard…",
                            command=self.semi_auto_is)
+        auto_m.add_command(label="Use a saved standard…",
+                           command=self.auto_use_saved_model)
         auto_m.add_command(label="Forget learned standard",
                            command=self.forget_plate_model)
         auto_m.add_separator()
@@ -532,7 +551,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                            command=self.auto_genotype_save)
         auto_m.add_command(label="Export library for ML…",
                            command=self.library_export_ml)
-        genotyping_m.add_cascade(label="Auto-genotyping", menu=auto_m)
 
         help_m = tk.Menu(self, tearoff=0)
         help_m.add_command(label="User manual…", command=self.show_help)
@@ -543,7 +561,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         comments_m.add_command(label="Run info…", command=self.show_run_info)
 
         self._menus = {"File": file_m, "View": view_m,
-                       "Base calling": basecall_m, "Genotyping": genotyping_m,
+                       "Base calling": basecall_m,
+                       "Manual genotyping": genotyping_m,
+                       "Auto genotyping": auto_m,
                        "Comments": comments_m, "Help": help_m}
 
     def _build_picking_opts(self, parent):
@@ -1201,12 +1221,20 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if keys not in ("Down", "Up", "Left", "Right", "Page_Down", "Page_Up"):
             return None
         w = self.focus_get()
-        if w is not None and w.winfo_class() in (
-                "Listbox", "Canvas", "FigureCanvasTkAgg"):
-            if keys in ("Down", "Right", "Page_Down"):
-                self._page_by(1)
-            else:
-                self._page_by(-1)
+        cls = w.winfo_class() if w is not None else ""
+        # A text field owns all four arrows: they move the caret, not the page.
+        if cls in ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox",
+                   "Combobox", "TCombobox"):
+            return None
+        # Everything else -- the file list, a graph canvas, and the pick and
+        # result tables -- pages the graphs.  The tables are the point: while
+        # picking, the pick table holds focus, and its own Up/Down binding ate
+        # the key before this toplevel one ever saw it, so the arrows felt dead
+        # exactly where the operator was working.
+        if keys in ("Down", "Right", "Page_Down"):
+            self._page_by(1)
+        else:
+            self._page_by(-1)
         return None
 
     # ------------------------------------------------------------------ tour
@@ -1422,7 +1450,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._below_refresh()          # the pick table takes the slot
         self.status_var.set("Manual genotyping — zoom in, click each peak you "
                             "want; page the batch (Genotyping · Next/Previous "
-                            "batch) and pick the next wells.")
+                            "batch) and pick the next wells. Hold R and click a "
+                            "picked peak to remove it.")
         self.redraw()
 
     def toggle_area_picking(self):
@@ -1527,6 +1556,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.pick_tree.configure(yscrollcommand=vs.set)
         self.pick_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
+        # The pick table takes focus when the operator clicks a peak; give it
+        # the same arrow paging as the file list so the arrows keep working.
+        for seq in ("<Up>", "<Down>", "<Left>", "<Right>",
+                    "<Page_Up>", "<Page_Down>"):
+            self.pick_tree.bind(seq, self._page_key)
         self.pick_table = tblf
 
     def _ensure_area_picker(self, path):
@@ -1588,9 +1622,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
         try:
             entry = self._library_wells(path.parent.name).get(path.stem)
             if entry:
-                mark_library.apply_picker(pk, entry)
+                mark_library.apply_picker(pk, entry, default_col=self._is_col())
         except Exception:
             pass
+
+    def _is_col(self):
+        """The ACGT column the internal standard lives on, or None if the
+        settings are not readable yet."""
+        try:
+            import genotyping
+            return genotyping.acgt_index_for_channel(
+                self.base_order_var.get(), int(self._auto_is_channel.get()))
+        except Exception:                              # noqa: BLE001
+            return None
 
     def _library_store(self, *pairs):
         """Save marked wells, one file write per run.
@@ -1694,6 +1738,23 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return None
         return i, ax, x, y
 
+    def _on_remove_key(self, _event=None):
+        """R held: arm remove-on-click, unless a text field has focus."""
+        w = self.focus_get()
+        cls = w.winfo_class() if w is not None else ""
+        if cls in ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox",
+                   "Combobox", "TCombobox"):
+            return None
+        self._remove_mod = True
+        if getattr(self, "genotyping_active", False) and not self.area_mode:
+            self.status_var.set("Remove: click a picked peak to delete it (with "
+                                "its +A tag). Release R to go back to picking.")
+        return None
+
+    def _on_remove_release(self, _event=None):
+        self._remove_mod = False
+        return None
+
     def _on_gen_pick(self, event):
         if not self.genotyping_active:
             return
@@ -1718,6 +1779,21 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pk = self._ensure_picker(path)
         except Exception as e:
             self.status_var.set(f"Could not load {path.name}: {e}")
+            return
+        if self._remove_mod:
+            gone = pk.remove_at(xs, col=self._gen_lock_col(), vol=vs)
+            if gone is None:
+                self.status_var.set(f"No picked peak near that scan on "
+                                    f"{path.name} — click closer to a mark.")
+                return
+            self._gen_active_path = path
+            self._library_store(path, pk)
+            self.status_var.set(
+                f"{path.parent.name}/{path.name} · well {pk.doc.well}: "
+                f"removed peak scan {gone['scan']} · {gone['base']}. "
+                "Pick the correct peak, then Mark IS in shown wells.")
+            self.redraw()
+            self._sync_pick_table()
             return
         rec = pk.pick(xs, vol=vs, only_col=self._gen_lock_col())
         if rec is None:
@@ -2166,10 +2242,20 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 pk = self._ensure_picker(path)
             except Exception:
                 continue
-            if pk.std:
+            mains = [r for r in pk.records if r["kind"] == "main"]
+            if not mains:
                 continue
-            if any(r["kind"] == "main" for r in pk.records):
-                picked.append(pk)
+            if pk.std:
+                # Adding a forgotten IS peak to an already-marked well has to
+                # work.  If the operator has picked a main the mark does not
+                # cover, re-mark from the picks so the new peak joins the
+                # standard; an untouched mark (its mains are exactly the ones
+                # already in ``std``) is left alone.
+                std_scans = [int(x) for x, _ in pk.std]
+                if not any(min(abs(m["scan"] - s) for s in std_scans) > 2
+                           for m in mains):
+                    continue
+            picked.append(pk)
         if picked:
             marked, failed, pairs = [], [], []
             for pk in picked:
@@ -2187,8 +2273,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if failed:
                 msg += ("\nCould not mark: "
                         + ", ".join(f"{w} ({why})" for w, why in failed[:12]))
-            msg += ("\n\nThese are saved in the library. Run Genotyping ▸ "
-                    "Auto-genotyping ▸ Auto-genotype\nto genotype the plate — "
+            msg += ("\n\nThese are saved in the library. Run Auto genotyping ▸ "
+                    "Auto-genotype sample window…\nto genotype the plate — "
                     "it learns the standard from these marks itself.")
             messagebox.showinfo("Mark IS in all shown wells", msg)
             return
@@ -2274,8 +2360,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             messagebox.showinfo(
                 "Marked IS wells",
                 "No wells are marked as the internal standard in this "
-                "session.\n\nTurn on Genotyping ▸ Manual peak picking…, click "
-                "the four IS peaks\nin a well, then Genotyping ▸ Mark peaks as "
+                "session.\n\nTurn on Manual genotyping ▸ Manual peak picking…, click "
+                "the four IS peaks\nin a well, then Manual genotyping ▸ Mark peaks as "
                 "standard…\nDo that in at least two wells, then Auto-genotype "
                 "learns the\nstandard from them and finds it in the rest.")
             return
@@ -2383,9 +2469,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return True
         messagebox.showinfo(
             what,
-            "Turn on Genotyping ▸ Manual peak picking… first.\n\n"
+            "Turn on Manual genotyping ▸ Manual peak picking… first.\n\n"
             "Then click each of the four IS peaks on the standard channel,\n"
-            "then Genotyping ▸ Mark peaks as standard…")
+            "then Manual genotyping ▸ Mark peaks as standard…")
         return False
 
     def _gen_mark_std(self):
@@ -2406,10 +2492,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pk = self._gen_pickers.get(str(path.resolve()))
             if pk is None:
                 continue
-            if not any(r["kind"] == "main" for r in pk.records):
+            mains = [r for r in pk.records if r["kind"] == "main"]
+            if not mains:
                 continue
             if pk.std and pk is not active:
-                continue            # an operator's mark is never overwritten
+                # An operator's mark is never overwritten -- unless they have
+                # picked a main it does not cover, which is how a forgotten IS
+                # peak gets added back to an already-marked well.
+                std_scans = [int(x) for x, _ in pk.std]
+                if not any(min(abs(m["scan"] - s) for s in std_scans) > 2
+                           for m in mains):
+                    continue
             targets.append(pk)
         if not targets:
             self.status_var.set("Select wells first.")
@@ -2705,7 +2798,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 f"{where}.\n\n"
                 "Mark the internal standard in at least two wells first.\n\n"
                 "On the standard channel, pick the standard's main peaks and "
-                "hit\nGenotyping ▸ Mark peaks as standard… for each well. "
+                "hit\nManual genotyping ▸ Mark peaks as standard… for each well. "
                 "Two is\nthe minimum and three to five is better: the more "
                 "you mark, the\ntighter the learned shape and the fewer wells "
                 "need checking.")
@@ -2747,7 +2840,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         run = Path(targets[0]).parent.name
         self._library_store(*pairs)
-        self._auto_models[run] = model
+        self._remember_model(run, model)
         self._auto_is_model = model
         self._auto_is_model_note = model.describe_plate()
         self._build_pick_table()
@@ -2771,7 +2864,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if counts.get("fair") or counts.get("weak"):
             msg += ("A few wells are weak; they carry std-weak and are worth "
                     "a look.\n\n")
-        msg += "Now run Genotyping ▸ Auto-genotyping ▸ Auto-genotype sample window."
+        msg += "Now run Auto genotyping ▸ Auto-genotype sample window…."
         messagebox.showinfo("Semi automatic internal standard", msg)
 
     def _model_mark(self, pk, model, col):
@@ -2796,6 +2889,20 @@ class LimoncelloAnalyzerApp(tk.Tk):
         for x in scans[:len(names)]:
             pk.add_std_mark(x, col)
 
+    def _remember_model(self, run, model):
+        """Register a fitted standard under its run and write it to the library.
+
+        The in-memory copy is what the current session uses; the library copy is
+        what lets the fit seed a later plate and survive a restart.  The write
+        is best-effort -- a model that cannot be saved costs a re-fit, never a
+        plate, so :mod:`mark_library` swallows the failure itself.
+        """
+        self._auto_models[run] = model
+        try:
+            mark_library.save_model(run, model.to_dict())
+        except Exception as exc:                          # noqa: BLE001
+            print(f"library: could not save model {run}: {exc}", file=sys.stderr)
+
     def forget_plate_model(self):
         """Drop the learned plate model and its marks, back to hand-marking.
 
@@ -2806,9 +2913,61 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._auto_is_model = None
         self._auto_is_model_note = ""
         self._auto_models = {}
+        self._auto_saved_model = None
+        self._auto_saved_run = ""
         self.status_var.set(
             "Forgot the learned plate model. The IS marks already written to "
             "the pick table\nremain until you clear them there.")
+
+    def auto_use_saved_model(self):
+        """Load a standard fitted on an earlier plate, to seed this one.
+
+        Every fitted standard is written to the library, so a shape learned
+        once can be handed to a later plate of the same assay without
+        re-marking the wells it took to fit it.  It is used only for a run that
+        has no marks of its own to fit from -- a plate the operator has already
+        marked always wins -- and is applied by the next Auto-genotype.
+        "Forget learned standard" drops it again.
+        """
+        try:
+            stored = mark_library.saved_models()
+        except Exception:                                 # noqa: BLE001
+            stored = []
+        import genotyping
+        picks = []
+        for run, updated, data in reversed(stored):        # newest first
+            try:
+                model = genotyping.PlateISModel.from_dict(data)
+            except Exception:                              # noqa: BLE001
+                model = None
+            if model is not None:
+                picks.append((run, str(updated)[:16], model))
+        if not picks:
+            messagebox.showinfo(
+                "Use a saved standard",
+                "No standard is stored yet.\n\nA plate's standard is saved "
+                "the first time it is\nlearned (Semi automatic, or Auto "
+                "genotype on a marked\nplate) and can then seed a later "
+                "plate here.")
+            return
+        lines = [f"{i}) {run}   ({updated})\n      {model.describe_plate()}"
+                 for i, (run, updated, model) in enumerate(picks, start=1)]
+        choice = simpledialog.askinteger(
+            "Use a saved standard",
+            "Seed this plate with a standard fitted earlier.\nA run with marks "
+            "of its own still fits them first.\n\n"
+            + "\n".join(lines) + "\n\nNumber:",
+            parent=self, minvalue=1, maxvalue=len(picks))
+        if not choice:
+            return
+        run, _updated, model = picks[choice - 1]
+        self._auto_saved_model = model
+        self._auto_saved_run = run
+        self._auto_is_model = model
+        self._auto_is_model_note = f"seeded from {run}: {model.describe_plate()}"
+        self.status_var.set(
+            f"Saved standard from {run} loaded — the next Auto-genotype on a "
+            f"run with no marks uses it ({model.describe_plate()}).")
 
     def _auto_learn_from_marks(self, targets, is_c, sa_c, base):
         """Fit the plate model from the marks on this plate, when there are any.
@@ -2878,7 +3037,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pairs.append((path, pk))
             added += 1
         self._library_store(*pairs)
-        self._auto_models[run] = model
+        self._remember_model(run, model)
         self._auto_is_model = model
         self._auto_is_model_note = model.describe_plate()
         self._build_pick_table()
@@ -2911,7 +3070,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             messagebox.showerror(
                 "Auto-genotype sample window",
                 f"Ch{is_c} is set as both the internal standard and the "
-                "sample.\n\nUse Genotyping ▸ Auto-genotyping ▸ Channel "
+                "sample.\n\nUse Auto genotyping ▸ Channel "
                 "roles to\npoint them at two different channels.")
             return
         base = self.base_order_var.get()
@@ -2926,7 +3085,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         models = {}
         for run, paths in groups.items():
             models[run] = (self._auto_learn_from_marks(paths, is_c, sa_c, base)
-                           or self._auto_models.get(run))
+                           or self._auto_models.get(run)
+                           or self._auto_saved_model)
         self._auto_rows = []
         self.status_var.set(f"Auto-genotyping {len(targets)} wells…")
         self.update_idletasks()
@@ -2988,7 +3148,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         note = ""
         if unplaced and self._auto_is_model is None:
             note = (f"  {unplaced} well(s) had no hand-marked standard: run "
-                    "Genotyping ▸\n  Auto-genotyping ▸ Semi automatic "
+                    "Auto genotyping ▸\n  Semi automatic "
                     "standard first.")
         elif unplaced:
             note = f"  {unplaced} well(s) had no standard placed."
@@ -3055,11 +3215,20 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # The operator's own standard marks are the ground truth this assay
         # defers to; tint those rows so they stand apart from learned ones.
         tree.tag_configure("manual", background="#EAF4FF")
+        # A flagged well is the one worth a second look.  As plain text in a
+        # column of mostly-blank cells it was easy to miss, so the row itself
+        # turns red.
+        tree.tag_configure("flagged", foreground="#B00020")
         # Double-click opens the editor for call or IS
         tree.bind("<Double-1>", self._auto_edit_call)
         # Selecting a line navigates: the table is a second view of the same
         # wells, so it moves the graphs rather than only highlighting itself.
         tree.bind("<<TreeviewSelect>>", self._geno_row_select)
+        # Same arrow paging as the pick table, so the graph keeps moving under
+        # the cursor whichever table the operator is reading from.
+        for seq in ("<Up>", "<Down>", "<Left>", "<Right>",
+                    "<Page_Up>", "<Page_Down>"):
+            tree.bind(seq, self._page_key)
         vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=vs.set)
         tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -3138,8 +3307,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 f"{r.get('snr3', 0.0):.0f}", f"{r.get('snr4', 0.0):.0f}",
                 ispeaks, r.get("sample_scans", ""), conf,
                 r.get("flags", ""), r.get("reason", "")))
+            tags = []
             if r.get("std_source") == "manual":
-                tree.item(iid, tags=("manual",))
+                tags.append("manual")
+            if (r.get("flags") or "").strip():
+                tags.append("flagged")
+            if tags:
+                tree.item(iid, tags=tuple(tags))
             self._auto_iids[(r.get("run"), r.get("well"))] = iid
         self._below_follow()
 
@@ -3424,7 +3598,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._auto_edit_win = win
         win.title(f"Genotype \u2014 {row.get('well', '')}")
         win.transient(self)
-        win.grab_set()
+        # Closing with the window-manager X has to release the editor slot,
+        # or the next double-click is refused and the table looks dead.
+        win.protocol("WM_DELETE_WINDOW", self._auto_edit_close)
         ttk.Label(win, text="Genotype:").pack(side=tk.LEFT, padx=(8, 4), pady=6)
         var = tk.StringVar(value=row.get("call", ""))
         om = ttk.Combobox(win, textvariable=var, values=list(CALLS),
@@ -3436,8 +3612,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         btn.pack(side=tk.LEFT, padx=2, pady=6)
         btn = ttk.Button(win, text="Cancel", command=self._auto_edit_close)
         btn.pack(side=tk.LEFT, padx=2, pady=6)
+        # Enter commits the highlighted value and picking one applies at once,
+        # the same single-gesture rhythm as a spreadsheet dropdown.
+        om.bind("<Return>", lambda _e: win._apply())
+        om.bind("<<ComboboxSelected>>", lambda _e: win._apply())
+        win.bind("<Escape>", lambda _e: self._auto_edit_close())
         win.geometry(f"+{max(0, int(x))}+{max(0, int(y))}")
         om.focus_set()
+        self._grab_when_viewable(win)
 
     def _auto_edit_apply(self, i, var):
         """Commit the operator's override into the row that Save writes.
@@ -3639,7 +3821,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._auto_edit_win = win
         win.title(f"Standard \u2014 {row.get('well', '')}")
         win.transient(self)
-        win.grab_set()
+        win.protocol("WM_DELETE_WINDOW", self._auto_edit_close)
         ttk.Label(win, text="IS scans:").pack(side=tk.LEFT, padx=(8, 4),
                                               pady=6)
         vars_ = []
@@ -3657,11 +3839,43 @@ class LimoncelloAnalyzerApp(tk.Tk):
         btn.pack(side=tk.LEFT, padx=2, pady=6)
         btn = ttk.Button(win, text="Cancel", command=self._auto_edit_close)
         btn.pack(side=tk.LEFT, padx=2, pady=6)
+        win.bind("<Return>", lambda _e: win._apply())
+        win.bind("<Escape>", lambda _e: self._auto_edit_close())
         if event is not None and not x:
             x, y = int(event.x_root), int(event.y_root)
         win.geometry(f"+{max(0, int(x))}+{max(0, int(y))}")
         if first is not None:
             first.focus_set()
+        self._grab_when_viewable(win)
+
+    def _grab_when_viewable(self, win, tries=60):
+        """Make a freshly built popup modal once the window manager maps it.
+
+        ``grab_set()`` on a brand-new ``Toplevel`` raises
+        ``TclError: grab failed: window not viewable`` under XWayland because
+        the window is not on screen yet.  That error used to escape *before*
+        the dialog's widgets were built, leaving an empty grey box with no
+        controls; and because the editor slot stayed claimed, every later
+        double-click was refused.  Retrying from the event loop keeps the
+        original modal behaviour without depending on map timing, and a popup
+        that never becomes viewable still works, just non-modally.
+        """
+        if getattr(self, "_auto_edit_win", None) is not win:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            win.grab_set()
+        except tk.TclError:
+            if tries > 0:
+                try:
+                    win.after(50, lambda: self._grab_when_viewable(win,
+                                                                   tries - 1))
+                except tk.TclError:
+                    pass
 
     def _auto_edit_is_apply(self, i, vars_):
         """Re-read the well against the four scans the operator typed.
@@ -3736,7 +3950,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if not self._auto_rows:
             messagebox.showinfo(
                 "Save auto-genotype table",
-                "Run Genotyping ▸ Auto-genotyping ▸ Auto-genotype selected "
+                "Run Auto genotyping ▸ Auto-genotype selected "
                 "wells\nfirst.")
             return
         from genotyping import save_table
@@ -4899,13 +5113,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
              "  • After a call the plot itself stays clean — the extra green\n"
              "    'quality' line is OFF by default.  Turn it on only if you want\n"
              "    it:  View ▸ Show quality profile (0-100).\n\n"
-"6b. GENOTYPING  (Genotyping menu, between Base calling and Comments)\n"
+"6b. GENOTYPING  (Manual genotyping and Auto genotyping menus, between Base\n"
+                "    calling and Comments)\n"
                "  Manual peak picking…  keeps THIS window exactly as it is — the same\n"
                "  stacked viewer, zoom bars, Reset view, µA and Channels row — but\n"
                "  clicking a peak now records it for that well, and the Called-sequence\n"
                "  box below the plot becomes the Picked-peaks table.  Show several\n"
                "  wells at once (the Graphs spinbox), zoom in, and pick each well's\n"
-               "  peaks; then page the batch onward — Genotyping ▸ Next batch / Previous\n"
+                "  peaks; then page the batch onward — Manual genotyping ▸ Next batch / Previous\n"
                "  batch move 4-6 wells at a time.  The table collects every well you\n"
                "  visited, so you save the whole run in one go.  Exit peak picking\n"
                "  returns to the normal trace viewer.  It is built from scratch for\n"
@@ -4980,7 +5195,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    Both stay blank until a position is tagged.  The peak count\n"
                "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
                "    3 = 1 + 2, 2 = 2 + 0.\n"
-               "  •  Auto-genotyping  —  Genotyping ▸ Auto-genotyping ▸\n"
+                "  •  Auto-genotyping  —  Auto genotyping ▸\n"
                "    Auto-genotype sample window… calls everything in the sample\n"
                "    list (only your selection, if you made one) with no clicking:\n"
                "    it takes your marked internal standards — remembered between\n"
@@ -4992,6 +5207,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    stays separate from the manual pick table.  Double-click a call\n"
                "    to correct it: corrections and calls are saved to the library,\n"
                "    and Export library for ML… writes them out as training rows.\n"
+               "    The fitted shape is saved too: Auto genotyping ▸ Use a saved\n"
+               "    standard… hands one to a later plate so it can be genotyped\n"
+               "    without re-marking the wells it took to fit (a plate with its\n"
+               "    own marks still fits those first).\n"
                "  •  Channel roles  —  which channel carries the internal\n"
                "    standard and which the sample is a property of the assay\n"
                "    on the plate, not of the dye order, so it is asked for in\n"
@@ -5034,11 +5253,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
                 "    8 scans (classic heterozygote): small/(small+large).\n"
 "  • Undo last pick removes the most recent pick (with its +A\n"
-                 "    tags); Clear picks empties the whole table.  An area that is\n"
-                 "    already picked cannot be picked again: the click is refused and\n"
-                 "    the status bar says so — undo it first if you meant a re-pick\n"
-                 "    (neighbouring peaks, e.g. the two alleles of a heterozygote,\n"
-                 "    stay pickable).\n"
+                  "    tags); Clear picks empties the whole table.  An area that is\n"
+                  "    already picked cannot be picked again: the click is refused and\n"
+                  "    the status bar says so — undo it first if you meant a re-pick\n"
+                  "    (neighbouring peaks, e.g. the two alleles of a heterozygote,\n"
+                  "    stay pickable).\n"
+                  "  • Remove or fix a wrong mark: hold R and click the peak.\n"
+                  "    The peak and its +A tag go, and if it was one of the four\n"
+                  "    standard bands the band is dropped from the standard too\n"
+                  "    (the mark becomes a hand mark).  Then pick the correct peak\n"
+                  "    and press Mark IS in shown wells — that re-reads the\n"
+                  "    standard from the peaks on screen, so an added or removed\n"
+                  "    band is picked up without forgetting the plate's standard.\n"
+                  "    Right-click is NOT remove: it resets the zoom.\n"
                 "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
                 "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
                 "    (main/+A), height (V), area (V·scan), duplex label\n"
@@ -5048,12 +5275,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "    peaks are never interleaved with another's.  That table is\n"
                 "    your labelled training library for ML — peak picking works with\n"
                 "    or without an internal standard.\n"
-              "6c. FRAGMENT-LENGTH SIZING  (Genotyping ▸ Fragment-length sizing…)\n"
+              "6c. FRAGMENT-LENGTH SIZING  (Manual genotyping ▸ Fragment-length sizing…)\n"
             "  Sizes the sample's peaks in bp against a ladder run in its own\n"
             "  channel. This is a DIFFERENT analysis from peak picking and from\n"
             "  CTCE genotyping: it needs a real multi-fragment size standard, not\n"
             "  an internal standard, and it never uses picked peaks or MF.\n"
-            "  • Select one or more wells, then Genotyping ▸ Fragment-length\n"
+            "  • Select one or more wells, then Manual genotyping ▸ Fragment-length\n"
             "    sizing (ladder)…\n"
             "  • Choose the ladder: a built-in name (genescan500_rox,\n"
             "    geneflo1000_rox, …), a comma-separated length list, or a path to\n"

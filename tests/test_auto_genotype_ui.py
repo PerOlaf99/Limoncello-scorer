@@ -65,31 +65,71 @@ def _entries(menu):
     return out
 
 
-def _find_genotyping_menu(app):
-    """The Genotyping menu: a Tk child menu that owns the manual-pick item."""
+def _find_menu_with(app, item):
+    """The top-level Tk menu that owns *item*."""
     for w in app.winfo_children():
         if not isinstance(w, tk.Menu):
             continue
-        if any(lbl == "Manual peak picking…" for _, lbl in _entries(w)):
+        if any(lbl == item for _, lbl in _entries(w)):
             return w
-    raise AssertionError("no Genotyping menu on the window")
+    raise AssertionError(f"no menu owns {item!r}")
+
+
+def _find_genotyping_menu(app):
+    """The Manual genotyping menu: the one that owns the manual-pick item."""
+    return _find_menu_with(app, "Manual peak picking…")
 
 
 def test_the_menu_actually_offers_auto_genotyping(app):
     """The whole point of adopting V3: the feature has to be reachable from
-    the Genotyping menu, not only importable from Python."""
-    gen = _find_genotyping_menu(app)
-    entries = _entries(gen)
-    assert ("cascade", "Auto-genotyping") in entries, entries
-    i = gen.index("end") + 1
-    for k in range(gen.index("end") + 1):
-        if gen.type(k) == "cascade" and gen.entrycget(k, "label") == "Auto-genotyping":
-            i = k
-    sub = gen.nametowidget(gen.entrycget(i, "menu"))
-    sub_labels = [lbl for typ, lbl in _entries(sub)]
-    assert "Auto-genotype sample window…" in sub_labels, sub_labels
-    assert "Channel roles (standard / sample)…" in sub_labels, sub_labels
-    assert "Save auto-genotype table…" in sub_labels, sub_labels
+    a top-level menu, not only importable from Python.
+
+    Manual picking and the automated pass were split into two menus so the
+    automated one is one click away instead of hidden under a cascade.
+    """
+    manual = _find_genotyping_menu(app)
+    assert ("cascade", "Auto-genotyping") not in _entries(manual), _entries(manual)
+
+    auto = _find_menu_with(app, "Auto-genotype sample window…")
+    labels = [lbl for _, lbl in _entries(auto)]
+    assert "Auto-genotype sample window…" in labels, labels
+    assert "Channel roles (standard / sample)…" in labels, labels
+    assert "Save auto-genotype table…" in labels, labels
+
+
+def test_the_menu_offers_a_saved_standard(app):
+    """A standard fitted on one plate can seed a later one, so the command has
+    to be reachable from the same menu that runs Auto-genotype."""
+    auto = _find_menu_with(app, "Auto-genotype sample window…")
+    labels = [lbl for _, lbl in _entries(auto)]
+    assert "Use a saved standard…" in labels, labels
+
+
+def test_a_learned_model_is_saved_and_reloadable(app):
+    """Fitting a standard writes it to the library as it is learned, so a
+    restart -- and a different plate -- can both be seeded with it."""
+    import mark_library
+    model = genotyping.PlateISModel.from_marks(
+        [[2000, 2081, 2145, 2155], [2050, 2131, 2195, 2205]])
+    app._remember_model("SeedRun", model)
+    assert app._auto_models["SeedRun"] is model
+    back = genotyping.PlateISModel.from_dict(mark_library.load_model("SeedRun"))
+    assert back is not None and back.centers == model.centers
+    assert any(run == "SeedRun" for run, _u, _d in mark_library.saved_models())
+
+
+def test_forgetting_the_standard_drops_the_saved_one_too(app):
+    """A fallback standard is a learned model like any other; forgetting must
+    clear it or the plate would keep genotyping from something the operator
+    just discarded."""
+    import mark_library
+    model = genotyping.PlateISModel.from_marks(
+        [[2000, 2081, 2145, 2155], [2050, 2131, 2195, 2205]])
+    mark_library.save_model("SeedRun", model.to_dict())
+    app._auto_saved_model = model
+    app._auto_saved_run = "SeedRun"
+    app.forget_plate_model()
+    assert app._auto_saved_model is None and app._auto_saved_run == ""
 
 
 def test_mark_all_refuses_without_a_learned_shape(app, monkeypatch):

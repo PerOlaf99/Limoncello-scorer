@@ -292,6 +292,24 @@ class ISGeometry:
                 and abs(d2 - self.d2) <= self.tol2
                 and abs(d3 - self.d3) <= self.tol3)
 
+    def to_dict(self):
+        """Plain-data form, so a fitted template can be written to disk."""
+        return {"d1": self.d1, "d2": self.d2, "d3": self.d3,
+                "tol1": self.tol1, "tol2": self.tol2, "tol3": self.tol3,
+                "center_tol": self.center_tol}
+
+    @classmethod
+    def from_dict(cls, data):
+        """Rebuild a template from :meth:`to_dict` output (``None`` on junk)."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            return cls(data["d1"], data["d2"], data.get("d3"),
+                       tol1=data.get("tol1"), tol2=data.get("tol2"),
+                       tol3=data.get("tol3"), center_tol=data.get("center_tol"))
+        except (TypeError, ValueError, KeyError):
+            return None
+
 
 def _band_heights(y, scans):
     """Smallest and largest apex height among *scans*, for the equimolarity
@@ -725,6 +743,65 @@ class PlateISModel:
         # is the model as fitted. Recorded so a row can be traced back to how
         # permissive the match that produced it was.
         self.scaled = scaled
+
+    def to_dict(self):
+        """Plain-data snapshot of everything the detector reads.
+
+        The two templates, the marked centres, and the four reference sets
+        primed from the marks.  The library writes this so a standard fitted
+        once on one plate can seed a later plate of the same assay without the
+        operator re-marking the wells it took to fit it (and so the fit itself
+        survives a restart).  NumPy values are reduced to plain floats because
+        the store is JSON.
+        """
+        return {
+            "geometry": (None if self.geometry is None
+                         else self.geometry.to_dict()),
+            "centers": [float(c) for c in self.centers],
+            "n_marked": int(self.n_marked),
+            "merged_geometry": (None if self.merged_geometry is None
+                                else self.merged_geometry.to_dict()),
+            "merged_seen": bool(self.merged_seen),
+            "std_snr": [float(v) for v in self.std_snr],
+            "std_heights": [float(v) for v in self.std_heights],
+            "co_mig": [[float(v) for v in refs] for refs in self.co_mig],
+            "sample_snr": [float(v) for v in self.sample_snr],
+            "scaled": None if self.scaled is None else float(self.scaled),
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Rebuild a model from :meth:`to_dict` output (``None`` on junk).
+
+        A missing template or set of centres means the record cannot place a
+        standard, so it is refused rather than half-loaded -- a model that
+        silently lost its geometry would mark wells against noise.
+        """
+        if not isinstance(data, dict):
+            return None
+        geometry = ISGeometry.from_dict(data.get("geometry"))
+        if geometry is None:
+            return None
+        merged = ISGeometry.from_dict(data.get("merged_geometry"))
+        try:
+            centers = [float(c) for c in (data.get("centers") or [])]
+        except (TypeError, ValueError):
+            return None
+        if not centers:
+            return None
+        try:
+            n_marked = int(data.get("n_marked") or 0)
+        except (TypeError, ValueError):
+            n_marked = 0
+        model = cls(geometry, centers, n_marked, merged,
+                    bool(data.get("merged_seen")), scaled=data.get("scaled"))
+        model.std_snr = [float(v) for v in (data.get("std_snr") or [])]
+        model.std_heights = [float(v) for v in (data.get("std_heights") or [])]
+        co = data.get("co_mig") or []
+        model.co_mig = [[float(v) for v in (co[k] if k < len(co) else [])]
+                        for k in range(4)]
+        model.sample_snr = [float(v) for v in (data.get("sample_snr") or [])]
+        return model
 
     @classmethod
     def from_marks(cls, marks):
@@ -2755,6 +2832,13 @@ class PeakPicker:
         names = self._duplex_names(len(col_mains))
         self.std = [(m["scan"], n) for m, n in zip(col_mains, names)]
         self.length_bp = length_bp
+        # The operator just re-marked this standard by hand, so it is no longer
+        # the plate model's placement.  Leaving ``std_auto`` set made the next
+        # auto-genotype re-detect the model's (possibly short) standard and
+        # ignore the peaks the operator added -- the 4th band they picked never
+        # took, and the well kept reading "het-merged" for a standard that only
+        # ever had three bands because one was missed.
+        self.std_auto = None
         msg = "Standard set: " + ", ".join(f"{n}@{x}" for x, n in self.std)
         if self.length_bp is not None:
             msg += f"  (len {self.length_bp:g} bp)"
@@ -2905,6 +2989,41 @@ class PeakPicker:
     def clear_all(self):
         self.records = []
         self._d2_cache = {}
+
+    def remove_at(self, scan, col=None, vol=None, tol=None):
+        """Remove the picked peak nearest a click, with its +A satellites.
+
+        The click-to-remove counterpart to ``pick``: same nearest-scan, then
+        nearest-voltage rule, but it deletes the main record and every
+        satellite sharing its group id.  If the peak was one of the marked
+        standard's bands it is dropped from ``std`` too, and the mark is
+        relabelled a hand mark, so what the graph shows and what genotyping
+        measures stay in step.  Returns the removed main record, or None when
+        nothing picked is within reach.
+        """
+        mains = [r for r in self.records if r.get("kind", "main") == "main"]
+        if col is not None:
+            mains = [r for r in mains if r["col"] == col]
+        if tol is None:
+            tol = max(CLICK_RADIUS, int(self._spacing() * 2.0))
+        near = [r for r in mains if abs(r["scan"] - scan) <= tol]
+        if not near:
+            return None
+        if vol is None:
+            near.sort(key=lambda r: (abs(r["scan"] - scan), -r["height"]))
+        else:
+            near.sort(key=lambda r: (abs(r["scan"] - scan),
+                                     abs(r["height"] - float(vol)),
+                                     -r["height"]))
+        target = near[0]
+        self.records = [r for r in self.records if r["gid"] != target["gid"]]
+        if self.std:
+            keep = [(x, n) for x, n in self.std
+                    if abs(x - target["scan"]) > 2]
+            if len(keep) != len(self.std):
+                self.std = keep or None
+                self.std_auto = None
+        return target
 
     # ---------------------------------------------------------------- export
     def export_rows(self):
