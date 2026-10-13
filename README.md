@@ -26,10 +26,11 @@ wired to the plate-validated **best basecaller** configs.
 | Run info panel | Yes — Comments menu |
 | Undo a mistaken base call (clear overlay) | Yes — Base calling → Clear base calls (undo) |
 | Sequencing trace (ESD peaks) view | Yes — Base calling menu + View menu |
-| Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Genotyping menu |
+| Genotyping — manual peak picking (click/area, +A tagging, CTC-CE duplex internal standard, CSV/Excel/JSON export for ML) | Yes — Manual genotyping menu |
 | Fragments/alleles used for ML training library | Built by manual picks (with or without internal standard) |
+| Mark library — durable internal-standard marks, engine calls and fitted standards (`library/`) | Yes — see [MARK_LIBRARY.md](MARK_LIBRARY.md) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
-| Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Genotyping ▸ Auto-genotyping |
+| Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Auto genotyping menu |
 | Fragment-length sizing — size PCR/ssDNA peaks against a ladder (bp), user-definable ladders | Yes — `scorer.py size` |
 
 ## Requirements
@@ -417,8 +418,8 @@ matplotlib. It does three jobs:
 
 There is also a third job, still library-only:
 
-- **Batch auto-genotyping** — **Genotyping ▸ Auto-genotyping ▸ Auto-genotype
-  selected wells…** calls every selected well with no clicking:
+- **Batch auto-genotyping** — **Auto genotyping ▸ Auto-genotype
+  sample window…** calls every selected well with no clicking:
   `auto_genotype()` locates the internal-standard quartet with
   `find_is_quartet()`, measures the sample's four duplexes, and returns a call
   per well with a human-readable *reason* when it cannot call one. It
@@ -432,6 +433,12 @@ There is also a third job, still library-only:
   for it rather than assuming the T9 defaults. Swapping the pair does not fail
   loudly — it scores the sample's own peaks as the standard and returns
   confident nonsense — so the same channel cannot be set as both.
+
+  Marked standards and calls are kept in the **mark library** (`library/`), so a
+  restart never costs a marked plate, a standard fitted on one plate can seed a
+  later one (**Auto genotyping ▸ Use a saved standard…**), and **Export library
+  for ML…** writes every run's labelled rows out as training data. See
+  [MARK_LIBRARY.md](MARK_LIBRARY.md).
 
 ```bash
 # QC every well in a folder and write a self-contained HTML report
