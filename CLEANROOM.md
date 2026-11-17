@@ -83,3 +83,18 @@ Development scripts (not part of the repo) live in the session scratchpad
   m13/even extra 0.143 -> 0.057, agreement 0.928 -> 0.946.
 - A second pass anchored to a quadratic expected-spacing curve (patent idea) made
   things worse (the curve's extrapolation at the read end is too low); dropped.
+- Broad-peak reads (mb4000): Cimarron's band spacing is ~1.35x track_bases'
+  peak-picking spacing estimate (it counts sub-peaks), both on wells Cimarron
+  processed at full rate and on wells it decimated; our tracker then called ~2
+  bases per band (D02, M10, O02, O14 at ~0 agreement). The autocorrelation of
+  the channel-summed processed signal, searched in [0.8, 2.2] x that estimate,
+  matches Cimarron's spacing on clean and moderately broad wells (D02 14/14,
+  M10 13/13, G10 17/17, H10 18.5/18) but reads ~5-20% long on clean m13 reads
+  (9.7 vs 9.2). Decision: reference spacing = max(peak estimate, autocorr/1.2),
+  or 1.4 x the peak estimate when no periodicity is found. A hard switch
+  (replace when autocorr > 1.25 x estimate) was rejected: the m13 ratios reach
+  1.23, too close. mb4000/even 0.792/0.385 -> 0.839/0.170; m13/even
+  0.945/0.055 -> 0.945/0.047.
+- Tried and dropped: a start skip / linear start taper (no effect), a hard
+  "broad read" clamp floor by spacing threshold (works, 0.827/0.200 on mb4000,
+  but the threshold sat on the boundary of clean reads).

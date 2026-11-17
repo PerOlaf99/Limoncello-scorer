@@ -55,14 +55,12 @@ def _process(trace: np.ndarray):
 
 
 def _track(envelope, best_channel, sig_start, sig_end, global_spacing, prof_start=None, prof_end=None,
-           clamp=(0.5, 2.0), anchor=None):
+           clamp=(0.5, 2.0)):
     """The track_bases forward walk (GOLDEN parameters), starting at sig_start.
 
     prof_start/prof_end define the scan-fraction axis of the parameter
     profiles (track_bases uses its detected signal region).  `clamp` bounds the
-    running spacing relative to the reference spacing, which is the read's
-    global spacing or, when `anchor` (per-scan expected spacing) is given, the
-    local value of that curve."""
+    running spacing relative to `global_spacing` (GOLDEN: 0.5-2.0)."""
     g = _G
     n = len(envelope)
     ps = sig_start if prof_start is None else prof_start
@@ -70,7 +68,7 @@ def _track(envelope, best_channel, sig_start, sig_end, global_spacing, prof_star
     span = max(1, pe - ps)
     f0, f1 = g['profile_fracs']
     pos = sig_start
-    spacing = global_spacing if anchor is None else float(anchor[min(pos, len(anchor) - 1)])
+    spacing = global_spacing
     misses = 0
     out: list[TrackedBase] = []
     while pos < n:
@@ -97,7 +95,7 @@ def _track(envelope, best_channel, sig_start, sig_end, global_spacing, prof_star
                 break
             continue
         misses = 0
-        ref = global_spacing if anchor is None else float(anchor[min(pos, len(anchor) - 1)])
+        ref = global_spacing
         spacing = (1 - ea) * spacing + ea * (pk - pos)
         spacing = (1 - pw) * spacing + pw * ref
         spacing = float(np.clip(spacing, ref * clamp[0], ref * clamp[1]))
@@ -105,19 +103,6 @@ def _track(envelope, best_channel, sig_start, sig_end, global_spacing, prof_star
                                expected_position=expected_next, spacing_used=spacing))
         pos = pk
     return out
-
-
-def spacing_curve(bands, n: int, global_spacing: float, deg: int = 2, half: int = 20) -> np.ndarray:
-    """Expected band spacing per scan: a polynomial fit (over scan position) of
-    the running median of first-pass inter-band distances -- the patent's
-    "expected spacing curve"."""
-    p = np.array([b.position for b in bands], dtype=float)
-    d = np.diff(p)
-    mid = (p[1:] + p[:-1]) / 2
-    med = np.array([np.median(d[max(0, i - half):i + half + 1]) for i in range(len(d))])
-    coef = np.polyfit(mid, med, deg)
-    x = np.clip(np.arange(n), mid[0], mid[-1])
-    return np.clip(np.polyval(coef, x), global_spacing * 0.4, global_spacing * 2.5)
 
 
 def golden_equivalent(trace: np.ndarray, base_order: str = "ACGT"):
@@ -203,12 +188,56 @@ def end_blob(trace: np.ndarray, search: int = 1500, ratio: float = 3.0):
     return pk
 
 
+def autocorr_spacing(norm: np.ndarray, s0: int, s1: int, gsp: float, win: int = 1000,
+                     step: int = 500, frac: float = 0.6, lo: float = 0.8, hi: float = 2.2):
+    """Band spacing from the autocorrelation of the channel-summed processed
+    signal (one pulse per base whatever its colour): the strongest local
+    maximum of the autocorrelation within [lo, hi] x the peak-picking estimate
+    `gsp`, median over 1000-scan windows in the first `frac` of the signal
+    region.  None when no window shows a periodicity in that range."""
+    from scipy.signal import find_peaks
+    S = norm.sum(axis=1)
+    a, b = int(np.floor(lo * gsp)), int(np.ceil(hi * gsp))
+    est = []
+    for w0 in range(s0, s0 + int(frac * (s1 - s0)) - win + 1, step):
+        x = S[w0:w0 + win] - S[w0:w0 + win].mean()
+        f = np.fft.rfft(x, 2 * win)
+        ac = np.fft.irfft(f * np.conj(f))[:b + 2]
+        if ac[0] <= 0:
+            continue
+        ac = ac / ac[0]
+        pk, _ = find_peaks(ac[a:b + 1])
+        if len(pk):
+            k = a + pk[np.argmax(ac[a + pk])]
+            y0, y1, y2 = ac[k - 1], ac[k], ac[k + 1]
+            den = y0 - 2 * y1 + y2
+            est.append(k + (0.5 * (y0 - y2) / den if den < 0 else 0.0))
+    if not est:
+        return None
+    return float(np.median(est))
+
+
+def reference_spacing(gsp: float, acr: float | None, ac_ratio: float = 1.2, ac_fallback: float = 1.4) -> float:
+    """The spacing the tracker is anchored and clamped to.
+
+    track_bases' peak-picking estimate `gsp` (median distance between envelope
+    peaks) matches Cimarron's band spacing on clean reads, but on broad-peak
+    reads it picks up sub-peaks and comes out 15-50% short, which makes the
+    tracker call ~2 bases per band (mb4000: D02, M10, O02, O14 dropped from
+    0.65-0.96 agreement to ~0 that way).  The autocorrelation estimate `acr`
+    does not have that failure but reads ~5-20% long on clean reads, so the
+    reference is max(gsp, acr / 1.2); when no periodicity is found at all,
+    gsp is taken as 1.4x short."""
+    if acr is None:
+        return gsp * ac_fallback
+    return max(gsp, float(acr) / ac_ratio)
+
+
 def call_debug(trace: np.ndarray, base_order: str = "ACGT", start_mode: str = "onset",
                end_blob_offset: int = -60, end_margin: int = 240, pos_offset: float = 7.5,
-               pos_drift: float = 0.0003, start_skip: int = 0, start_taper: int = 0,
-               oracle_span: tuple | None = None, clamp=(0.7, 1.5), anchor_pass: bool = False,
-               anchor_clamp=(0.8, 1.25), anchor_deg: int = 2):
-    """call() with its knobs exposed; returns (seq, positions, info)."""
+               pos_drift: float = 0.0003, oracle_span: tuple | None = None, clamp=(0.7, 1.5),
+               ac_ratio: float = 1.2, ac_fallback: float = 1.4):
+    """call() with its knobs exposed (for development); returns (seq, positions, info)."""
     trace = np.asarray(trace, dtype=float)
     n = len(trace)
     info = {}
@@ -216,9 +245,11 @@ def call_debug(trace: np.ndarray, base_order: str = "ACGT", start_mode: str = "o
     if not has_signal(z):
         info['empty'] = True
         return "", np.zeros(0, dtype=int), info
-    bs, env, ch, _ = _process(trace)
+    bs, env, ch, norm = _process(trace)
     s0, s1 = detect_signal_region(bs)
     gsp = estimate_global_spacing(env, s0, s1)
+    acr = autocorr_spacing(norm, s0, s1, gsp)
+    ref = reference_spacing(gsp, acr, ac_ratio, ac_fallback)
     start = s0
     if start_mode == "onset":
         o = signal_onset(z)
@@ -230,18 +261,8 @@ def call_debug(trace: np.ndarray, base_order: str = "ACGT", start_mode: str = "o
         end = min(end, pk + end_blob_offset)
     if oracle_span is not None:
         start, end = oracle_span
-    start += start_skip
-    if start_taper > 0:
-        env = env.copy()
-        a = max(0, start)
-        b = min(n, a + start_taper)
-        env[a:b] *= np.linspace(0.0, 1.0, b - a, endpoint=False)
-    info.update(start=start, end=end, blob=pk, s0=s0)
-    bands = _track(env, ch, max(0, start - 2), s1, gsp, prof_start=s0, prof_end=s1, clamp=tuple(clamp))
-    if anchor_pass and len(bands) >= 40:
-        anchor = spacing_curve(bands, n, gsp, deg=anchor_deg)
-        bands = _track(env, ch, max(0, start - 2), s1, gsp, prof_start=s0, prof_end=s1,
-                       clamp=tuple(anchor_clamp), anchor=anchor)
+    info.update(start=start, end=end, blob=pk, s0=s0, s1=s1, gsp=gsp, acr=acr, ref=ref)
+    bands = _track(env, ch, max(0, start - 2), s1, ref, prof_start=s0, prof_end=s1, clamp=tuple(clamp))
     bands = [b for b in bands if start <= b.position <= end]
     seq = "".join(base_order[b.channel] for b in bands)
     pos = np.array([b.position for b in bands], dtype=float)
