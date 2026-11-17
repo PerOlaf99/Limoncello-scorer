@@ -18,7 +18,7 @@ used here and are natural tuning targets against real trace data.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import numpy as np
 
 from .fuzzy import FuzzySet, AND, OR, NOT
@@ -153,7 +153,6 @@ def omit_ok_n(bands: list[Band]) -> list[str]:
         norm_spacing = b.spacing_left / exp_sp if exp_sp > 0 else 1.0
 
         ok_sp = okSp.membership(norm_spacing)
-        bad_sp = badSp.membership(norm_spacing)
         bad_xb = badXb.membership(b.cross_banding)
         negl_xb = negligibleXb.membership(b.cross_banding)
         tiny_h = tinyHt.membership(b.height)

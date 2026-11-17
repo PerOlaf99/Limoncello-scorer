@@ -13,7 +13,6 @@ Usage:
     python basecall.py --input plate_dir --out calls --format fq   # FASTQ with PHRED
 """
 import argparse
-import glob
 import os
 import sys
 
@@ -79,10 +78,10 @@ WIN_CONFIG_PRECISION.update(
 PHRED_OFFSET = 33
 
 
-def basecall_well(path, config=WIN_CONFIG):
+def basecall_well(path, config=WIN_CONFIG, base_order="TGCA"):
     """Return (sequence, phred_quals) for one .rsd file."""
     rsd = read_rsd(path)
-    trace, order = to_acgt_trace(rsd, base_order="TGCA")
+    trace, order = to_acgt_trace(rsd, base_order=base_order)
     seq, quals, _bands = track_bases(trace, base_order=order, **config)
     if len(quals) == 0 or float(np.mean(quals)) < QUALITY_GATE:
         seq, quals, _bands = track_bases(trace, base_order=order, **FALLBACK_CONFIG)
@@ -103,7 +102,8 @@ def _write_fastq(fh, name, seq, quals):
 
 def _collect(path):
     if os.path.isdir(path):
-        return sorted(glob.glob(os.path.join(path, "*.rsd")))
+        return sorted(os.path.join(path, f) for f in os.listdir(path)
+                      if f.lower().endswith(".rsd"))
     if path.lower().endswith(".rsd"):
         return [path]
     raise SystemExit("input must be a .rsd file or a directory of .rsd files")
@@ -119,6 +119,8 @@ def main():
     ap.add_argument("--mode", choices=("golden", "precision"), default="golden",
                     help="golden = matched-bases/bit-score optimum (default); "
                          "precision = longest-error-free-run/%%ID optimum")
+    ap.add_argument("--base-order", default="TGCA",
+                    help="plate dye order (default TGCA, the DYEnamic order)")
     args = ap.parse_args()
     config = WIN_CONFIG if args.mode == "golden" else WIN_CONFIG_PRECISION
 
@@ -133,7 +135,7 @@ def main():
     with open(combined, "w") as cf:
         for path in wells:
             name = os.path.splitext(os.path.basename(path))[0]
-            seq, quals = basecall_well(path, config)
+            seq, quals = basecall_well(path, config, args.base_order)
             total += len(seq)
             if args.format == "fa":
                 with open(os.path.join(args.out, name + ext), "w") as fh:

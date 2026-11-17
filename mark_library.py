@@ -24,6 +24,7 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -140,16 +141,32 @@ def _as_pairs(marks: Any) -> List[Tuple[int, str]]:
 def load_run(run: Any) -> Dict[str, Dict[str, Any]]:
     """One run's saved entries, or ``{}`` if nothing (readable) is stored."""
     path = _run_path(run)
+    if not path.exists():
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    wells = data.get("wells")
+        data = None
+    wells = data.get("wells") if isinstance(data, dict) else None
     if not isinstance(wells, dict):
+        # The caller will save this run again with only the wells touched
+        # from now on, which would replace whatever is in the damaged file.
+        # Keep a copy of it first, so earlier marks can still be recovered.
+        _keep_unreadable(path)
         return {}
     return wells
+
+
+def _keep_unreadable(path: Path) -> None:
+    stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = path.with_name(f"{path.name}.unreadable-{stamp}")
+    try:
+        shutil.copy2(path, dest)
+        print(f"mark library: {path} could not be read; kept a copy as "
+              f"{dest.name}", file=sys.stderr)
+    except OSError as exc:
+        print(f"mark library: {path} could not be read or copied: {exc}",
+              file=sys.stderr)
 
 
 def save_run(run: Any, wells: Dict[str, Dict[str, Any]]) -> None:
@@ -195,14 +212,14 @@ def entry_from_picker(pk: Any) -> Dict[str, Any]:
                 break
         except (TypeError, ValueError, KeyError):
             continue
-    if col is not None:
-        entry["std_col"] = col
+    # Always written, None when unset: callers merge this into the stored
+    # entry, and a key left out would keep the previous value -- a well
+    # re-marked by hand would stay "anchored" (model-placed) after a restart.
+    entry["std_col"] = col
     src = getattr(pk, "std_auto", None)
-    if src:
-        entry["std_source"] = str(src)
+    entry["std_source"] = str(src) if src else None
     length = getattr(pk, "length_bp", None)
-    if length is not None:
-        entry["length_bp"] = _clean(length)
+    entry["length_bp"] = None if length is None else _clean(length)
     return entry
 
 
@@ -223,7 +240,9 @@ def apply_picker(pk: Any, entry: Dict[str, Any],
     pairs = _as_pairs(entry.get("std"))
     if not pairs:
         return
-    col = entry.get("std_col", default_col)
+    col = entry.get("std_col")
+    if col is None:
+        col = default_col
     add = getattr(pk, "add_std_mark", None)
     if col is not None and callable(add):
         try:

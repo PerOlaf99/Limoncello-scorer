@@ -62,7 +62,7 @@ def normalize_channels_local(trace: np.ndarray, window: int = 400, percentile: f
     weaker signal near the very start/end), which a single global
     normalization factor doesn't account for.
     """
-    from scipy.ndimage import maximum_filter1d, percentile_filter
+    from scipy.ndimage import percentile_filter
 
     out = np.empty_like(trace)
     for c in range(trace.shape[1]):

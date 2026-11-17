@@ -20,7 +20,7 @@ import numpy as np
 from scipy.signal import find_peaks
 
 from .simple_caller import robust_baseline_subtract, normalize_channels_local, apply_mobility_correction
-from .spacing_caller import find_start_position, _windowed_area
+from .spacing_caller import _windowed_area
 
 
 @dataclass

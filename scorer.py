@@ -500,16 +500,14 @@ def t9_call(hom1, hom2, het1, het2=None, sigmas=None, min_het_frac=0.0) -> tuple
     # Also require at least one homoduplex to be significant when sigma info
     # is available; a strong het band should not create a het call when both
     # homs = below threshold.
-    hom1_ok_sig = hom1 > 0 and (s1 is None or s1 >= T9_MIN_DOMINANT_SIGMA)
-    hom2_ok_sig = hom2 > 0 and (s2 is None or s2 >= T9_MIN_DOMINANT_SIGMA)
     # Both homoduplexes must clear T9_MIN_DOMINANT_SIGMA.  A het's evidence is the
     # *minor* allele, so it arrives in the weaker of the two homoduplex windows
     # -- the one most likely to be a ripple, or the dominant peak's own flank,
     # rather than a product.  Note this is measured in significance, not area:
     # the 1+2 shape is ordinary on this assay (RS1695 A12 and G10 are reference
     # hets with hom1 area 0), so area cannot carry the test, while the bands
-    # themselves are plainly there.  It is deliberately ``hom*_ok_sig``'s
-    # sibling rather than those predicates, which also require non-zero area.
+    # themselves are plainly there.  So the test is on sigma alone and
+    # deliberately does not also require non-zero area.
     if both_present and hom2 > 0 and (s1 is None or s2 is None
                                       or (s1 >= T9_MIN_DOMINANT_SIGMA
                                           and s2 >= T9_MIN_DOMINANT_SIGMA)):
@@ -711,7 +709,14 @@ def read_rows(path: str) -> List[dict]:
         return [dict(r) for r in data]
     delim = "\t" if p.suffix.lower() in (".tsv", ".txt") else ","
     with open(p, newline="", encoding="utf-8-sig") as fh:
-        return [dict(r) for r in csv.DictReader(fh, delimiter=delim)]
+        rows = [dict(r) for r in csv.DictReader(fh, delimiter=delim)]
+    # CSV turns the picker's boolean into the text "False", which is truthy
+    # and would downgrade every main peak that has a +A satellite.
+    for r in rows:
+        if "ambiguous" in r:
+            r["ambiguous"] = str(r["ambiguous"]).strip().lower() in (
+                "1", "true", "yes")
+    return rows
 
 
 def write_rows(path: str, rows: List[dict]) -> None:
@@ -725,7 +730,8 @@ def write_rows(path: str, rows: List[dict]) -> None:
         p.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
         return
     with open(p, "w", newline="", encoding="utf-8-sig") as fh:
-        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        fields = list(dict.fromkeys(k for r in rows for k in r))
+        w = csv.DictWriter(fh, fieldnames=fields, restval="")
         w.writeheader()
         w.writerows(rows)
 
@@ -744,7 +750,7 @@ def _cmd_qc(args) -> int:
     rows = []
     for path in args.inputs:
         try:
-            doc = load_trace(Path(path))
+            doc = load_trace(Path(path), base_order=args.base_order)
             rows.append(well_qc(doc, settings))
             print(f"{rows[-1]['well']:<10} {rows[-1]['length']:>5} bp  "
                   f"Qmean {rows[-1]['q_mean']:>5}  "
@@ -809,7 +815,7 @@ def _cmd_size(args) -> int:
     results = []
     for path in args.inputs:
         try:
-            doc = load_trace(Path(path))
+            doc = load_trace(Path(path), base_order=args.base_order)
             res = size_trace(doc, ladder, ladder_channel=args.ladder_channel,
                              sample_channel=args.sample_channel,
                              base_order=args.base_order)
@@ -843,6 +849,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("inputs", nargs="+", help=".rsd / .scf / .ab1 / text traces")
     q.add_argument("--preset", default="mb1000_accuracy",
                    help="basecaller preset (default mb1000_accuracy)")
+    q.add_argument("--base-order", default="TGCA",
+                   help="dye order for .rsd/text traces (default TGCA)")
     q.add_argument("--out", help="write the QC rows here (.csv or .json)")
     q.add_argument("--report", help="write a self-contained HTML report here")
     q.set_defaults(func=_cmd_qc)

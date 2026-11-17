@@ -27,7 +27,7 @@ Run:
 """
 from __future__ import annotations
 
-import sys
+import sys  # noqa: I001 -- needed before the GUI imports below
 
 # ``--check`` must work even where tkinter/matplotlib are not installed, so
 # answer it before the GUI imports below are executed.
@@ -41,7 +41,6 @@ import random
 import re
 import shutil
 import subprocess
-import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 from pathlib import Path
@@ -62,8 +61,6 @@ from matplotlib.ticker import FuncFormatter
 from analyzer_core import (
     AnalysisSettings,
     BASECALLER_VERSIONS,
-    SOURCE_LABELS,
-    SUPPORTED_EXTS,
     TraceDocument,
     discover_files,
     find_run_folders,
@@ -683,14 +680,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
         srow = ttk.Frame(left)
         srow.pack(fill=tk.X, padx=4)
         ttk.Label(srow, text="Sort:").pack(side=tk.LEFT)
-        self.sort_labels = {c: l for c, l in SORT_OPTIONS}
-        self.sort_codes = {l: c for c, l in SORT_OPTIONS}
-        self.sort_label_var = tk.StringVar(value=self.sort_labels["well_row"])
+        self.sort_label_var = tk.StringVar(
+            value=SORT_LABELS.get(self.sort_mode.get(), SORT_LABELS["well_row"]))
+        self.sort_mode.trace_add(
+            "write", lambda *_a: self.sort_label_var.set(
+                SORT_LABELS.get(self.sort_mode.get(), self.sort_label_var.get())))
         self.sort_cb = ttk.Combobox(srow, textvariable=self.sort_label_var, width=18,
                                     values=list(SORT_LABELS.values()), state="readonly")
         self.sort_cb.pack(side=tk.LEFT, padx=(2, 4))
         self.sort_cb.bind("<<ComboboxSelected>>",
-                          lambda e: (self.sort_mode.set(self.sort_codes[self.sort_label_var.get()]),
+                          lambda e: (self.sort_mode.set(SORT_CODES[self.sort_label_var.get()]),
                                      self.refresh_file_list()))
         ttk.Label(srow, text="Jump/well:").pack(side=tk.LEFT)
         self.well_entry = ttk.Entry(srow, textvariable=self.filter_var, width=6)
@@ -712,6 +711,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.file_list.bind("<Right>", self._page_key)
         self.file_list.bind("<Page_Down>", self._page_key)
         self.file_list.bind("<Page_Up>", self._page_key)
+        # Help and README promise Delete removes the selected samples.
+        self.file_list.bind("<Delete>", lambda e: self.remove_samples())
 
         self.bind("<Down>", self._page_key_root)
         self.bind("<Up>", self._page_key_root)
@@ -886,7 +887,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if not hasattr(self, "base_order_var"):        # keep the one traced
             self.base_order_var = tk.StringVar(value=self.settings.base_order)
         ttk.Label(f, text="Base order (instrument)").pack(anchor=tk.W)
-        ttk.Combobox(f, textvariable=self.base_order_var,
+        ttk.Combobox(f, textvariable=self.base_order_var, state="readonly",
                      values=["ACTG", "TGCA", "GATC", "CTAG"], width=12).pack(anchor=tk.W)
         ttk.Label(f, text="MegaBACE default is ACTG (Ch1=A, Ch2=C, Ch3=T, Ch4=G); "
                           "DYEnamic runs are TGCA. ABI uses its own FWO order.",
@@ -1162,6 +1163,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 text=f"◧ Samples / files  ({len(self.files)})")
         self.status_var.set(f"{len(self.files)} files ({exts or 'none'}) in {scope}"
                             + ("  [filtered]" if filt else ""))
+        # The genotyping table shows the library's calls for the runs in
+        # play, so refill it when that set of runs changes (a folder added at
+        # start-up or later, or cleared) -- not on every filter keystroke.
+        runs = frozenset(f.parent.name for f in self.files)
+        if runs != getattr(self, "_geno_runs_shown", None):
+            self._geno_runs_shown = runs
+            self._sync_geno_table()
 
     def on_file_select(self, _evt=None):
         idxs = self.file_list.curselection()
@@ -1248,19 +1256,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._cur_btn.configure(bg="#F2F4F7", activebackground="#F2F4F7",
                                         fg="#777777")
 
-    def toggle_current(self):
-        self.show_current.set(not self.show_current.get())
-        self._sync_current_btn()
-        self.status_var.set("Current trace (µA): " +
-                            ("ON" if self.cur_btn_on else "OFF"))
-        self.redraw()
-
     def toggle_tour(self):
         self.touring = not self.touring
         if self.touring:
             self.cycle_pos = 0
-            if not self.selected:
-                self.cycle_pos = 0
             self._tour_tick()
         else:
             if self._tour_job:
@@ -1715,7 +1714,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     inside = False
                 if inside:
                     ax = candidate
-                    i = i
                     try:
                         x, y = ax.transData.inverted().transform((ex, ey))
                     except Exception:
@@ -1862,6 +1860,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if col is None:
             return
         y = np.asarray(pk.doc.acgt[:, col], dtype=float)
+        a = int(np.clip(a, 0, y.size - 1))
+        b = int(np.clip(b, a, y.size - 1))
         xs = np.arange(a, b + 1)
         bl = np.linspace(float(y[a]), float(y[b]), b - a + 1)
         line.set_data(xs, bl)
@@ -2282,8 +2282,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         channel = simpledialog.askinteger(
             "Standard channel",
             "Which physical channel carries the internal standard?\n\n"
-            "(ACTG plate: Ch1=A, Ch2=C, Ch3=G, Ch4=T)",
-            initialvalue=genotyping.DEFAULT_IS_CHANNEL,
+            f"(dye order {self.base_order_var.get()}: "
+            + ", ".join(f"Ch{c + 1}={b}" for c, b in
+                        enumerate(self.base_order_var.get()[:4])) + ")",
+            initialvalue=int(self._auto_is_channel.get()),
             minvalue=1, maxvalue=4, parent=self)
         if channel is None:
             return
@@ -2310,7 +2312,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             try:
                 col = genotyping.acgt_index_for_channel(
                     self.base_order_var.get(), channel)
-                found = self._model_mark(pk, self._model_for(path), col)
+                self._model_mark(pk, self._model_for(path), col)
                 marked.append(path.stem)
                 pairs.append((path, pk))
             except ValueError as e:
@@ -2340,8 +2342,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def report_marked_wells(self):
         """List the wells carrying an IS mark, and say what the model knows.
 
-        Marks live only in this session's pick table, so this is the one place
-        to count them before running Auto over the plate: Auto will learn the
+        Marks live in the pick tables (and the mark library on disk), so this
+        is the one place to count them before running Auto over the plate: Auto will learn the
         standard from these marks when none has been learned yet, so what is
         marked here is what the whole plate is fitted to.
         """
@@ -2622,7 +2624,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             box.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=3)
             var.trace_add(
                 "write",
-                lambda var=var, row=row: self._auto_label_text(body, row, var))
+                lambda *_a, var=var, row=row: self._auto_label_text(body, row, var))
         self._auto_hint = ttk.Label(body, text="", foreground="#8A2A0A")
         self._auto_hint.grid(row=3, column=0, columnspan=2, sticky="w",
                              pady=(8, 0))
@@ -3411,7 +3413,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._geno_selecting = True
         try:
             tree.selection_set(shown)
-            n = max(1, self.n_graphs.get())
             first = tree.index(shown[0]) if shown else 0
             total = max(1, len(tree.get_children()))
             tree.yview_moveto(float(first) / total)
@@ -3653,145 +3654,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except tk.TclError:
             pass
 
-    # === in-place table editing (alternative to popups) ===
-    def _auto_edit_cell(self, event):
-        tree = getattr(self, "_auto_tree", None)
-        if tree is None:
-            return
-        # identify column and row
-        try:
-            col = tree.identify_column(event.x)
-            row_id = tree.identify_row(event.y)
-        except tk.TclError:
-            return
-        if not col or not row_id:
-            return
-        # map column name
-        cols = list(getattr(self, "_auto_cols", []))
-        try:
-            cidx = int(col.lstrip("#")) - 1
-            cname = cols[cidx] if 0 <= cidx < len(cols) else ""
-        except ValueError:
-            cname = ""
-        if cname not in ("call", "ispeaks"):
-            return
-        try:
-            i = int(row_id)
-        except ValueError:
-            return
-        row = self._geno_row(i)
-        if row is None:
-            return
-        if getattr(self, "_auto_edit_win", None) is not None:
-            return
-        # open in-place editor over the cell
-        bbox = tree.bbox(row_id, col)
-        if not bbox:
-            return
-        x, y, w, h = bbox
-        if cname == "call":
-            # combobox for call
-            from scorer import CALLS
-            frame = ttk.Frame(tree.master)
-            var = tk.StringVar(value=row.get("call", ""))
-            om = ttk.Combobox(frame, textvariable=var, values=list(CALLS),
-                              state="readonly", width=10)
-            om.pack()
-            frame.place(x=x, y=y, width=w, height=h)
-            self._auto_edit_win = frame
-            setattr(self._auto_edit_win, '_inplace', True)
-            setattr(self._auto_edit_win, '_combobox', om)
-            def apply(*_):
-                try:
-                    row["call"] = var.get()
-                    self._adopt_row(row)
-                    self._library_store_results([row], label_source="edited")
-                except Exception:
-                    pass
-                self._auto_edit_close_inplace()
-            def cancel(*_):
-                self._auto_edit_close_inplace()
-            om.bind("<Return>", apply)
-            om.bind("<Escape>", cancel)
-            om.bind("<<ComboboxSelected>>", apply)
-            om.focus_set()
-        else:  # ispeaks
-            scans = self._std_scans_of(row)
-            frame = ttk.Frame(tree.master)
-            # 4 small entries
-            vars_ = []
-            for n in range(4):
-                v = tk.StringVar(value=str(scans[n]) if n < len(scans) else "")
-                e = ttk.Entry(frame, textvariable=v, width=6)
-                e.pack(side=tk.LEFT, padx=1)
-                vars_.append(v)
-            frame.place(x=x, y=y, width=w, height=h)
-            self._auto_edit_win = frame
-            setattr(self._auto_edit_win, '_inplace', True)
-            setattr(self._auto_edit_win, '_combobox', om)
-            def apply(*_):
-                try:
-                    sv = [int(round(float(xv.get()))) for xv in vars_]
-                except Exception:
-                    sv = []
-                if len(sv) != 4 or any(s < 0 for s in sv) or sv != sorted(sv) or len(set(sv)) != 4:
-                    return  # keep open if invalid; simple for now
-                try:
-                    run, well = row.get("run"), row.get("well")
-                    path = self._path_for_run_well(run, well)
-                    if path is None: return
-                    doc = self._ensure_doc(path)
-                    pk = self._ensure_picker(path)
-                    pk.std = [(s, "") for s in sv]
-                    pk.std_auto = False
-                    self._library_store(path, pk)
-                    models = getattr(self, "_auto_models", None) or {}
-                    import genotyping
-                    new = genotyping.auto_genotype(
-                        doc, is_channel=int(self._auto_is_channel.get()),
-                        sample_channel=int(self._auto_sample_channel.get()),
-                        base_order=self.base_order_var.get(),
-                        cut=genotyping.DEFAULT_IS_CUT, run_name=run,
-                        std_scans_manual=list(sv),
-                        is_model=models.get(run) or getattr(self, "_auto_is_model", None),
-                        min_het_frac=float(self._auto_min_het_frac.get()))
-                    self._adopt_row(new)
-                    self._library_store_results([new], label_source="edited")
-                    if getattr(self, "_auto_tree", None) is not None:
-                        self._sync_geno_table()
-                except Exception:
-                    pass
-                self._auto_edit_close_inplace()
-            def cancel(*_):
-                self._auto_edit_close_inplace()
-            for e in frame.winfo_children():
-                e.bind("<Return>", apply)
-                e.bind("<Escape>", cancel)
-            frame.winfo_children()[0].focus_set()
-
-    def _auto_edit_close_inplace(self):
-        win = getattr(self, "_auto_edit_win", None)
-        if win is None: return
-        self._auto_edit_win = None
-        try:
-            win.destroy()
-        except tk.TclError:
-            pass
-
-    def _auto_edit_close(self):
-        win = getattr(self, "_auto_edit_win", None)
-        if win is None:
-            return
-        self._auto_edit_win = None
-        try:
-            win.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            win.destroy()
-        except tk.TclError:
-            pass
-
     def _auto_edit_is_at(self, i, event=None):
         """Build the standard-editor dialog for table row *i*.
 
@@ -3847,6 +3709,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if first is not None:
             first.focus_set()
         self._grab_when_viewable(win)
+
+    def _grab_soon(self, win, tries=60):
+        """``grab_set`` for any popup, retried until the window is mapped.
+
+        Same XWayland "window not viewable" story as ``_grab_when_viewable``,
+        without tying the popup to the table editor's slot."""
+        try:
+            if not win.winfo_exists():
+                return
+            win.grab_set()
+        except tk.TclError:
+            if tries > 0:
+                try:
+                    win.after(50, lambda: self._grab_soon(win, tries - 1))
+                except tk.TclError:
+                    pass
 
     def _grab_when_viewable(self, win, tries=60):
         """Make a freshly built popup modal once the window manager maps it.
@@ -4131,6 +4009,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "picks to rebuild them in the new order.")
             return
         self._gen_pickers = {}
+        # Every cached trace mapped its columns with the old order, and the
+        # cache is keyed by path alone, so reload them.  Area pickers hold the
+        # same docs; keep them (and their docs) only when they carry regions.
+        if not any(getattr(pk, "records", None)
+                   for pk in self._area_pickers.values()):
+            self._area_pickers = {}
+            self.docs.clear()
         self.redraw()
 
     def channel_bar_order(self, order=None):
@@ -4176,7 +4061,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._comment_cache[key] = self._read_comment(path)
             comment = self._comment_cache.get(key, "")
             if not doc.sequence:
-                head = f">{doc.well} ({doc.source}) — use ▶ Call to base-call"
+                head = f">{doc.well} ({doc.source}) — use Basecall ▸ Basecall selected"
                 if comment:
                     head += f"\n; {comment}"
                 self.seq_text.insert(tk.END, head + "\n\n")
@@ -4218,7 +4103,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         win.title("Run comments")
         win.geometry("520x300")
         win.transient(self)
-        win.grab_set()
+        self._grab_soon(win)
         tk.Label(win, text=f"{path.name}: comment for this run", anchor=tk.W).pack(
             fill=tk.X, padx=10, pady=(8, 2))
         box = tk.Text(win, wrap=tk.WORD, undo=True)
@@ -4359,7 +4244,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         win.title("Run info")
         win.geometry("680x420")
         win.transient(self)
-        win.grab_set()
+        self._grab_soon(win)
         txt = scrolledtext.ScrolledText(
             win, wrap=tk.WORD, font=("DejaVu Sans Mono", 9))
         txt.insert("1.0", "\n".join(chunks))
@@ -4412,7 +4297,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
             cbs[ci].config(text=f"  Ch{ci + 1} {base}  ", fg=color)
 
     def _well_stats(self, doc) -> str:
-        import textwrap
         seq, q = doc.sequence, doc.qualities
         n = len(seq)
         if n == 0:
@@ -4506,7 +4390,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         seq = doc.sequence
         pos = np.asarray(doc.peak_positions, dtype=float)
-        q = doc.qualities or []
         med_sp = float(np.median(np.diff(pos))) if pos.size > 1 else 0.0
         tr = doc.acgt
         ytop = float(np.nanmax(tr[max(0, s0):min(tr.shape[0], s1)])) if s1 > s0 else 1.0
@@ -5128,8 +5011,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "  internal standard in another channel).\n"
 "  • Click a peak (or just beside it) — the best available algorithm\n"
                "    locates it, shades the peak area and logs scan, channel/base,\n"
-               "    height and area.  The recognition method is selectable\n"
-               "    (Best prominence, Simple maxima, Gaussian fit).\n"
+               "    height and area (prominence + area method).\n"
                "  •  Area is measured between the peak's OWN two valleys (capped\n"
                "    at 0.95 x the run's peak spacing), so a tight allele pair no\n"
                "    longer borrows each other's area: the small allele of a het\n"
@@ -5223,13 +5105,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
                "    the checkboxes, both legends and the exported Ch column use\n"
                "    the same mapping, so hiding Ch1 hides the same trace in the\n"
                "    viewer and while picking.\n"
-               "  •  Mark start/end from the 2nd derivative  (on by default)\n"
+               "  •  Mark start/end from the 2nd derivative  (off by default)\n"
                "    places square ticks where each picked peak lifts off its\n"
                "    baseline: the 2nd derivative of the (smoothed) trace crosses\n"
                "    the noise floor from flat to concave-up at the true start,\n"
                "    and concave-up again on the return at the end.  Uncheck it\n"
                "    for a clean look.\n"
-              "  •  Add +A  (on by default) tags the strongest satellite TRAILING\n"
+              "  •  Add +A  (off by default) tags the strongest satellite TRAILING\n"
               "    the main peak: the Taq A-addition a few scans later.  Nothing is\n"
               "    tagged in front of the main peak -- for a single-base-extension\n"
               "    product that leading shoulder is another A-addition on the\n"

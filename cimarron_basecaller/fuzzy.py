@@ -15,8 +15,10 @@ interpolates linearly between breakpoints and clamps outside the range.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Sequence
 import numpy as np
+
+# numpy 2.0 renamed ``trapz`` to ``trapezoid``; accept both.
+_trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
 
 
 @dataclass
@@ -65,10 +67,10 @@ class FuzzySet:
 
     def centroid(self) -> float:
         """Defuzzify by centroid (center of mass) of the membership curve."""
-        area = np.trapezoid(self.ys, self.xs)
+        area = _trapz(self.ys, self.xs)
         if area <= 1e-12:
             return float((self.xs[0] + self.xs[-1]) / 2.0)
-        moment = np.trapezoid(self.xs * self.ys, self.xs)
+        moment = _trapz(self.xs * self.ys, self.xs)
         return float(moment / area)
 
 

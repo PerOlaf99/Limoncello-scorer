@@ -13,7 +13,6 @@ assumed, because spacing is exactly what varies between fragments.  A previous
 version hard-coded T9's d1=25, d3=25, d2=2.5*d1 here as a fallback and it was
 wrong on every other assay measured: ABCC2's d3 is 12 and its d2/d1 is 3.36.
 """
-import sys
 from pathlib import Path
 
 import numpy as np

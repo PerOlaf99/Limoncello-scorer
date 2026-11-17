@@ -43,7 +43,7 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
-from analyzer_core import load_trace
+from analyzer_core import acgt_index_for_channel, load_trace
 
 CHANNEL_ORDER = "ACGT"
 CLICK_RADIUS = 30          # scans searched around a click
@@ -443,9 +443,6 @@ def prime_plate_co_migration(model, wells):
                 a, b = max(0, ctr - CO_MIGRATION_SEARCH), min(n, ctr + CO_MIGRATION_SEARCH + 1)
                 lo, hi = max(0, segs[k][0]), min(n, segs[k][1])
                 if b > a and hi - lo >= MIN_SEGMENT_SPAN:
-                    m = (idx >= max(0, lo - SEGMENT_BASELINE_PAD)) & \
-                        (idx <= min(n, hi + SEGMENT_BASELINE_PAD))
-                    base = float(np.median(y[m]))
                     collected[k].append(
                         float(int(np.argmax(y[a:b])) + a - ctr))
     for k in range(len(model.co_mig)):
@@ -478,22 +475,6 @@ def prime_plate_sample_snr(model, wells):
     model.sample_snr = [strongest_sample_band_snr(a, c, s)
                         for a, c, s in wells if s]
     model.sample_snr = [v for v in model.sample_snr if v > 0]
-
-
-def acgt_index_for_channel(base_order: str, channel: int) -> int:
-    """Column of ``doc.acgt`` holding MegaBACE *channel* (1-based).
-
-    ``doc.acgt`` is always in ACGT order, but the physical channel order is the
-    plate's dye order -- "ACTG" on a MegaBACE, so Ch1=A, Ch2=C, Ch3=T, Ch4=G.
-    Getting this backwards is easy and silently swaps the sample and standard
-    channels, so route every channel lookup through here.
-    """
-    order = (base_order or "ACTG").upper()
-    if len(order) != 4 or set(order) != set("ACGT"):
-        raise ValueError(f"Unexpected base_order {base_order!r}")
-    if not 1 <= channel <= 4:
-        raise ValueError(f"Channel must be 1..4, got {channel!r}")
-    return "ACGT".index(order[channel - 1])
 
 
 def _is_candidates(trace, cut=1900, geometry=None):
@@ -646,13 +627,6 @@ def _search_core(pk, geometry):
     return None if best is None else (best[1], best[2])
 
 
-def _search_quartets(pk, geometry, want=4):
-    """Backwards-compatible entry point used by the unmarked-plate path."""
-    if geometry is None:
-        return _search_equimolar_group(pk)
-    return _search_core(pk, geometry)
-
-
 def find_is_quartet(trace, cut=1900, geometry=None, center=None, center_tol=None):
     """Locate the four internal-standard peaks, or ``None``.
 
@@ -707,7 +681,6 @@ class PlateISModel:
 
     def __init__(self, geometry, centers, n_marked=0, merged_geometry=None,
                  merged_seen=False, scaled=None):
-        import statistics as _st
         self.geometry = geometry
         self.centers = sorted(float(c) for c in centers)
         self.n_marked = int(n_marked)
@@ -848,10 +821,6 @@ class PlateISModel:
         if ts:
             merged = ISGeometry.from_triplets(ts, d1=geom.d1, d2=geom.d2)
         return cls(geom, centers, len(ms), merged, merged_seen=bool(ts))
-
-    @classmethod
-    def from_quartets(cls, quartets):
-        return cls.from_marks(quartets)
 
     @classmethod
     def from_wells(cls, wells, samp_col=None):
@@ -1594,7 +1563,6 @@ def _no_is_het_chance(doc, row, acgt, is_col, samp_col, base_order,
     sigma = _noise_sigma(y)
     hits = []
     if geometry is not None:
-        from itertools import combinations
         pk = _is_candidates(y, DEFAULT_IS_CUT, geometry=geometry)
         if center is not None and center_tol:
             span = (geometry.d1 + geometry.d2 + (geometry.d3 or 0.0)) / 2.0
@@ -2535,7 +2503,9 @@ class PeakPicker:
         w = np.arange(max(0, c - radius), min(n, c + radius + 1))
         if w.size < 3:
             return None
-        alg = dict(PEAK_FINDERS).get(self.finder, "best")
+        keys = {k: k for k, _ in PEAK_FINDERS}
+        keys.update({label: k for k, label in PEAK_FINDERS})
+        alg = keys.get(self.finder, "best")
         if alg == "gauss":
             v = self._numeric_peak(y, w, col)
             if v is None:
@@ -2580,7 +2550,7 @@ class PeakPicker:
                 onset = i
                 break
         end = None
-        for i in range(right, max(apex + 1, right - 1), -1):
+        for i in range(right, apex + 1, -1):
             if d2[i] > th and d2[i - 1] > th:
                 end = i
                 break
@@ -2604,7 +2574,7 @@ class PeakPicker:
         # strongest candidate nearest to the window centre
         c = w.size // 2
         dist = np.abs(w[on] - w[c])
-        order = np.lexsort((seg[on], dist))
+        order = np.lexsort((-seg[on], dist))
         best = int(on[order[0]])
         apex = int(w[best])
         # A peak's own two valleys bound its area: the area is integrated out to
@@ -3050,12 +3020,29 @@ class PeakPicker:
         if not self.records:
             return False
         gid = max(r["gid"] for r in self.records)
+        gone = [r["scan"] for r in self.records
+                if r["gid"] == gid and r.get("kind", "main") == "main"]
         self.records = [r for r in self.records if r["gid"] != gid]
+        self._drop_std_at(gone)
         return True
 
     def clear_all(self):
         self.records = []
         self._d2_cache = {}
+        self.std = None
+        self.std_auto = None
+
+    def _drop_std_at(self, scans):
+        """Remove standard bands sitting on any of *scans* (a removed peak),
+        relabelling what is left a hand mark, so ``std`` never names a band
+        the picker no longer holds."""
+        if not self.std or not scans:
+            return
+        keep = [(x, n) for x, n in self.std
+                if all(abs(x - s) > 2 for s in scans)]
+        if len(keep) != len(self.std):
+            self.std = keep or None
+            self.std_auto = None
 
     def remove_at(self, scan, col=None, vol=None, tol=None):
         """Remove the picked peak nearest a click, with its +A satellites.
@@ -3084,12 +3071,7 @@ class PeakPicker:
                                      -r["height"]))
         target = near[0]
         self.records = [r for r in self.records if r["gid"] != target["gid"]]
-        if self.std:
-            keep = [(x, n) for x, n in self.std
-                    if abs(x - target["scan"]) > 2]
-            if len(keep) != len(self.std):
-                self.std = keep or None
-                self.std_auto = None
+        self._drop_std_at([target["scan"]])
         return target
 
     # ---------------------------------------------------------------- export
@@ -3429,9 +3411,7 @@ class GenotypingEditor(ttk.Frame):
         except Exception as e:
             raise ValueError(f"Could not load trace: {e}")
 
-        self.include_sh = tk.BooleanVar(value=True)
-        self.show_d2 = tk.BooleanVar(value=True)
-        self.finder = tk.StringVar(value="best")
+        self.finder = tk.StringVar(value=dict(PEAK_FINDERS)["best"])
         self.pk = PeakPicker(self.doc, self.path, colors=self.colors,
                              base_order=self.base_order,
                              theme_mode=self.theme_mode, show=self.show,
@@ -3614,6 +3594,7 @@ class GenotypingEditor(ttk.Frame):
         except ValueError as e:
             self.std_lbl.config(text=str(e), foreground="#A33")
             return
+        self.std_lbl.config(text=msg, foreground="#555")
         self._sync_table()
 
     def _clear_std(self):

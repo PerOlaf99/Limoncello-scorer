@@ -273,12 +273,12 @@ switches to it. **Peak picking is built from scratch:**
   that same mapping, so hiding Ch1 hides the same trace in the viewer and while
   picking. Changing the dye order with picks already on screen keeps them and
   says so in the status bar.
-- **Mark start/end from the 2nd derivative** (on by default): square ticks
+- **Mark start/end from the 2nd derivative** (off by default): square ticks
   show where each picked peak lifts off its baseline. The 2nd derivative of
   the smoothed trace crosses the noise floor from flat to concave-up at the
   true start, and concave-up again on the return at the end. Uncheck for a
   clean look. The start/end scans are also written to the exported table.
-- **Add +A** (on by default) tags the strongest satellite *trailing* the main
+- **Add +A** (off by default) tags the strongest satellite *trailing* the main
   peak — the Taq A-addition a few scans later. Nothing is tagged in front of
   the main peak: for a single-base-extension product that leading shoulder is
   another A-addition on the GC-clamp side, not stutter, so it is left unmarked

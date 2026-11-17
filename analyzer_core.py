@@ -10,7 +10,7 @@ import struct
 import sys
 import warnings
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 
 import numpy as np
@@ -168,9 +168,9 @@ class AnalysisSettings:
             )
         kw.pop("base_order", None)  # app passes base_order explicitly
 
-        for field, tkw in self._KNOB_MAP.items():
-            if getattr(self, field) != getattr(defaults, field):
-                kw[tkw] = getattr(self, field)
+        for name, tkw in self._KNOB_MAP.items():
+            if getattr(self, name) != getattr(defaults, name):
+                kw[tkw] = getattr(self, name)
         if (self.window_frac_lo, self.window_frac_hi) != (
                 defaults.window_frac_lo, defaults.window_frac_hi):
             kw["window_frac"] = (self.window_frac_lo, self.window_frac_hi)

@@ -218,7 +218,6 @@ def test_same_channel_for_standard_and_sample_is_refused(app):
     to refuse the pair before a single well is scored."""
     app._auto_is_channel.set(3)
     app._auto_sample_channel.set(3)
-    errors = []
     app.update()
     app.auto_genotype_wells()
     # the guard returns before scoring, so nothing was written
