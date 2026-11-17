@@ -422,9 +422,11 @@ There is also a third job, still library-only:
   sample window…** calls every selected well with no clicking:
   `auto_genotype()` locates the internal-standard quartet with
   `find_is_quartet()`, measures the sample's four duplexes, and returns a call
-  per well with a human-readable *reason* when it cannot call one. It
-  reproduces 95 of the 96 wells of the T9 plate against the manual ground
-  truth. Results land in their own table below the plot — well, call, frac,
+  per well with a human-readable *reason* when it cannot call one. With the
+  standard marked in three wells (A03, H01, D12) it reproduces 93 of the 96
+  wells of the T9 plate against the manual ground truth: G09 is the
+  documented floor case, and H04/H07 are known regressions since the plate
+  model (the pre-model engine called them right). Results land in their own table below the plot — well, call, frac,
   the four duplex areas and their significances, flags and reason — which
   never overwrites the manual pick table, and **Save auto-genotype table…**
   writes them out as CSV/XLSX/JSON.

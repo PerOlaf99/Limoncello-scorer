@@ -522,7 +522,10 @@ def _is_candidates(trace, cut=1900, geometry=None):
         if sat:
             continue
         kept.append((x, h, prom))
-    return sorted(kept, key=lambda c: c[0])[:IS_MAX_CANDIDATES]
+    # ``kept`` is strongest-first: bound it there, then order by position.
+    # Truncating after the positional sort kept the earliest peaks, so on a
+    # noisy channel the real bands further along never reached the search.
+    return sorted(kept[:IS_MAX_CANDIDATES], key=lambda c: c[0])
 
 
 def _equimolar(heights):
@@ -816,7 +819,10 @@ class PlateISModel:
             return cls(merged, [sum(t) / 3.0 for t in ts], len(ms), merged,
                        merged_seen=True)
         geom = ISGeometry.from_quartets(qs)
-        centers = [sum(m) / 4.0 for m in ms]
+        # Each well's own mean: dividing a three-band mark by four put its
+        # centre a quarter of the way back towards scan 0.  Two-band marks
+        # are too partial to say where the standard sits.
+        centers = [sum(m) / len(m) for m in ms if len(m) >= 3]
         merged = None
         if ts:
             merged = ISGeometry.from_triplets(ts, d1=geom.d1, d2=geom.d2)
@@ -863,6 +869,7 @@ class PlateISModel:
         prime_plate_std_height(model, std_refs)
         if samp_col is not None:
             prime_plate_co_migration(model, samp_refs)
+            prime_plate_sample_snr(model, samp_refs)
         return model
 
     def describe_plate(self):
@@ -1303,19 +1310,19 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
     # the placements; where the standard lives may not.
     seed_centers = list(model.centers)
 
-    found = {}
-    for _round in range(max_rounds):
-        found = {}
-        learnable = {}
+    def place(m):
+        """Where *m* puts the standard in every well, and which of those
+        placements may teach the shape."""
+        placed, learn = {}, {}
         for well, y in ys.items():
-            hit = model.find(y)
+            hit = m.find(y)
             if hit is None:
                 continue
             scans, _heights, how = hit
-            label, score = model.confidence(y, scans, how)
+            label, score = m.confidence(y, scans, how)
             if label == "absent":
                 continue          # under the noise floor: not a standard
-            found[well] = (scans, how, label, score)
+            placed[well] = (scans, how, label, score)
             # Only a match found *inside* the position window may teach the
             # shape.  ``anchored-wide`` is the same shape searched over the
             # whole channel, and it is where the off-model matches come from:
@@ -1325,8 +1332,13 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
             # operator sees it in the table -- it just cannot vote.
             if (how in STRICT_SOURCES and not how.endswith("-wide")
                     and label in ("strong", "fair")):
-                learnable[well] = scans
-        if len(learnable) < TRIM_MIN_WELLS or _round == max_rounds - 1:
+                learn[well] = scans
+        return placed, learn
+
+    seed = model
+    found, learnable = place(model)
+    for _round in range(max_rounds - 1):
+        if len(learnable) < TRIM_MIN_WELLS:
             break
         refit = PlateISModel.from_wells(
             [(traces[w], is_col, s) for w, s in learnable.items()],
@@ -1334,12 +1346,22 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
         if refit is None:
             break
         refit.centers = seed_centers
+        # The wells the operator marked, not the placements the refit was
+        # learned from -- describe_plate reports this number back to them.
+        # (merged_seen and the signal references are deliberately still
+        # re-learned from the placements: keeping the seed's values moved the
+        # rs1695 plate's wrong calls from 6/7/7/11 to 17/19/3/3 across four
+        # seed sets -- not a fix until it is measured on more plates.)
+        refit.n_marked = seed.n_marked
         moved = max(
             abs(getattr(refit.geometry, a) - getattr(model.geometry, a))
             for a in ("d1", "d2"))
         moved = max(moved, abs((refit.geometry.d3 or 0.0)
                                - (model.geometry.d3 or 0.0)))
         model = refit
+        # Re-place with the model that is returned, so *found* always
+        # describes *model* (it used to come from the previous round's fit).
+        found, learnable = place(model)
         if moved < 0.5:
             break               # the shape has settled
     return model, found
