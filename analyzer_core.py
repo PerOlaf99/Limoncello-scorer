@@ -189,8 +189,8 @@ BASECALLER_VERSIONS = {
     "raw_peaks": "Minimal processing + envelope peaks",
     "mb1000_accuracy": "MB1000 · longest error-free run, high %ID (deep Q-trim)",
     "mb1000_length": "MB1000 · longest read at ID ≥95% (mid hard-zone)",
-    "mb4000_accuracy": "MB4000 · error-free mode + MB4000 spectral CHM",
-    "mb4000_length": "MB4000 · length mode + MB4000 spectral CHM",
+    "mb4000_accuracy": "MB4000 · = mb1000 accuracy (no MB4000 colour matrix bundled yet)",
+    "mb4000_length": "MB4000 · = mb1000 length (no MB4000 colour matrix bundled yet)",
 }
 
 

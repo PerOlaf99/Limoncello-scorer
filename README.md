@@ -3,6 +3,9 @@
 A desktop viewer and base caller for capillary-electrophoresis traces,
 wired to the plate-validated **best basecaller** configs.
 
+The full user manual, with quick starts for each job, is in the app:
+**Help → User manual…** (F1), with contents and search.
+
 ## Features
 
 | Feature | Status |
@@ -134,15 +137,21 @@ To try it immediately: **File → Add data folder** →
 - **File → Save graph image…** writes the current plot area to PNG/PDF/SVG.
   The old matplotlib toolbar was removed in favour of these controls.
 
-## Keyboard shortcuts
+## Keyboard and mouse
 
-| Key | Action |
+| Key / mouse | Action |
 |-----|--------|
-| ↑ / ↓ / PgUp / PgDn | page through wells |
-| Space | start / stop auto-tour |
-| Delete | remove selected sample(s) |
-| Home / right-click | reset the X & Y view |
-| F1 | user manual |
+| ↓ ↑ ← → PgDn PgUp | page through wells (whole wells with *Overlay runs*) |
+| Space | start / stop the auto-tour (in the Samples list) |
+| Delete | hide the selected files from the list |
+| Home, double-click, right-click | reset the view |
+| Ctrl+Z | undo the last pick or measurement |
+| R + click | remove that picked peak |
+| Enter in the *Scans* boxes | zoom to the typed scan range |
+| wheel / Ctrl+wheel / Shift+wheel | zoom across at the cursor / zoom height / pan |
+| drag (Ctrl+drag while picking) | zoom to a range |
+| middle-drag | pan |
+| F1 | user manual (contents + search) |
 | F11 | full screen / restore |
 | Esc | cancel a long job, or leave full screen |
 
@@ -157,15 +166,15 @@ vendored `configs.py`.
 |------|------|
 | **mb1000_accuracy** | MegaBACE 1000 · longest error-free run, high %ID (deep Q-trim). Default. |
 | **mb1000_length** | MegaBACE 1000 · longest read at ID ≥95% (mid hard-zone) |
-| **mb4000_accuracy** | MegaBACE 4000 · error-free mode + MB4000 spectral CHM |
-| **mb4000_length** | MegaBACE 4000 · length mode + MB4000 spectral CHM |
+| **mb4000_accuracy** | Currently the same as `mb1000_accuracy` — no MegaBACE 4000 colour matrix is bundled yet |
+| **mb4000_length** | Currently the same as `mb1000_length` (see above) |
 | **pos_bonus07** | legacy alias of `mb1000_accuracy` (kept for saved settings) |
 | **pos_profile** | legacy alias of `mb1000_length` (kept for saved settings) |
 | **hz_soften** | accuracy base + mild mid hard-zone |
 | **raw_peaks** | Envelope peaks only (debug) |
 
-> Use `mb4000_*` only on MegaBACE 4000 traces — on 1000 data the 4000
-> spectral matrix is the wrong chemistry and reads collapse.
+> The `mb4000_*` names are kept for MegaBACE 4000 data, but until a 4000
+> spectral (colour-separation) matrix is bundled they run the MB1000 settings.
 
 Base order default **ACTG** (MegaBACE: Ch1=A, Ch2=C, Ch3=T, Ch4=G).
 DYEnamic runs are **TGCA** — set it under ⚙ Basecall settings → Dye/channel.
@@ -231,27 +240,27 @@ letters, peak marks and quality curve look confusing), undo it with
 **Base calling → Clear base calls (undo)**. Only the in-memory view is reset;
 the `.rsd`/`.scf` data files are never modified.
 
-The **Genotyping** menu is an independent top-level heading (between *Base
-calling* and *Comments*). It holds two modes, **Manual peak picking…** and
+The **Manual genotyping** menu (between *Base calling* and *Auto
+genotyping*) holds two modes, **Manual peak picking…** and
 **Peak area by drag…**, neither of which needs a second window or a pop-up:
 the main window stays exactly as it is — the same stacked viewer, zoom bars,
 Reset view, µA overlay and **Channels** row — but clicking a peak now records
 it for that well, and the *Called sequence* box below the plot becomes the
-*Picked peaks* or *Measured areas* table. The two are radio buttons in effect:
-at most one owns the canvas, the menu shows which is live, and ticking one
-switches to it. **Peak picking is built from scratch:**
+*Picked peaks* or *Measured areas* table. Only one is active at a time;
+choosing the active mode again, or **Manual genotyping → Exit peak picking**,
+returns to plain viewing. **Peak picking is built from scratch:**
 
-- Show several wells at once with the **Graphs** spinbox (4–6 at a time is
-  the intended workflow), zoom in with the axis bars / mouse wheel, and click
+- Show several wells at once with **Graphs** in the view bar (4–6 at a time
+  works well), zoom in with the mouse wheel or a Ctrl+drag box, and click
   each peak on its own subplot. Then move the batch onward —
-  **Genotyping → Next batch / Previous batch** pages 4–6 wells at a time — and
+  **Manual genotyping → Next batch / Previous batch** (or ↓ / ↑) page by the
+  Graphs count — and
   pick the next wells. The table below accumulates **every well you visited**,
   so you save the whole run in one go.
 - Click a peak (or just beside it) — the best available algorithm locates it,
   shades the peak area and logs scan, channel/base, height (V) and area
   (V·scan). Clicking nearer the peak's actual height separates two channels
-  that share a scan. The recognition method is selectable: Best prominence,
-  Simple local maxima, or Gaussian fit.
+  that share a scan.
 - **A peak's area is measured between its own two valleys**, and the area is
   integrated out to those valleys — a variant fraction is only as good as the
   two areas it is built from, so the peak keeps every tail scan that is really
@@ -306,14 +315,14 @@ switches to it. **Peak picking is built from scratch:**
   **homoduplexes** (they differ by the single SNP base of the rs number), peaks
   3–4 the two **heteroduplexes** made in the PCR when Watson and Crick strands
   pair wrongly, leaving one mismatch base pair. Pick that well's four standard
-  main peaks *last* and use **Genotyping → Mark peaks as standard…** (a shared
+  main peaks *last* and use **Manual genotyping → Mark peaks as standard…** (a shared
   fragment length in bp is optional): earlier ones become `HOM1`/`HOM2`, later
   ones `HET1`/`HET2`. Variant ratios come from the **relative areas** of these
   duplex peaks, so no bp ladder is involved.
 - **Mutant/variant fraction** is computed for two main peaks of the *same
   channel* within one repeat (~one base): small/(small+large), shown in the
   table. The grouping window scales with the run's own peak spacing.
-- **Mass-action MF** (CTCE) — **Genotyping → Tag duplex species for MF…** tags
+- **Mass-action MF** (CTCE) — **Manual genotyping → Tag duplex species for MF…** tags
   *one allelic position* (the last-picked main's own cluster on its channel, so
   two positions in one well stay apart) with the same `HOM1`/`HOM2`/`HET1`/`HET2`
   names the internal standard gets, and that position then reports the PCR

@@ -36,6 +36,7 @@ if __name__ == "__main__" and "--check" in sys.argv[1:]:
     sys.exit(environment_report())
 
 import argparse
+from types import SimpleNamespace
 import json
 import random
 import re
@@ -5480,384 +5481,135 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"Loaded settings from {path}")
 
     def show_help(self):
-        """Scrollable in-app user manual (Help -> User manual, or F1)."""
-        text = (
-            "Limoncello CE Analyzer — user manual\n"
-            "=====================================\n\n"
-            "WHAT IT IS\n"
-            "  A viewer and base caller for capillary-electrophoresis traces.\n"
-            "  Supports .rsd, .scf, ABI .ab1 and text/CSV traces.\n"
-            "  Fluorescence is shown in Volts; instrument current in µA.\n"
-            "  It also does three analyses that are easy to confuse with each\n"
-            "  other, so they are kept apart on purpose:\n"
-            "    • Base calling   (6a)  reads letters from a sequencing trace.\n"
-            "    • Peak picking / genotyping (6b)  records peaks by hand on a\n"
-            "      CTCE run — click one peak, drag a span, tag duplex species\n"
-            "      and read MF, or auto-genotype a whole run.\n"
-            "    • Fragment-length sizing (6c)  gives peak sizes in bp against a\n"
-            "      real ladder. NOT for CTCE: a CTCE internal standard is not a\n"
-            "      size ladder, and it can be mistaken for one, so it must never\n"
-            "      be sized this way.\n\n"
-            "1. OPEN YOUR DATA\n"
-            "  File ▸ Add data folder…  (or the  ⊕ Add…  button)\n"
-            "    • Pick ONE run folder to load just that run.\n"
-            "    • Ctrl-click SEVERAL folders in the picker to load them at once.\n"
-            "    • Pick a parent folder that contains many run folders\n"
-            "      (e.g. a whole OY run collection) to load every run under it.\n"
-            "  The chosen runs appear in the  Data folders  list, top-left.\n\n"
-            "2. THE DATA FOLDERS LIST\n"
-            "  • Click a row to show only that run's files in Samples / files.\n"
-            "  • Ctrl-click / Shift-click several rows to show their files together.\n"
-            "  • Double-click a row to show that run and open its first sample.\n"
-            "  • Select row(s) and click  – Remove  to unload those runs.\n"
-            "  • File ▸ Clear folders unloads everything.\n\n"
-            "3. THE SAMPLES / FILES LIST\n"
-            "  Each entry is one trace (shown as  run/file).\n"
-            "  • Click to plot it; Ctrl/Shift-click to plot several side by side.\n"
-            "  • Set  Graphs  (view bar, above the plots) to stack up to 12 plots;\n"
-            "    beside it the view bar says which wells are on screen, and warns\n"
-            "    when more are selected than fit.\n"
-            "  • Overlay runs  (view bar / View menu) draws one graph per well of\n"
-            "    a plate with every run of it on top of each other: Run01 solid,\n"
-            "    Run02 dashed, Run03 dotted … — runs of one plate are folders\n"
-            "    whose names differ only by their RunNN ending.\n"
-            "  • Type in  Jump/well  to filter by well name, file name or run name.\n"
-            "  • Sort:  View ▸ Sort files  (well row, column, name, run, …).\n"
-            "  • Remove selected samples with  – Remove file(s)  or the Delete key.\n\n"
-            "4. MOVING AROUND THE PLOT\n"
-            "  On the graphs:\n"
-            "  • Mouse wheel zooms X around the mouse;  Ctrl+wheel zooms Y;\n"
-            "    Shift+wheel pans left/right.\n"
-            "  • Drag with the left button to zoom to that range (a flat drag\n"
-            "    zooms X only, a box also zooms Y). While picking peaks or\n"
-            "    measuring areas the left button is the tool, so use Ctrl+drag.\n"
-            "  • Middle-drag pans.  Double-click, right-click or Home resets.\n"
-            "  The view bar above the plots:\n"
-            "  • Zoom  −/+  and  Scans [from]–[to]  (type a range, press Enter);\n"
-            "    the boxes always show the scans on screen.\n"
-            "  • Y scale  Shared — one height scale for all graphs, to compare\n"
-            "    wells;  Each graph — every graph scaled to its own peaks, so a\n"
-            "    weak well is not flattened by a strong one.\n"
-            "  • Fit Y to view — the height follows the scans on screen, so\n"
-            "    zooming into a region also scales up to its peaks.\n"
-            "  The bars still work too: bottom bar = X, right bar = Y; slide the\n"
-            "  thumb to pan, wheel over a bar to zoom that axis, double-click a\n"
-            "  bar to reset it. Every visible plot moves together.\n"
-            "  X tick numbers appear only under the bottom pane; tick  Time (min)\n"
-            "  to read minutes:seconds instead of scans (1.75 scans/s).\n"
-            "  The table under the graphs (genotyping calls, picked peaks, called\n"
-            "  sequence) sits on a divider you can drag; it disappears when the\n"
-            "  wells on screen have nothing for it (View ▸ Always show table…).\n\n"
-"5. VIEW MODES  (View menu)\n"
-             "  • Raw traces            — detector signal as recorded.\n"
-             "  • Processed (ACGT)      — colour-separated channels.\n"
-             "  • Base-called           — peaks with base letters and quality.\n"
-             "  • Sequencing trace (ESD)— the basecaller's processed picture: the four\n"
-             "                            dye traces with one mark on every peak.\n"
-             "                            Called runs show a ring on each CALLED\n"
-             "                            peak (in that base's colour); a\n"
-             "                            heterozygous position appears as two\n"
-             "                            rings at one scan, a mutation as a ring\n"
-             "                            in an unexpected channel.  No letters,\n"
-             "                            no quality line.  (Also on the Base\n"
-             "                            calling menu.)\n"
-             "  • Wrap                  — one well split over N rows; set\n"
-             "                            View ▸ Wrap rows (2-8).\n"
-            "  • Channels submenu toggles the four channels; Trace colors picks a\n"
-            "    colour scheme.  Traces are drawn in the run's physical channel\n"
-            "    order (Ch1..Ch4) — the first tick is always the first channel —\n"
-            "    each labelled by the base it carries (set the chemistry under\n"
-            "    ⚙ Basecall settings ▸ Dye/channel ▸ Base order).\n"
-            "      'Classic' (default) is the MegaBACE software look: colours\n"
-            "      are FIXED per base letter — A green, C blue, T red, G black.\n"
-            "      With the default base order A·C·T·G that shows\n"
-            "      Ch1=A green, Ch2=C blue, Ch3=T red, Ch4=G black.  Other\n"
-            "      chemistries only shift which channel shows which colour;\n"
-            "      the letters keep their colours (DYEnamic runs = TGCA).\n"
-            "      Sequencing dye sets are FIXED per base, like the MegaBACE SA:\n"
-            "      A green, C blue, T red, G black — the same traces therefore keep\n"
-            "      the same colours whatever the kit, only the channels shift.\n"
-            "        'Seq DYEnamic (T·G·C·A)'  = fixed colours with DYEnamic kit\n"
-            "                                   (Ch1=T · Ch2=G · Ch3=C · Ch4=A).\n"
-            "        'Seq ET primer (A·C·T·G)' = fixed colours with ET primer kit\n"
-            "                                   (Ch1=A · Ch2=C · Ch3=T · Ch4=G).\n"
-            "      Genotyping dye sets are FIXED per channel (no base colours):\n"
-            "        'Genotyping (R·B·Blk·G)'  = Ch1 Red (ET-ROX), Ch2 Blue (FAM),\n"
-            "                                   Ch3 Black (HEX/NED), Ch4 Green (TET/HEX)\n"
-            "        'Genotyping (G·B·R·Blk)'  = Green/Blue/Red/Black on Ch1-4\n"
-            "                                   (the order Fragment-readers are used to).\n"
-            "  • Page forward / Page backward step through wells; auto-tour plays\n"
-            "    them automatically (Space starts/stops it).\n\n"
-"6. BASECALLING  (Base calling menu)\n"
-             "  • Basecall selected — calls the wells currently plotted.\n"
-             "  • Basecall all in list — calls everything listed (asks first if big).\n"
-             "  • ⚙ Basecall settings… — pick a basecaller + advanced parameters.\n"
-             "  • Sequencing trace (ESD peaks) / Plain channels (processed) —\n"
-             "    the two plot styles from section 5, so base calling and its\n"
-             "    result live together.\n"
-             "  • Clear base calls (undo) — removes a call's letters, peak marks\n"
-             "    and quality curve, e.g. when fragment/genotyping data was\n"
-             "    base-called by mistake.\n"
-             "  • Basecaller presets (instrument × mode):\n"
-             "      mb1000_accuracy  MB1000 · longest error-free run, high %ID\n"
-             "      mb1000_length    MB1000 · longest read at ID ≥95%\n"
-             "      mb4000_accuracy  MB4000 · error-free mode + 4000 CHM\n"
-             "      mb4000_length    MB4000 · length mode + 4000 CHM\n"
-             "      pos_bonus07      legacy alias for mb1000_accuracy\n"
-             "      pos_profile      legacy alias for mb1000_length\n"
-             "      hz_soften        accuracy base + mild mid hard-zone\n"
-             "      raw_peaks        minimal envelope-peak call (debug)\n"
-             "  • Use mb4000_* only on MegaBACE 4000 data; on 1000 traces the\n"
-             "    4000 spectral matrix is the wrong chemistry and reads collapse.\n"
-             "  • Called sequence(s) appear in the box below the plot.\n"
-             "  • After a call the plot itself stays clean — the extra green\n"
-             "    'quality' line is OFF by default.  Turn it on only if you want\n"
-             "    it:  View ▸ Show quality profile (0-100).\n\n"
-"6b. GENOTYPING  (Manual genotyping and Auto genotyping menus, between Base\n"
-                "    calling and Comments)\n"
-               "  Manual peak picking…  keeps THIS window exactly as it is — the same\n"
-               "  stacked viewer, zoom bars, Reset view, µA and Channels row — but\n"
-               "  clicking a peak now records it for that well, and the Called-sequence\n"
-               "  box below the plot becomes the Picked-peaks table.  Show several\n"
-               "  wells at once (the Graphs spinbox), zoom in, and pick each well's\n"
-                "  peaks; then page the batch onward — Manual genotyping ▸ Next batch / Previous\n"
-               "  batch move 4-6 wells at a time.  The table collects every well you\n"
-               "  visited, so you save the whole run in one go.  Exit peak picking\n"
-               "  returns to the normal trace viewer.  It is built from scratch for\n"
-               "  fragment genotyping (CTC-CE runs, e.g. a FAM sample with an Atto532\n"
-               "  internal standard in another channel).\n"
-"  • Click a peak (or just beside it) — the best available algorithm\n"
-               "    locates it, shades the peak area and logs scan, channel/base,\n"
-               "    height and area (prominence + area method).\n"
-               "  •  Area is measured between the peak's OWN two valleys (capped\n"
-               "    at 0.95 x the run's peak spacing), so a tight allele pair no\n"
-               "    longer borrows each other's area: the small allele of a het\n"
-               "    pair used to report a near-equal area and a fake ~50/50\n"
-               "    fraction.  Fractions are small/(small+large) of those areas.\n"
-               "  •  Hovering a subplot shows a crosshair plus a live readout in\n"
-               "    that subplot's corner: the scan under the pointer, its\n"
-               "    voltage, and the dominant peak within one base on any visible\n"
-               "    channel, marked [picked] once you have it.\n"
-"  Peak area by drag…  is the same mode with the automation switched off,\n"
-               "  for when you want to say where a peak starts and ends yourself.\n"
-               "  Hold the left button and drag between the two points, and the\n"
-               "  straight line between them becomes the baseline: the area above\n"
-               "  it is what gets measured, exactly as drawn.  A dashed baseline and\n"
-               "  a live ‘mid … area V·scan’ readout follow the pointer; release\n"
-               "  to record.  Dragging right-to-left works, and nothing is detected,\n"
-               "  so there is no finder, no internal standard to mark and no +A\n"
-               "  tagging.  The table becomes run / well / ch / start / stop / mid /\n"
-               "  h V / area.\n"
-"  •  Use it when the peak is crowded, overlapping or not peak-shaped, or\n"
-               "    when you want the area over a span the automatic valleys would\n"
-               "    not choose.  Use Manual peak picking when the trace is clean and\n"
-               "    you would rather not have to place anything by hand.\n"
-"  •  WHICH CHANNEL GETS MEASURED — the one carrying the largest area in\n"
-               "    your span, among the channels that are switched ON.  There is no\n"
-               "    channel picker: the peak you are pointing at is normally the big\n"
-               "    one, so the drag takes the big one.  The Channels row is how you\n"
-               "    choose -- switch off the internal standard and anything you are\n"
-               "    not measuring, and the drag takes the largest of what is left.\n"
-               "    Hiding a channel hides it from the picture AND from the\n"
-               "    measurement together, so what you can see is what gets measured.\n"
-               "    The channel used is named in the status line and written to the\n"
-               "    table's ch column.  Switching every channel off and then dragging\n"
-               "    says so, rather than pretending nothing rose above the baseline.\n"
-"  •  Typical use: a run has four channels but you only want the sample, so\n"
-               "    switch the standard off once and leave it off for the whole\n"
-               "    batch.  On the T9 DyeSet2 traces (Dye order ACTG) Ch3 is the T\n"
-               "    internal standard and Ch2 is the sample, so unticking Ch3 leaves\n"
-               "    you measuring sample peaks only.  Confirm what your run is --\n"
-               "    Comments ▸ Run info… prints the dye order and the per-channel\n"
-               "    signal, and the checkboxes are labelled Ch1..Ch4 in that order.\n"
-"  •  The two are radio buttons in effect — the tick in the Genotyping menu\n"
-               "    shows which mode is live, ticking one switches to it, and\n"
-               "    unticking returns to the normal trace viewer.  Both page the batch,\n"
-               "    and Undo / Clear / Save work the same way in either.\n"
-               "  •  The picked-peaks table is sorted by scan (then channel) per\n"
-               "    well, whatever order you clicked in; Undo last pick still\n"
-               "    removes the most recent click.\n"
-               "  •  Mass-action MF (CTCE)  —  Tag duplex species for MF…\n"
-               "    (Genotyping menu) tags ONE allelic position (the last-picked\n"
-               "    main's own cluster, so two positions in a well stay apart) with\n"
-               "    the same HOM1/HOM2/HET1/HET2 names, and that position then\n"
-               "    reports the PCR mass-action fraction in the MF column:\n"
-               "        MF = (A_MUT + 1/2 A_HET) / (A_WT + A_MUT + A_HET)\n"
-               "    A_WT/A_MUT are the homoduplex areas, A_HET the combined\n"
-               "    heteroduplex area.  The 1/2 term is the point: a clean\n"
-               "    heterozygote reads 0.5, not the 0.25 a plain area ratio of\n"
-               "    the two homoduplexes gives, and below ~5% MF, where all the\n"
-               "    mutant strands have re-annealed and no mutant homoduplex is\n"
-               "    visible at all, the whole low fraction is carried by A_HET.\n"
-               "    The ai column adds the allelic imbalance\n"
-               "    A_HOMO1/(A_HOMO1+A_HOMO2), which needs no wild-type choice.\n"
-               "    Both stay blank until a position is tagged.  The peak count\n"
-               "    decides the split: 4 = 2 homoduplexes + 2 heteroduplexes,\n"
-               "    3 = 1 + 2, 2 = 2 + 0.\n"
-                "  •  Auto-genotyping  —  Auto genotyping ▸\n"
-               "    Auto-genotype sample window… calls everything in the sample\n"
-               "    list (only your selection, if you made one) with no clicking:\n"
-               "    it takes your marked internal standards — remembered between\n"
-               "    restarts in library/ — learns this plate's standard shape from\n"
-               "    them, finds it in the unmarked wells, measures the four sample\n"
-               "    duplexes and returns a call per well.  Its own results table\n"
-               "    (well, call, frac, the four areas and their significances,\n"
-               "    flags and the reason for a no-call) sits below the plot and\n"
-               "    stays separate from the manual pick table.  Double-click a call\n"
-               "    to correct it: corrections and calls are saved to the library,\n"
-               "    and Export library for ML… writes them out as training rows.\n"
-               "    The fitted shape is saved too: Auto genotyping ▸ Use a saved\n"
-               "    standard… hands one to a later plate so it can be genotyped\n"
-               "    without re-marking the wells it took to fit (a plate with its\n"
-               "    own marks still fits those first).\n"
-               "  •  Channel roles  —  which channel carries the internal\n"
-               "    standard and which the sample is a property of the assay\n"
-               "    on the plate, not of the dye order, so it is asked for in\n"
-               "    Channel roles (standard / sample)… rather than assumed.  It\n"
-               "    starts at the T9 kit's Ch3/Ch2.  Getting the pair wrong does\n"
-               "    not fail loudly — it scores the sample's own peaks as the\n"
-               "    standard and returns confident nonsense — so setting both to\n"
-               "    the same channel is refused before a well is scored.\n"
-               "  •  Channel identity follows the run's dye order everywhere:\n"
-               "    the checkboxes, both legends and the exported Ch column use\n"
-               "    the same mapping, so hiding Ch1 hides the same trace in the\n"
-               "    viewer and while picking.\n"
-               "  •  Mark start/end from the 2nd derivative  (off by default)\n"
-               "    places square ticks where each picked peak lifts off its\n"
-               "    baseline: the 2nd derivative of the (smoothed) trace crosses\n"
-               "    the noise floor from flat to concave-up at the true start,\n"
-               "    and concave-up again on the return at the end.  Uncheck it\n"
-               "    for a clean look.\n"
-              "  •  Add +A  (off by default) tags the strongest satellite TRAILING\n"
-              "    the main peak: the Taq A-addition a few scans later.  Nothing is\n"
-              "    tagged in front of the main peak -- for a single-base-extension\n"
-              "    product that leading shoulder is another A-addition on the\n"
-              "    GC-clamp side, not stutter.  Turn the option off when clicking\n"
-              "    allele peaks so the second allele is not swallowed by the +A\n"
-              "    tag.\n"
-"  • Internal standard — the four standard peaks are all ONE\n"
-               "    fragment (the same number of base pairs); cycling-temperature CE\n"
-               "    separates them by sequence into two homoduplexes (peaks 1-2,\n"
-               "    differing by the single SNP base of the rs number) and two\n"
-               "    heteroduplexes (peaks 3-4, made in the PCR when Watson and Crick\n"
-               "    strands pair wrongly, giving one mismatch base pair).  Pick the\n"
-"    four standard main peaks and use  Mark peaks as standard…\n"
-                "    (Genotyping menu): every well you picked in is marked in one\n"
-                "    go — the earlier peaks HOM1/HOM2, the later HET1/HET2 — and\n"
-                "    the marks are saved to library/ to seed Auto-genotyping.\n"
-                "    A single fragment length (bp) may be entered\n"
-                "    (optional, shared by all four).\n"
-                "    Variant ratios come from the RELATIVE areas of these duplex peaks,\n"
-                "    so no bp ladder is involved.\n"
-                "  • Mutant/variant fraction is shown for any pair of main peaks within\n"
-                "    8 scans (classic heterozygote): small/(small+large).\n"
-"  • Undo last pick removes the most recent pick (with its +A\n"
-                  "    tags); Clear picks empties the whole table.  An area that is\n"
-                  "    already picked cannot be picked again: the click is refused and\n"
-                  "    the status bar says so — undo it first if you meant a re-pick\n"
-                  "    (neighbouring peaks, e.g. the two alleles of a heterozygote,\n"
-                  "    stay pickable).\n"
-                  "  • Remove or fix a wrong mark: hold R and click the peak.\n"
-                  "    The peak and its +A tag go, and if it was one of the four\n"
-                  "    standard bands the band is dropped from the standard too\n"
-                  "    (the mark becomes a hand mark).  Then pick the correct peak\n"
-                  "    and press Mark IS in shown wells — that re-reads the\n"
-                  "    standard from the peaks on screen, so an added or removed\n"
-                  "    band is picked up without forgetting the plate's standard.\n"
-                  "    Right-click is NOT remove: it resets the zoom.\n"
-                "  • Save peaks table…  writes the picked peaks as CSV (Excel-ready),\n"
-                "    Excel .xlsx or JSON — file, well, scan, channel, base, kind\n"
-                "    (main/+A), height (V), area (V·scan), duplex label\n"
-                "    (HOM1/HOM2/HET1/HET2), length (bp) and fraction.  Rows are\n"
-                "    grouped by sample (run folder, then well name) and ordered by\n"
-                "    scan inside each sample, never by click order, so one sample's\n"
-                "    peaks are never interleaved with another's.  That table is\n"
-                "    your labelled training library for ML — peak picking works with\n"
-                "    or without an internal standard.\n"
-              "6c. FRAGMENT-LENGTH SIZING  (Manual genotyping ▸ Fragment-length sizing…)\n"
-            "  Sizes the sample's peaks in bp against a ladder run in its own\n"
-            "  channel. This is a DIFFERENT analysis from peak picking and from\n"
-            "  CTCE genotyping: it needs a real multi-fragment size standard, not\n"
-            "  an internal standard, and it never uses picked peaks or MF.\n"
-            "  • Select one or more wells, then Manual genotyping ▸ Fragment-length\n"
-            "    sizing (ladder)…\n"
-            "  • Choose the ladder: a built-in name (genescan500_rox,\n"
-            "    geneflo1000_rox, …), a comma-separated length list, or a path to\n"
-            "    a ladder JSON file. `python scorer.py ladders` lists the bundled\n"
-            "    MegaBACE standards.\n"
-            "  • Channels are PHYSICAL (1-4 in this run's dye order), asked for\n"
-            "    explicitly because the ladder/sample pair is a property of the\n"
-            "    kit — the common layout is ladder on Ch4, sample on Ch2.\n"
-            "  • The fit is reported honestly: it uses leave-one-out accuracy\n"
-            "    (rms/max error in bp), because a residual on the fitted curve is\n"
-            "    always zero and would look perfect.\n"
-            "  • If a channel holds no ladder, or only one fragment is matched,\n"
-            "    sizing WARNS and returns NO lengths rather than guessing. Treat\n"
-            "    a warning as 'not measured', never as a short fragment.\n"
-            "  • IMPORTANT — do not size CTCE runs this way. A CTCE channel's\n"
-            "    internal standard is a handful of same-size conformers, not a\n"
-            "    size ladder, so any bp values it produced would be meaningless.\n"
-            "    The program cannot always detect this for you: such a channel\n"
-            "    can align to the GeneScan 500 table as neatly as a real ladder,\n"
-            "    so check the run's own method and dyes before you trust the\n"
-            "    numbers. Use peak picking + MF (section 6b) for CTCE instead.\n"
-            "  • Results go to a CSV/JSON table or an HTML report.\n\n"
-              "7. EXPORT  (File menu)\n"
-            "  • Export sequence (FASTA)…   called bases per well.\n"
-            "  • Export peak table (CSV)…   well, base, scan position, quality.\n"
-            "  • Export trace text (V + µA)… raw values.\n"
-            "  • Save graph image…          the plot area as PNG/PDF/SVG.\n"
-            "  • Save / Load settings JSON…  remembers your caller setup.\n\n"
-            "7b. COMMENTS & RUN INFO  (Comments menu, between Genotyping and Help)\n"
-            "  • Run comments…  — write a note for the selected run; it is stored\n"
-            "    beside the data file as '<file>.comment.txt' (the .rsd header is\n"
-            "    left untouched) and shown under the sequence once saved.\n"
-            "  • Run info…  — read-only rundown of the selected run: well, source,\n"
-            "    scan count & run time, base order, basecaller preset, sequence\n"
-            "    statistics, per-channel signal maxima and the instrument current.\n"
-            "    For .rsd it also shows the run fields decoded from the instrument\n"
-            "    footer: run/plate ID, sample & well name, machine ID, application,\n"
-            "    the base caller used, method name/comment, laser mode,\n"
-            "    beamsplitter and filter part numbers, and the dye per channel.\n"
-            "    These come from the file itself, so they are the record of what\n"
-            "    was actually run — use them to tell two similar-looking plates\n"
-            "    apart. RSD files without a footer simply show no Run block.\n"
-            "  • Run conditions are a separate block read out of the .rsd binary\n"
-            "    itself: Run Voltage, Run time, Injection time, Injection voltage,\n"
-            "    Temperature and PMT Voltage1/2. No text export is needed for them.\n"
-            "    When the instrument also left a raw-scan export beside the trace\n"
-            "    (Text/<well>.txt) a few extra fields are merged in, such as the\n"
-            "    plate name, instrument ID and the per-run base order — check the\n"
-            "    dye order there if a trace looks channel-swapped. A 'Dye order\n"
-            "    note' is shown when that disagrees with the order in use.\n\n"
-            "8. KEYBOARD SHORTCUTS\n"
-            "  ↑ / ↓ / PgUp / PgDn   page through wells\n"
-"  Space                 start / stop auto-tour\n"
-             "  Delete                remove selected sample(s)\n"
-             "  Ctrl+Z                undo last peak pick (in peak picking)\n"
-            "  Home / right-click    reset the X & Y view\n"
-            "  F1                    this manual\n"
-            "  F11                   zoom the window to full screen / restore\n"
-            "  Esc                   cancel a long job, or leave full screen\n\n"
-            "TIPS\n"
-            "  • Comparing the same well across runs? Sort by well and use\n"
-            "    Jump/well, then select the matching samples.\n"
-            "  • Large collections take a moment to list; plotting is lazy.\n"
-            "  • The empty graph area shows the project picture until you pick\n"
-            "    a sample.\n"
-        )
+        """The user manual: contents on the left, the text on the right, and a
+        search box (Ctrl+F, Enter = next match).  Text lives in user_manual.py."""
+        import re as _re
+        import user_manual as um
+        old = getattr(self, "_help_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.deiconify()
+                old.lift()
+                return
+        except tk.TclError:
+            pass
         win = tk.Toplevel(self)
-        win.title("Limoncello CE Analyzer — User manual")
-        win.geometry("780x660")
-        win.minsize(520, 400)
-        box = scrolledtext.ScrolledText(win, wrap=tk.WORD,
-                                        font=("DejaVu Sans Mono", 10),
-                                        padx=14, pady=10, bg="#FBFBF4")
-        box.pack(fill=tk.BOTH, expand=True)
-        box.insert("1.0", text)
-        box.configure(state=tk.DISABLED)
-        ttk.Button(win, text="Close", command=win.destroy).pack(pady=6)
+        self._help_win = win
+        win.title(um.TITLE)
+        win.geometry("980x700")
+        win.minsize(640, 420)
         win.transient(self)
+
+        top = ttk.Frame(win)
+        top.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Label(top, text="Search").pack(side=tk.LEFT)
+        query = tk.StringVar()
+        entry = ttk.Entry(top, textvariable=query, width=30)
+        entry.pack(side=tk.LEFT, padx=(4, 4))
+        found = ttk.Label(top, text="", foreground="#666")
+        found.pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="Close", command=win.destroy).pack(side=tk.RIGHT)
+
+        body = ttk.Panedwindow(win, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        toc = tk.Listbox(body, width=30, activestyle="none", exportselection=False,
+                         font=("DejaVu Sans", 10), bg="#F4F6F9",
+                         highlightthickness=0, borderwidth=0)
+        body.add(toc, weight=0)
+        box = scrolledtext.ScrolledText(body, wrap=tk.WORD, padx=16, pady=10,
+                                        font=("DejaVu Sans", 10), bg="#FBFBF4",
+                                        spacing1=1, spacing3=2)
+        body.add(box, weight=1)
+        box.tag_configure("h1", font=("DejaVu Sans", 15, "bold"), foreground="#1E4E8C",
+                          spacing1=14, spacing3=6)
+        box.tag_configure("title", font=("DejaVu Sans", 17, "bold"), spacing3=8)
+        box.tag_configure("b", font=("DejaVu Sans", 10, "bold"))
+        box.tag_configure("pre", font=("DejaVu Sans Mono", 9), wrap=tk.NONE,
+                          background="#F1F1E6", lmargin1=12, lmargin2=12)
+        box.tag_configure("bullet", lmargin1=8, lmargin2=24)
+        box.tag_configure("hit", background="#FFE36E")
+        box.tag_configure("cur", background="#FFB347")
+
+        def add_inline(line, tags=()):
+            parts = _re.split(r"(\*\*[^*]+\*\*)", line)
+            for part in parts:
+                if part.startswith("**") and part.endswith("**") and len(part) > 4:
+                    box.insert(tk.END, part[2:-2], tags + ("b",))
+                elif part:
+                    box.insert(tk.END, part, tags)
+
+        box.insert(tk.END, um.TITLE + "\n", ("title",))
+        starts = []
+        for i, (title, text) in enumerate(um.SECTIONS):
+            toc.insert(tk.END, f"  {title}")
+            starts.append(box.index("end-1c"))
+            box.insert(tk.END, title + "\n", ("h1",))
+            pre = False
+            for line in text.split("\n"):
+                if line.strip() == "```":
+                    pre = not pre
+                    continue
+                if pre:
+                    box.insert(tk.END, line + "\n", ("pre",))
+                elif line.startswith("• "):
+                    add_inline(line, ("bullet",))
+                    box.insert(tk.END, "\n", ("bullet",))
+                else:
+                    add_inline(line)
+                    box.insert(tk.END, "\n")
+        box.insert(tk.END, "\n" * 40)        # so the last sections can scroll to the top
+        box.configure(state=tk.DISABLED)
+
+        def go(_e=None):
+            sel = toc.curselection()
+            if sel:
+                box.yview(starts[sel[0]])
+        toc.bind("<<ListboxSelect>>", go)
+
+        state = {"hits": [], "i": -1, "q": ""}
+
+        def search(_e=None):
+            q = query.get().strip()
+            if q != state["q"]:
+                box.tag_remove("hit", "1.0", tk.END)
+                state.update(hits=[], i=-1, q=q)
+                if q:
+                    idx = "1.0"
+                    while True:
+                        idx = box.search(q, idx, nocase=True, stopindex=tk.END)
+                        if not idx:
+                            break
+                        end = f"{idx}+{len(q)}c"
+                        box.tag_add("hit", idx, end)
+                        state["hits"].append((idx, end))
+                        idx = end
+            box.tag_remove("cur", "1.0", tk.END)
+            hits = state["hits"]
+            if not q:
+                found.config(text="")
+                return "break"
+            if not hits:
+                found.config(text="not found")
+                return "break"
+            state["i"] = (state["i"] + 1) % len(hits)
+            a_, b_ = hits[state["i"]]
+            box.tag_add("cur", a_, b_)
+            box.see(a_)
+            found.config(text=f"{state['i'] + 1} of {len(hits)}")
+            return "break"
+        entry.bind("<Return>", search)
+        entry.bind("<KP_Enter>", search)
+        entry.bind("<KeyRelease>", lambda e: None if e.keysym in ("Return", "KP_Enter")
+                   else (state.update(q=None), search()))
+        for w in (win, box, toc):
+            w.bind("<Control-f>", lambda e: (entry.focus_set(), "break")[1])
+            w.bind("<Control-F>", lambda e: (entry.focus_set(), "break")[1])
+        win.bind("<Escape>", lambda e: win.destroy())
+        toc.selection_set(0)
+        box.focus_set()
+        self._help_parts = SimpleNamespace(box=box, toc=toc, entry=entry, query=query,
+                                           found=found, search=search, go=go,
+                                           starts=starts)
 
     def show_about(self):
         messagebox.showinfo(
