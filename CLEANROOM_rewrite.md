@@ -83,5 +83,31 @@ internal trace and Cimarron's span:
 - Empty capillaries return no calls — phase 1 (`CLEANROOM.md`).
 - `call_rsd(path)` reads the .rsd, its machine id and channel order.
 
+### Tried and not adopted (m13 even, end to end)
+- Larger W constant everywhere (1390/1600/1900) or only in the last segment, W from Cimarron's true spacing (oracle), segment-0/1 widths pinned to 142/112, re-estimating the spacing for more passes, Gaussian pre-smoothing before deconvolution: all move along one trade-off line (agreement - extra ~ 0.92): sharper = fewer merged bands but more artefact peaks/inserts. Mechanism seen: a calling window spanning a sharp and a blurred signal segment fits one expected width, so the blurred bands look "wide" and get split.
+- Calling parameters on our trace (omission tiny thresholds, sub-gap offset 0.5/0.7): flat (+-0.001).
+- Oracle per-block per-channel delays from Cimarron's trace: agreement +0.005 (relative part) and pos<=1 0.53 -> 0.95 (common part); oracle per-block channel gains: +0.002. So the remaining agreement gap is trace shape late in the read, and the position gap is the per-well common delay.
+
 ## Results
-(see the final section, filled in at the end of the work)
+
+| | m13 even (development) | m13 odd (held out, evaluated once) | mb4000 (look only) |
+|---|---|---|---|
+| End to end (raw .rsd -> clone), agreement / extra / pos<=1 | 0.9530 / 0.0312 / 0.533 | 0.9466 / 0.0337 / 0.549 | 0.7440 / 0.9173 / 0.292 |
+| Calling on Cimarron's own trace (§3.3 inversion), agreement / extra / pos<=1 / quality exact | 0.9824 / 0.0150 / 0.982 / 0.782 | 0.9825 / 0.0185 / 0.979 / 0.768 | — |
+| Signal: corr with the stored trace, Cimarron's span, T G C A, not aligned | 0.801 0.816 0.796 0.782 | 0.814 0.824 0.800 0.779 | — |
+| same, best whole-trace lag within +-5 | 0.923 0.940 0.919 0.904 | 0.931 0.946 0.924 0.909 | — |
+
+(With SPEC_signal's exact configuration the signal correlations reproduced the spec's 0.806 0.822 0.806 0.790 / 0.924 0.939 0.924 0.904; the two deviations above trade ~0.005 correlation for +0.014 calling agreement.)
+
+Remaining errors, m13 even, by read fraction (missing / extra / mismatch):
+first 10 %: 238 / 211 / 104; 10-70 %: 22 / 203 / 12; last 30 %: 1708 / 893 / 960
+(N where Cimarron calls a base 212, the reverse 138). The last 30 % — spacing
+falls to ~6 scans and our trace stays less resolved than Cimarron's — holds
+~75 % of all errors, spread evenly over the last ~800 scans (not an end-blob
+edge effect). Odd: the start is worse (missing 482 in the first 10 %), as the
+start rule is (median start error 104 vs 38 scans on even, as in SPEC_signal §2).
+
+mb4000 is another instrument (GRYPHON2): the run-estimated separation and
+PLAYER1 delays/gains are used; Cimarron decimates many of its broad-peak
+wells (phase 1), which this clone does not emulate, so it calls 2-4 bases per
+Cimarron base there (extra 0.92).
