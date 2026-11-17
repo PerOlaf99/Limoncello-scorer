@@ -321,9 +321,8 @@ def homomorphic_deconvolve(seg: np.ndarray, W: float) -> np.ndarray:
 # -5..+6 % in every segment (measured against Cimarron's call spacing).
 FBW_FIRST = 170.0
 FBW_CONSTANT = 1210.8
-BAND_THRESH = 0.18
-FBW_PASSES = 1        # spacing re-estimations before the final pass
-FBW_SEG_W = None      # optional f(segment index, n segments, W, spacing) -> W (development hook)
+BAND_THRESH = 0.18    # band picks: envelope / local level above this (§5.4.3)
+FBW_PASSES = 1        # spacing estimations before the final pass (more passes converge slowly; not needed at 170)
 
 
 def band_spacing(first_pass: np.ndarray, n_real: int, margin: int = 100) -> float:
@@ -350,7 +349,7 @@ def deconvolve(sep: np.ndarray) -> tuple[np.ndarray, list[float]]:
     owners = segment_ownership(starts, L, N)
     out = np.zeros_like(sep)
     widths = []
-    for kseg, (s, (a, b)) in enumerate(zip(starts, owners)):
+    for s, (a, b) in zip(starts, owners):
         seg = sep[s:s + N]
         n_real = len(seg)
         if n_real < N:
@@ -359,8 +358,6 @@ def deconvolve(sep: np.ndarray) -> tuple[np.ndarray, list[float]]:
         for _ in range(FBW_PASSES):
             sp = band_spacing(homomorphic_deconvolve(seg, W), n_real)
             W = float(np.clip(FBW_CONSTANT / max(sp, 3.0), 40.0, 400.0))
-        if FBW_SEG_W is not None:
-            W = float(FBW_SEG_W(kseg, len(starts), W, sp))
         widths.append(W)
         res = homomorphic_deconvolve(seg, W)
         out[a:b] = res[a - s:b - s]
