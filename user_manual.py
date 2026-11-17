@@ -28,7 +28,7 @@ The window:
 ```
  ┌ menus: File  View  Base calling  Manual genotyping  Auto genotyping  Comments  Help
  ├ channel bar: Ch1..Ch4 · µA · Time (min) · Trace colors
- ├ view bar: Graphs · wells shown · Zoom · Scans · Y scale · Fit Y · Overlay · Plate · Reset
+ ├ view bar: Graphs · wells shown · Zoom · Scans · Y scale · Fit Y · Overlay · Align · Plate · Reset
  ├ (while picking) a coloured banner: what the mouse does now · Exit
  │ Data folders │
  │ Samples list │     graphs (one per well, stacked)
@@ -120,7 +120,24 @@ The view bar
 The scroll bars still work: the bottom bar pans across, the right bar up and down; the wheel over a bar zooms that direction; double-click a bar to reset it. All graphs always move together.
 X numbers appear under the bottom graph only; tick **Time (min)** to read minutes:seconds instead of scans (1.75 scans per second).
 
-The table under the graphs (genotypes, picked peaks or the called sequence) sits on a divider you can drag. It disappears when the wells on screen have nothing for it; View ▸ Always show table under graphs keeps it."""),
+The table under the graphs (genotypes, picked peaks or the called sequence) sits on a divider you can drag. It disappears when the wells on screen have nothing for it; View ▸ Always show table under graphs keeps it.
+
+Aligning graphs
+Slide one graph left or right so a feature lines up with the same feature in the others — e.g. two runs of a plate, or wells that ran slightly faster. The data never moves: each graph keeps its true scan numbers (picks, tables and marks are unaffected); only which scans it shows is shifted.
+• **Shift + drag** on a graph slides that graph, live.
+• **Alt + ← / →** moves the graph under the mouse one scan; **Alt + Shift + ← / →** ten. **Alt + Home** resets it.
+• **⇄ Align** (view bar) or View ▸ Alignment:
+```
+  Align shown graphs to the top one (scans in view)
+        lines up what is in view by cross-correlation — zoom onto the
+        feature you want aligned first (e.g. the standard's bands);
+        with Overlay runs it also aligns each run onto its graph's first
+  Align on internal standard
+        maps each well's marked IS bands onto the top marked well's:
+        offset, plus stretch when 3 or more bands agree
+  Reset this graph (Alt+Home) / Reset all alignments
+```
+• A shifted graph says so in its label, e.g. “⇄ +23 scans” (and “×1.004” when stretched). The tick numbers and the Scans boxes are the bottom graph's own scans. Alignments last for the session."""),
 
     ("View menu", """\
 Plot styles
@@ -249,6 +266,8 @@ Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peak
   Space                    start / stop the auto-tour (in the Samples list)
   Delete                   hide the selected files from the list
   Home                     reset the view
+  Alt+← / Alt+→            slide the graph under the mouse one scan
+                           (Alt+Shift: ten); Alt+Home resets it
   Ctrl+Z                   undo the last pick or measurement
   R + click                remove that picked peak
   Enter (Scans boxes)      zoom to the typed scan range
@@ -257,6 +276,7 @@ Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peak
 
   wheel / Ctrl+wheel / Shift+wheel     zoom across / zoom height / pan
   drag (Ctrl+drag while picking)       zoom to a range
+  Shift + drag                         slide that graph (alignment)
   middle-drag                          pan
   double-click / right-click           reset the view
 ```

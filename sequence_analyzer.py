@@ -222,6 +222,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.bind("<F11>", lambda e: self._toggle_zoom())
         self.bind("<F1>", lambda e: self.show_help())
         self.bind("<Home>", lambda e: self._reset_zoom())
+        # align the graph under the mouse: Alt+←/→ one scan, Alt+Shift ten
+        self.bind("<Alt-Left>", lambda e: self._nudge(-1))
+        self.bind("<Alt-Right>", lambda e: self._nudge(1))
+        self.bind("<Alt-Shift-Left>", lambda e: self._nudge(-10))
+        self.bind("<Alt-Shift-Right>", lambda e: self._nudge(10))
+        self.bind("<Alt-Home>", lambda e: self._reset_alignment("hover"))
         self.bind("<Control-z>", lambda e: self._gen_undo())
         self.bind("<Control-Z>", lambda e: self._gen_undo())
         # Hold R and click a picked peak to remove it (its +A tag too).  Kept
@@ -347,6 +353,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._full_ylim = None
         self._wrap_active = False      # wrap rows: each row its own X slice
         self._plot_drag = None         # box-zoom / pan gesture in progress
+        # Per-graph alignment: file -> (a, b) with  reference = a * scan + b.
+        # Display only: every graph keeps its true scans (picks, tables and
+        # marks never move); alignment changes WHICH scans a graph shows.
+        self._align: dict = {}
+        self._axes_keys: List = []     # file key per graph (None: not alignable)
+        self._axes_titles: List = []   # (text artist, base label) per graph
+        self._data_full = None         # union of the graphs' true scan ranges
+        self._hover_idx = None         # graph under the mouse (for nudging)
 
         # List sorting / filtering / tour
         self.sort_mode = tk.StringVar(value="well_row")
@@ -471,6 +485,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                variable=self.overlay_runs,
                                command=lambda: self._view_option_changed(redraw=True))
         view_m.add_command(label="Plate map…", command=self.show_plate_map)
+        view_m.add_cascade(label="Alignment", menu=self._alignment_menu(view_m))
         view_m.add_checkbutton(label="Always show table under graphs",
                                variable=self.always_table,
                                command=lambda: (self._save_view_prefs(),
@@ -932,6 +947,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                    command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
         ttk.Button(bar, text="▦ Plate",
                    command=self.show_plate_map).pack(side=tk.RIGHT, padx=4)
+        amb = ttk.Menubutton(bar, text="⇄ Align")
+        amb["menu"] = self._alignment_menu(amb)
+        amb.pack(side=tk.RIGHT, padx=4)
         ToolTip(spin, lambda: f"Graphs stacked at once (1–{MAX_GRAPHS})")
         ToolTip(ycb, lambda: "Shared: one height scale for all graphs (compare wells).\n"
                              "Each graph: every graph scaled to its own peaks.")
@@ -948,6 +966,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
         cb = getattr(self, "_y_scale_cb", None)
         if cb is not None:
             cb.set("Each graph" if self.y_scale.get() == "each" else "Shared")
+
+    def _alignment_menu(self, parent):
+        m = tk.Menu(parent, tearoff=0)
+        m.add_command(label="Align shown graphs to the top one (scans in view)",
+                      command=self.align_to_top)
+        m.add_command(label="Align on internal standard", command=self.align_on_standard)
+        m.add_separator()
+        m.add_command(label="Reset this graph (Alt+Home)",
+                      command=lambda: self._reset_alignment("hover"))
+        m.add_command(label="Reset all alignments", command=lambda: self._reset_alignment("all"))
+        return m
 
     def _build_mode_banner(self, parent):
         """A coloured strip saying the mouse now records peaks, with the
@@ -1653,6 +1682,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return idxs
 
     def _page_key(self, event):
+        if int(getattr(event, "state", 0) or 0) & 0x0008:     # Alt: alignment nudge
+            return None
         keys = event.keysym
         if keys in ("Down", "Right", "Page_Down"):
             self._page_by(1)
@@ -1661,6 +1692,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return "break"
 
     def _page_key_root(self, event):
+        if int(getattr(event, "state", 0) or 0) & 0x0008:     # Alt: alignment nudge
+            return None
         keys = event.keysym
         if keys not in ("Down", "Up", "Left", "Right", "Page_Down", "Page_Up"):
             return None
@@ -2315,8 +2348,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         if getattr(event, "button", 1) != 1:
             return
-        if _event_mods(event)[0]:
-            return                      # Ctrl+drag is box-zoom, not a pick
+        ctrl, shift = _event_mods(event)
+        if ctrl or shift:
+            return              # Ctrl+drag zooms, Shift+drag slides the graph
         hit = self._gen_axes_hit(event)
         if hit is None:
             return
@@ -2591,6 +2625,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         user picks peaks on the main window"""
         self.fig.clear()
         self._plot_axes = []
+        self._axes_keys = []
+        self._axes_titles = []
         self._gen_cursors = []
         self._area_cursors = []
         self._full_xlim = None
@@ -2634,6 +2670,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 gx0 = 0 if gx0 is None else 0
                 gx1 = n if gx1 is None else max(gx1, n)
             self._plot_axes.append(ax)
+            self._axes_keys.append(self._akey(path))
             if not plotted:
                 ax.text(0.5, 0.5, "(all channels hidden)", ha="center",
                         va="center", transform=ax.transAxes, color="#888")
@@ -2652,10 +2689,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             else:
                 pk.plot_overlay(ax)
             ax.tick_params(labelsize=7)
-            ax.text(0.004, 0.995,
-                    self._graph_title(path, doc.path.parent.name),
-                    transform=ax.transAxes, ha="left", va="top",
-                    fontsize=8, color="#222", zorder=6)
+            base_title = self._graph_title(path, doc.path.parent.name)
+            self._axes_titles.append((ax.text(
+                0.004, 0.995, base_title, transform=ax.transAxes, ha="left",
+                va="top", fontsize=8, color="#222", zorder=6), base_title))
             if not self.area_mode:
                 self._gen_cursors.append(self._make_gen_cursor(ax))
             self._style_x_axis(ax, i == len(paths) - 1)
@@ -2663,6 +2700,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pad = 0.02 * (gy1 - gy0) or 1.0
             self._full_xlim = (float(gx0), float(gx1))
             self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
+        self._data_full = self._full_xlim
+        self._update_ref_full()
+        self._refresh_align_titles()
         self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
         self._add_volt_label()
         self._apply_zoom()
@@ -5249,11 +5289,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         full = self._full_ylim
         if self._wrap_active:
             return [full] * len(self._plot_axes)
-        if self.fit_y.get():
-            x0, x1 = xlo, xhi
-        else:
-            x0, x1 = self._full_xlim
-        ranges = [self._trace_yrange(ax, x0, x1) for ax in self._plot_axes]
+        if not self.fit_y.get():
+            xlo, xhi = self._full_xlim
+        # each graph over its OWN scans for that reference window (alignment)
+        ranges = [self._trace_yrange(ax, self._from_ref(i, xlo), self._from_ref(i, xhi))
+                  for i, ax in enumerate(self._plot_axes)]
         out = []
         if self.y_scale.get() == "each":
             for r in ranges:
@@ -5289,7 +5329,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except (tk.TclError, ValueError):
             self.status_var.set("Scan range: type two scan numbers, e.g. 1800 and 2700")
             return "break"
-        self._zoom_to_scans(a, b)
+        k = len(self._plot_axes) - 1               # typed in the bottom graph's scans
+        self._zoom_to_scans(self._to_ref(k, a), self._to_ref(k, b))
         self.canvas.get_tk_widget().focus_set()
         return "break"
 
@@ -5355,8 +5396,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self._wheel_zoom("y", 1 if up else -1,
                              anchor=vlo + frac_in_view * (vhi - vlo))
         else:
+            hr = self._to_ref(self._ax_index(hax), hx)
             self._wheel_zoom("x", 1 if up else -1,
-                             anchor=(hx - x0) / max(1e-9, x1 - x0))
+                             anchor=(hr - x0) / max(1e-9, x1 - x0))
 
     def _box_zoom_allowed(self, event):
         """Plain drag zooms in the viewer; while picking or measuring, the
@@ -5371,9 +5413,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if hit is None:
             return
         hax, hx, hy = hit
+        ctrl, shift = _event_mods(event)
+        idx = self._ax_index(hax)
         if event.button == 2:                           # middle drag: pan
             self._plot_drag = {"kind": "pan", "ax": hax,
                                "px": event.x, "view": list(self._view_x)}
+        elif event.button == 1 and shift and not ctrl:  # slide this graph
+            key = self._axes_keys[idx] if idx is not None and idx < len(self._axes_keys) else None
+            if key is None:
+                self.status_var.set("This view cannot be aligned (wrap rows).")
+                return
+            self._plot_drag = {"kind": "align", "ax": hax, "key": key, "px": event.x,
+                               "ab": self._align.get(key, (1.0, 0.0)),
+                               "window": self._ref_window()}
         elif event.button == 1 and self._box_zoom_allowed(event):
             if getattr(event, "dblclick", False):
                 self._reset_zoom()
@@ -5391,6 +5443,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _on_plot_motion(self, event):
         d = self._plot_drag
         if d is None:
+            hit = self._plot_hit(event) if self._plot_axes else None
+            self._hover_idx = self._ax_index(hit[0]) if hit else None
+            return
+        if d["kind"] == "align":
+            lo, hi = d["window"]
+            bbox = d["ax"].get_window_extent()
+            shift_ref = (event.x - d["px"]) / max(1.0, bbox.width) * (hi - lo)
+            a, b = d["ab"]
+            self._set_alignment(d["key"], (a, b + shift_ref), keep=d["window"])
             return
         if d["kind"] == "pan":
             x0, x1 = self._full_xlim
@@ -5423,6 +5484,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
     def _on_plot_release(self, event):
         d, self._plot_drag = self._plot_drag, None
+        if d is not None and d["kind"] == "align":
+            a, b = self._align.get(d["key"], (1.0, 0.0))
+            self.status_var.set(f"{Path(d['key']).parent.name}/{Path(d['key']).stem}: "
+                                f"shifted {b:+.0f} scans  (Alt+Home resets this graph)")
+            return
         if d is None or d["kind"] != "box":
             return
         r = d["rect"]
@@ -5438,7 +5504,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         ylo, yhi = d["ax"].get_ylim()
         box_y = h > 0 and (ya > ylo + 1e-9 or ya + h < yhi - 1e-9)
         x0, x1 = self._full_xlim
-        a, b = max(x0, xa), min(x1, xa + w)
+        k_ax = self._ax_index(d["ax"])
+        ra, rb = sorted((self._to_ref(k_ax, xa), self._to_ref(k_ax, xa + w)))
+        a, b = max(x0, ra), min(x1, rb)
         if b - a < 2:
             self.canvas.draw_idle()
             return
@@ -5457,6 +5525,223 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if self._view_y[1] - self._view_y[0] < 1e-6:
                 self._view_y[:] = [0.0, 1.0]
         self._apply_zoom()
+
+    # ---------------------------------------------------------- alignment
+    @staticmethod
+    def _akey(path):
+        return str(Path(path).resolve())
+
+    def _ax_index(self, ax):
+        try:
+            return self._plot_axes.index(ax)
+        except ValueError:
+            return None
+
+    def _ab(self, i):
+        keys = getattr(self, "_axes_keys", None) or []
+        key = keys[i] if i is not None and 0 <= i < len(keys) else None
+        return self._align.get(key, (1.0, 0.0)) if key else (1.0, 0.0)
+
+    def _to_ref(self, i, s):
+        a, b = self._ab(i)
+        return a * s + b
+
+    def _from_ref(self, i, r):
+        a, b = self._ab(i)
+        return (r - b) / a
+
+    def _ref_window(self):
+        x0, x1 = self._full_xlim
+        f0, f1 = self._view_x
+        return x0 + (x1 - x0) * f0, x0 + (x1 - x0) * f1
+
+    def _update_ref_full(self, keep=None):
+        """The shared X range is the union of every graph's aligned range;
+        with *keep* (a reference window) the visible scans stay put."""
+        if self._data_full is None:
+            return
+        g0, g1 = self._data_full
+        ends = [self._to_ref(i, s) for i in range(len(self._plot_axes)) for s in (g0, g1)]
+        self._full_xlim = (min(ends), max(ends)) if ends else (g0, g1)
+        if keep is not None:
+            x0, x1 = self._full_xlim
+            lo, hi = keep
+            span = max(1e-9, x1 - x0)
+            f0 = min(max(0.0, (lo - x0) / span), 1.0)
+            f1 = min(max(f0 + 1e-6, (hi - x0) / span), 1.0)
+            self._view_x[:] = [f0, f1]
+
+    def _set_alignment(self, key, ab, keep=None, redraw=False):
+        a, b = ab
+        if abs(a - 1.0) < 1e-9 and abs(b) < 1e-9:
+            self._align.pop(key, None)
+        else:
+            self._align[key] = (float(a), float(b))
+        if redraw:
+            self.redraw()
+            return
+        self._update_ref_full(keep=keep if keep is not None else self._ref_window())
+        self._refresh_align_titles()
+        self._apply_zoom()
+
+    def _refresh_align_titles(self):
+        for i, (artist, base) in enumerate(getattr(self, "_axes_titles", []) or []):
+            a, b = self._ab(i)
+            suffix = ""
+            if abs(a - 1.0) > 1e-6 or abs(b) > 0.05:
+                suffix = f"   ⇄ {b:+.0f} scans"
+                if abs(a - 1.0) > 1e-6:
+                    suffix += f" ×{a:.4f}"
+            try:
+                artist.set_text(base + suffix)
+            except Exception:                              # noqa: BLE001
+                pass
+
+    def _nudge(self, scans):
+        """Alt+←/→ (Alt+Shift: ×10): move the graph under the mouse."""
+        i = self._hover_idx
+        keys = self._axes_keys
+        if i is None or i >= len(keys) or keys[i] is None or self._full_xlim is None:
+            self.status_var.set("Point at a graph, then Alt+← / Alt+→ to move it.")
+            return "break"
+        a, b = self._align.get(keys[i], (1.0, 0.0))
+        self._set_alignment(keys[i], (a, b + scans))
+        return "break"
+
+    def _reset_alignment(self, which="hover"):
+        if which == "all":
+            keys = {k for k in self._axes_keys if k}
+            for k in list(self._align):
+                if k in keys:
+                    self._align.pop(k)
+            self.redraw()
+            self.status_var.set("Alignment reset for the graphs on screen.")
+            return "break"
+        i = self._hover_idx
+        if i is not None and i < len(self._axes_keys) and self._axes_keys[i]:
+            self._set_alignment(self._axes_keys[i], (1.0, 0.0), redraw=True)
+        return "break"
+
+    def _envelope(self, i, grid, own_runs_only=True, run=None):
+        """Summed trace signal of graph *i* sampled at reference positions."""
+        ax = self._plot_axes[i]
+        a, b = self._ab(i)
+        own = (grid - b) / a                      # this graph's own scans
+        total = np.zeros_like(grid, dtype=float)
+        for line in ax.get_lines():
+            lab = str(line.get_label())
+            if not lab.startswith("Ch"):
+                continue
+            if run is None and own_runs_only and "(" in lab:
+                continue                         # an overlaid run, not this graph's own
+            if run is not None and f"({run})" not in lab:
+                continue
+            xd = np.asarray(line.get_xdata(), float)
+            yd = np.asarray(line.get_ydata(), float)
+            if xd.size < 2:
+                continue
+            total += np.interp(own, xd, yd, left=np.nan, right=np.nan)
+        return total
+
+    @staticmethod
+    def _best_lag(e0, e1, max_lag):
+        """Samples to move *e1* right so its features sit on *e0*'s."""
+        ok = np.isfinite(e0) & np.isfinite(e1)
+        if ok.sum() < 10:
+            return None
+        a = np.where(ok, e0, 0.0)
+        b = np.where(ok, e1, 0.0)
+        a = (a - a[ok].mean()) / (a[ok].std() or 1.0)
+        b = (b - b[ok].mean()) / (b[ok].std() or 1.0)
+        a[~ok] = 0.0
+        b[~ok] = 0.0
+        n = a.size
+        c = np.correlate(a, b, mode="full")
+        lags = np.arange(-(n - 1), n)
+        keep = np.abs(lags) <= max_lag
+        return int(lags[keep][np.argmax(c[keep])])
+
+    def align_to_top(self):
+        """Slide every graph so the features in view line up with the top
+        graph (cross-correlation of the summed traces over the scans on
+        screen); with Overlay runs, each overlaid run onto its graph's first."""
+        if len(self._plot_axes) < 1 or self._full_xlim is None:
+            return
+        lo, hi = self._ref_window()
+        n = int(min(6000, max(50, hi - lo)))
+        grid = np.linspace(lo, hi, n)
+        step = (hi - lo) / max(1, n - 1)
+        max_lag = int(0.3 * n)
+        moved = []
+        e0 = self._envelope(0, grid)
+        for i in range(1, len(self._plot_axes)):
+            key = self._axes_keys[i]
+            if key is None:
+                continue
+            lag = self._best_lag(e0, self._envelope(i, grid), max_lag)
+            if lag:
+                a, b = self._align.get(key, (1.0, 0.0))
+                self._align[key] = (a, b + lag * step)
+                moved.append(f"{Path(key).stem} {lag * step:+.0f}")
+        if self.overlay_runs.get() and not getattr(self, "genotyping_active", False):
+            for i, group in enumerate(self._view_groups(self._graph_count())):
+                if i >= len(self._plot_axes):
+                    break
+                own = self._envelope(i, grid)
+                for other in group[1:]:
+                    lag = self._best_lag(own, self._envelope(i, grid, run=other.parent.name), max_lag)
+                    if lag:
+                        k = self._akey(other)
+                        a, b = self._align.get(k, (1.0, 0.0))
+                        self._align[k] = (a, b + lag * step * self._ab(i)[0])
+                        moved.append(f"{other.parent.name[-5:]}/{other.stem} {lag * step:+.0f}")
+        self.redraw()
+        self.status_var.set("Aligned on the scans in view: " + (", ".join(moved) or "already aligned"))
+
+    def _is_scans(self, key):
+        pk = self._gen_pickers.get(key) if hasattr(self, "_gen_pickers") else None
+        if pk is not None and getattr(pk, "std", None):
+            return sorted(float(s) for s, _n in pk.std)
+        path = Path(key)
+        try:
+            entry = (self._library_wells(path.parent.name) or {}).get(path.stem) or {}
+        except Exception:                                  # noqa: BLE001
+            entry = {}
+        pairs = entry.get("std") or []
+        return sorted(float(p[0]) for p in pairs if p)
+
+    def align_on_standard(self):
+        """Line the graphs up on their marked internal standard: the bands of
+        each well are mapped onto the top marked well's (offset, plus stretch
+        when three or more bands agree on it)."""
+        keys = [k for k in self._axes_keys if k]
+        marks = {k: self._is_scans(k) for k in keys}
+        ref = next((k for k in keys if len(marks[k]) >= 2), None)
+        if ref is None:
+            messagebox.showinfo("Align on internal standard",
+                                "None of the graphs on screen has a marked internal standard.")
+            return
+        r = np.asarray(marks[ref])
+        a0, b0 = self._align.get(ref, (1.0, 0.0))
+        done, skipped = [], []
+        for k in keys:
+            if k == ref:
+                continue
+            s = np.asarray(marks[k])
+            n = min(len(s), len(r))
+            if n < 2 or len(s) != len(r):
+                skipped.append(Path(k).stem)
+                continue
+            m, c = np.polyfit(s, r, 1) if n >= 3 else (1.0, float(np.median(r - s)))
+            if not (0.9 < m < 1.1):
+                m, c = 1.0, float(np.median(r - s))
+            self._align[k] = (a0 * m, a0 * c + b0)
+            done.append(Path(k).stem)
+        self.redraw()
+        msg = f"Aligned on the internal standard of {Path(ref).stem}: {', '.join(done) or 'nothing to move'}"
+        if skipped:
+            msg += f" · skipped (no matching IS marks): {', '.join(skipped)}"
+        self.status_var.set(msg)
 
     def _bar_cmd(self, axis, args):
         """ttk scrollbar -> pan that axis (grab the thumb and slide)."""
@@ -5498,9 +5783,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         w = (x1 - x0) * max(1e-9, fx1 - fx0)
         xlo = x0 + (x1 - x0) * fx0
         refs = self._y_references(xlo, xlo + w)
-        for ax, (y0, y1) in zip(self._plot_axes, refs):
+        for i, (ax, (y0, y1)) in enumerate(zip(self._plot_axes, refs)):
             h = (y1 - y0) * max(1e-9, fy1 - fy0)
-            ax.set_xlim(xlo, xlo + w)
+            ax.set_xlim(self._from_ref(i, xlo), self._from_ref(i, xlo + w))
             ax.set_ylim(y0 + (y1 - y0) * fy0, y0 + (y1 - y0) * fy0 + h)
         if hasattr(self, "xbar"):
             self.xbar.set(fx0, fx1)
@@ -5519,8 +5804,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if focus in (getattr(self, "_scan_from_entry", None),
                      getattr(self, "_scan_to_entry", None)):
             return
-        self.scan_from.set(str(int(round(a))))
-        self.scan_to.set(str(int(round(b))))
+        k = len(self._plot_axes) - 1
+        self.scan_from.set(str(int(round(self._from_ref(k, a)))))
+        self.scan_to.set(str(int(round(self._from_ref(k, b)))))
 
     def _fmt_time(self, scan, _pos=None):
         """Scan number -> minutes:seconds label (whole seconds)."""
@@ -5567,6 +5853,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         self.fig.clear()
         self._plot_axes = []
+        self._axes_keys = []
+        self._axes_titles = []
+        self._data_full = None
         self._full_xlim = None
         self._full_ylim = None
         colors = self._theme_colors()
@@ -5602,6 +5891,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._update_page_label(paths)
         if wrap:
             self._draw_wrap(paths, settings, colors)
+            # wrap rows are slices of one well: nothing to align
+            self._axes_keys = [None] * len(self._plot_axes)
+            self._data_full = self._full_xlim
             self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.3, w_pad=0.2, pad=0.4)
             self._add_volt_label()
             self._apply_zoom()
@@ -5620,7 +5912,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 ax.text(0.5, 0.5, f"Load error: {e}", ha="center", transform=ax.transAxes)
                 continue
             for k, other in enumerate(group[1:], start=1):
-                gy = self._overlay_run(ax, other, settings, RUN_STYLES[k % len(RUN_STYLES)])
+                gy = self._overlay_run(ax, other, settings, RUN_STYLES[k % len(RUN_STYLES)],
+                                       primary=self._akey(path))
                 if gy is not None:
                     gy0 = gy[0] if gy0 is None else min(gy0, gy[0])
                     gy1 = gy[1] if gy1 is None else max(gy1, gy[1])
@@ -5647,6 +5940,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 gx0 = s0 if gx0 is None else min(gx0, s0)
                 gx1 = s1 if gx1 is None else max(gx1, s1)
             self._plot_axes.append(ax)
+            self._axes_keys.append(self._akey(path))
             if not plotted:
                 ax.text(0.5, 0.5, "(all channels hidden)",
                         ha="center", va="center", transform=ax.transAxes, color="#888")
@@ -5667,9 +5961,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 label = self._graph_title(path, names)
             else:
                 label = self._graph_title(path, doc.path.parent.name)
-            ax.text(0.004, 0.995, label,
-                    transform=ax.transAxes, ha="left", va="top",
-                    fontsize=8, color="#222", zorder=6)
+            self._axes_titles.append((ax.text(
+                0.004, 0.995, label, transform=ax.transAxes, ha="left", va="top",
+                fontsize=8, color="#222", zorder=6), label))
             self._style_x_axis(ax, i == n_ax - 1)
 
             if settings.view_mode == "esd":
@@ -5698,6 +5992,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             pad = 0.02 * (gy1 - gy0) or 1.0
             self._full_xlim = (float(gx0), float(gx1))
             self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
+        self._data_full = self._full_xlim
+        self._update_ref_full()
+        self._refresh_align_titles()
         self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
         self._add_volt_label()
         self._apply_zoom()
@@ -5741,9 +6038,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 groups.append([p])
         return groups
 
-    def _overlay_run(self, ax, path, settings, style):
+    def _overlay_run(self, ax, path, settings, style, primary=None):
         """Another run of the same well on *ax*: channel traces only, in the
-        run's own line style.  Returns (ymin, ymax, scans) or None."""
+        run's own line style, placed through its own alignment into the
+        primary run's scan coordinates.  Returns (ymin, ymax, scans) or None."""
         try:
             doc = self._ensure_doc(path)
         except Exception:                                  # noqa: BLE001
@@ -5754,6 +6052,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
         s1 = min(tr.shape[0], s1)
         x = np.arange(s0, s1)
+        if primary is not None:
+            a_k, b_k = self._align.get(self._akey(path), (1.0, 0.0))
+            a_0, b_0 = self._align.get(primary, (1.0, 0.0))
+            x = (a_k * x + b_k - b_0) / a_0
         lo = hi = None
         for ci, base, col, color in self._channel_lines(dset):
             if not self.chan_show[ci].get():

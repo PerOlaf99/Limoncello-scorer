@@ -55,6 +55,13 @@ def _select(app, idxs, n):
         app.file_list.selection_set(i)
     app.on_file_select()
     app.update()
+    # let a pending margin refit (deferred after resizes) land now, so it
+    # cannot move the graphs in the middle of a simulated drag
+    job = getattr(app, "_relayout_job", None)
+    if job is not None:
+        app.after_cancel(job)
+        app._relayout()
+    app.update()
 
 
 def _event(app, kind, ax, xd, yd=None, **kw):
@@ -267,3 +274,79 @@ def test_scroll_bars_pan_a_zoomed_view(app):
     app.tk.call(app.ybar.cget("command"), "moveto", "0.2")
     app.update()
     assert ax.get_ylim() != lo_y                  # the Y bar pans too
+
+
+# ------------------------------------------------------------ alignment
+def _two_runs_of_a01(app):
+    _select(app, [0, 1], 2)            # Run01/A01 and Run02/A01: identical traces
+    assert [p.parent.name for p in app.selected] == ["PLATE_X_Run01", "PLATE_X_Run02"]
+    return app._plot_axes[0], app._plot_axes[1]
+
+
+def test_aligning_a_graph_moves_only_its_own_view(app):
+    ax0, ax1 = _two_runs_of_a01(app)
+    app._zoom_to_scans(3000, 3500)
+    key1 = app._axes_keys[1]
+    app._set_alignment(key1, (1.0, 40.0))
+    lo0, hi0 = ax0.get_xlim()
+    lo1, hi1 = ax1.get_xlim()
+    assert abs((lo0 - lo1) - 40) < 1e-6 and abs((hi0 - hi1) - 40) < 1e-6
+    assert abs((hi0 - lo0) - 500) < 1e-6           # the zoom width is unchanged
+    assert "+40 scans" in app._axes_titles[1][0].get_text()
+    # the scan boxes show the bottom graph's own scans (its tick labels)
+    assert (int(app.scan_from.get()), int(app.scan_to.get())) == (round(lo1), round(hi1))
+
+
+def test_shift_drag_slides_one_graph(app):
+    ax0, ax1 = _two_runs_of_a01(app)
+    app._zoom_to_scans(3000, 3500)
+    px = (3500 - 3000) / ax1.get_window_extent().width       # scans per pixel
+    _event(app, "button_press_event", ax1, 3200, button=1, key="shift")
+    _event(app, "motion_notify_event", ax1, 3260, key="shift")
+    _event(app, "button_release_event", ax1, 3260, button=1, key="shift")
+    a, b = app._align[app._axes_keys[1]]
+    assert a == 1.0 and abs(b - 60) <= 3 * px                 # dragged ~60 scans right
+    assert app._axes_keys[0] not in app._align               # the other graph stayed
+
+
+def test_alt_nudge_moves_the_graph_under_the_mouse(app):
+    _two_runs_of_a01(app)
+    app._hover_idx = 1
+    app._nudge(10)
+    app._nudge(-1)
+    assert app._align[app._axes_keys[1]] == (1.0, 9.0)
+    app._reset_alignment("hover")
+    assert app._axes_keys[1] not in app._align
+
+
+def test_align_to_top_undoes_a_known_shift(app):
+    _two_runs_of_a01(app)
+    app._zoom_to_scans(3000, 4000)
+    app._set_alignment(app._axes_keys[1], (1.0, 37.0))       # misalign the copy
+    app.align_to_top()
+    a, b = app._align.get(app._axes_keys[1], (1.0, 0.0))
+    assert abs(b) <= 1.5                                      # back on top of the original
+
+
+def test_align_on_standard_fits_offset_and_stretch(app):
+    _two_runs_of_a01(app)
+    k0, k1 = app._axes_keys
+    r = [2100.0, 2200.0, 2400.0, 2500.0]
+    s = [x * 0.99 - 12 for x in r]                            # the other run: shifted and squeezed
+    app._gen_pickers[k0] = SimpleNamespace(std=[(x, "") for x in r])
+    app._gen_pickers[k1] = SimpleNamespace(std=[(x, "") for x in s])
+    app.align_on_standard()
+    a, b = app._align[k1]
+    for x_s, x_r in zip(s, r):
+        assert abs(a * x_s + b - x_r) < 1e-6                  # each band lands on its partner
+
+
+def test_shift_click_does_not_pick(app):
+    _select(app, [0], 1)
+    app.toggle_genotyping_picking()
+    app.update()
+    ax = app._plot_axes[0]
+    before = sum(len(pk.records) for pk in app._gen_pickers.values())
+    _event(app, "button_press_event", ax, 3000, button=1, key="shift")
+    _event(app, "button_release_event", ax, 3000, button=1, key="shift")
+    assert sum(len(pk.records) for pk in app._gen_pickers.values()) == before

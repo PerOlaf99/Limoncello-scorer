@@ -26,6 +26,7 @@ The full user manual, with quick starts for each job, is in the app:
 | Trace colors / dye sets | Combobox beside the channel toggles + View → Trace colors palette |
 | Pan/zoom | Wheel on the graphs zooms at the cursor (Ctrl: Y, Shift: pan), drag zooms a box, middle-drag pans; Zoom −/+ and a scan-range box; right-click/double-click/Home resets |
 | Y scaling | Shared or each graph its own; Fit Y to view |
+| Align graphs to each other | Shift+drag a graph, Alt+←/→ nudge, ⇄ Align (cross-correlation in view, or on the internal standard with stretch); display only — true scans kept |
 | Random background pictures | Yes — `Background*.jpg` / `BG*.jpg` beside the app |
 | Export FASTA / CSV / trace text | Yes |
 | Save graph image (PNG/PDF/SVG) | Yes — File → Save graph image… |
@@ -153,6 +154,7 @@ To try it immediately: **File → Add data folder** →
 | Enter in the *Scans* boxes | zoom to the typed scan range |
 | wheel / Ctrl+wheel / Shift+wheel | zoom across at the cursor / zoom height / pan |
 | drag (Ctrl+drag while picking) | zoom to a range |
+| Shift+drag, Alt+← / Alt+→ (Alt+Shift ×10), Alt+Home | slide one graph to align it / reset it |
 | middle-drag | pan |
 | F1 | user manual (contents + search) |
 | F11 | full screen / restore |
