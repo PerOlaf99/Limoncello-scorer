@@ -831,6 +831,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.theme_cb.pack(side=tk.RIGHT, padx=(4, 8))
         self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
         ttk.Label(chan_bar, text="Trace colors:").pack(side=tk.RIGHT, pady=4)
+        self._chan_bar = chan_bar
 
         self._build_view_bar(center)
         self._build_mode_banner(center)
@@ -956,9 +957,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
                         ).pack(side=tk.LEFT, padx=4)
         ttk.Button(bar, text="⟲ Reset view",
                    command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(bar, text="▦ Plate",
-                   command=self.show_plate_map).pack(side=tk.RIGHT, padx=4)
-        amb = ttk.Menubutton(bar, text="⇄ Align")
+        # Plate map and Align sit in the channel bar, which has room to spare;
+        # the view bar is full at ordinary window widths.
+        top = getattr(self, "_chan_bar", bar)
+        ttk.Button(top, text="▦ Plate map",
+                   command=self.show_plate_map).pack(side=tk.RIGHT, padx=(4, 10))
+        amb = ttk.Menubutton(top, text="⇄ Align")
         amb["menu"] = self._alignment_menu(amb)
         amb.pack(side=tk.RIGHT, padx=4)
         ToolTip(spin, lambda: f"Graphs stacked at once (1–{MAX_GRAPHS})")
@@ -5435,8 +5439,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if key is None:
                 self.status_var.set("This view cannot be aligned (wrap rows).")
                 return
-            self._plot_drag = {"kind": "align", "ax": hax, "key": key, "px": event.x,
-                               "ab": self._align.get(key, (1.0, 0.0)),
+            self._plot_drag = {"kind": "align", "ax": hax, "key": key, "idx": idx,
+                               "px": event.x,
+                               "base": {k: self._align.get(k, (1.0, 0.0))
+                                        for k in self._group_keys(idx)},
                                "window": self._ref_window()}
         elif event.button == 1 and self._box_zoom_allowed(event):
             if getattr(event, "dblclick", False):
@@ -5462,8 +5468,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             lo, hi = d["window"]
             bbox = d["ax"].get_window_extent()
             shift_ref = (event.x - d["px"]) / max(1.0, bbox.width) * (hi - lo)
-            a, b = d["ab"]
-            self._set_alignment(d["key"], (a, b + shift_ref), keep=d["window"])
+            self._shift_group(d["idx"], shift_ref, base=d["base"])
+            self._update_ref_full(keep=d["window"])
+            self._refresh_align_titles()
+            self._apply_zoom()
             return
         if d["kind"] == "pan":
             x0, x1 = self._full_xlim
@@ -5497,7 +5505,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _on_plot_release(self, event):
         d, self._plot_drag = self._plot_drag, None
         if d is not None and d["kind"] == "align":
-            self._persist_alignment([d["key"]])
+            self._persist_alignment(list(d["base"]))
             a, b = self._align.get(d["key"], (1.0, 0.0))
             self.status_var.set(f"{Path(d['key']).parent.name}/{Path(d['key']).stem}: "
                                 f"shifted {b:+.0f} scans  (Alt+Home resets this graph)")
@@ -5668,6 +5676,28 @@ class LimoncelloAnalyzerApp(tk.Tk):
             except Exception:                              # noqa: BLE001
                 pass
 
+    def _group_keys(self, i):
+        """Every file drawn in graph *i*: with Overlay runs, all its runs (so
+        moving the graph moves them together); otherwise just its own file."""
+        keys = self._axes_keys
+        if i is None or i >= len(keys) or keys[i] is None:
+            return []
+        if self.overlay_runs.get() and not getattr(self, "genotyping_active", False):
+            groups = self._view_groups(self._graph_count())
+            if i < len(groups):
+                return [self._akey(p) for p in groups[i]]
+        return [keys[i]]
+
+    def _shift_group(self, i, delta, base=None):
+        """Move graph *i* (and its overlaid runs) by *delta* reference scans,
+        from *base* ({key: (a, b)}, default: the current alignments)."""
+        for k in self._group_keys(i):
+            a, b = (base or {}).get(k, self._align.get(k, (1.0, 0.0)))
+            if abs(a - 1.0) < 1e-9 and abs(b + delta) < 1e-9:
+                self._align.pop(k, None)
+            else:
+                self._align[k] = (a, b + delta)
+
     def _nudge(self, scans):
         """Alt+←/→ (Alt+Shift: ×10): move the graph under the mouse."""
         i = self._hover_idx
@@ -5675,14 +5705,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if i is None or i >= len(keys) or keys[i] is None or self._full_xlim is None:
             self.status_var.set("Point at a graph, then Alt+← / Alt+→ to move it.")
             return "break"
-        a, b = self._align.get(keys[i], (1.0, 0.0))
-        self._set_alignment(keys[i], (a, b + scans))
-        self._persist_alignment([keys[i]])
+        win = self._ref_window()
+        self._shift_group(i, scans)
+        self._update_ref_full(keep=win)
+        self._refresh_align_titles()
+        self._apply_zoom()
+        self._persist_alignment(self._group_keys(i))
         return "break"
 
     def _reset_alignment(self, which="hover"):
         if which == "all":
-            keys = {k for k in self._axes_keys if k}
+            keys = {k for i in range(len(self._plot_axes)) for k in self._group_keys(i)}
             for k in list(self._align):
                 if k in keys:
                     self._align.pop(k)
@@ -5692,8 +5725,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return "break"
         i = self._hover_idx
         if i is not None and i < len(self._axes_keys) and self._axes_keys[i]:
-            self._set_alignment(self._axes_keys[i], (1.0, 0.0), redraw=True)
-            self._persist_alignment([self._axes_keys[i]])
+            keys = self._group_keys(i)
+            for k in keys:
+                self._align.pop(k, None)
+            self._persist_alignment(keys)
+            self.redraw()
         return "break"
 
     def _envelope(self, i, grid, own_runs_only=True, run=None):
@@ -5736,9 +5772,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return int(lags[keep][np.argmax(c[keep])])
 
     def align_to_top(self):
-        """Slide every graph so the features in view line up with the top
-        graph (cross-correlation of the summed traces over the scans on
-        screen); with Overlay runs, each overlaid run onto its graph's first."""
+        """Line up what is in view by cross-correlation of the summed traces.
+
+        With Overlay runs: first each overlaid run onto its graph's first run,
+        then every graph (with all its runs) onto the top graph; without it,
+        every graph onto the top one."""
         if len(self._plot_axes) < 1 or self._full_xlim is None:
             return
         lo, hi = self._ref_window()
@@ -5747,31 +5785,32 @@ class LimoncelloAnalyzerApp(tk.Tk):
         step = (hi - lo) / max(1, n - 1)
         max_lag = int(0.3 * n)
         moved = []
-        e0 = self._envelope(0, grid)
-        for i in range(1, len(self._plot_axes)):
-            key = self._axes_keys[i]
-            if key is None:
-                continue
-            lag = self._best_lag(e0, self._envelope(i, grid), max_lag)
-            if lag:
-                a, b = self._align.get(key, (1.0, 0.0))
-                self._align[key] = (a, b + lag * step)
-                moved.append(f"{Path(key).stem} {lag * step:+.0f}")
-        if self.overlay_runs.get() and not getattr(self, "genotyping_active", False):
+        overlay = self.overlay_runs.get() and not getattr(self, "genotyping_active", False)
+        if overlay:
+            # 1) runs within each graph onto the graph's first run
             for i, group in enumerate(self._view_groups(self._graph_count())):
                 if i >= len(self._plot_axes):
                     break
                 own = self._envelope(i, grid)
+                a0 = self._ab(i)[0]
                 for other in group[1:]:
                     lag = self._best_lag(own, self._envelope(i, grid, run=other.parent.name), max_lag)
                     if lag:
                         k = self._akey(other)
                         a, b = self._align.get(k, (1.0, 0.0))
-                        self._align[k] = (a, b + lag * step * self._ab(i)[0])
+                        self._align[k] = (a, b + lag * step * a0)
                         moved.append(f"{other.parent.name[-5:]}/{other.stem} {lag * step:+.0f}")
-        self._persist_alignment([k for k in self._axes_keys if k] + [
-            self._akey(p) for g in (self._view_groups(self._graph_count())
-                                    if self.overlay_runs.get() else []) for p in g])
+        # 2) every graph (all its runs) onto the top one
+        e0 = self._envelope(0, grid)
+        for i in range(1, len(self._plot_axes)):
+            if self._axes_keys[i] is None:
+                continue
+            lag = self._best_lag(e0, self._envelope(i, grid), max_lag)
+            if lag:
+                self._shift_group(i, lag * step)
+                moved.append(f"{Path(self._axes_keys[i]).stem} {lag * step:+.0f}")
+        keys = [k for i in range(len(self._plot_axes)) for k in self._group_keys(i)]
+        self._persist_alignment(keys)
         self.redraw()
         self.status_var.set("Aligned on the scans in view: " + (", ".join(moved) or "already aligned"))
 
@@ -6033,10 +6072,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
             ax.tick_params(labelsize=7)
             if len(group) > 1:
+                # one plate per graph: name it once, then each run's own part
+                plate = self._plate_of(path)
                 names = "   ".join(
                     f"{'━' if k == 0 else {'--': '╍', ':': '┈', '-.': '┄'}.get(RUN_STYLES[k % len(RUN_STYLES)], '━')} "
-                    f"{g.parent.name}" for k, g in enumerate(group))
-                label = self._graph_title(path, names)
+                    f"{g.parent.name[len(plate):].lstrip('_- ') or g.parent.name}"
+                    for k, g in enumerate(group))
+                label = self._graph_title(path, f"{plate}    {names}")
             else:
                 label = self._graph_title(path, doc.path.parent.name)
             self._axes_titles.append((ax.text(

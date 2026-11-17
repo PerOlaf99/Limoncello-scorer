@@ -386,3 +386,17 @@ def test_saving_an_alignment_keeps_the_wells_marks(app):
     app._flush_alignment()
     entry = mark_library.load_run("PLATE_X_Run02")["A01"]
     assert entry["std"] == [[2100, "HOM1"]] and entry["align"] == [1.0, 3.0]
+
+
+def test_in_overlay_a_graph_moves_with_all_its_runs(app):
+    app.overlay_runs.set(True)
+    _select(app, [0, 1], 1)                       # Run01/A01 + Run02/A01 -> one graph
+    assert len(app._plot_axes) == 1
+    k1, k2 = (app._akey(p) for p in app.selected)
+    app._align[k2] = (1.0, 30.0)                  # Run02 already aligned onto Run01
+    app._hover_idx = 0
+    app._nudge(5)
+    assert app._align[k1] == (1.0, 5.0)           # the graph moved ...
+    assert app._align[k2] == (1.0, 35.0)          # ... and its overlaid run with it
+    app._reset_alignment("hover")
+    assert k1 not in app._align and k2 not in app._align
