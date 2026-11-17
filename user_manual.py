@@ -236,7 +236,35 @@ Areas and fractions
 • Auto genotyping ▸ Minimum minor allele for a het… — the smallest minor-allele fraction counted as a heterozygote (0 = the engine's own rule). A smaller second band is reported but not called het. Remembered with the plate.
 • Auto genotyping ▸ Save auto-genotype table… — CSV / .xlsx / JSON.
 • Auto genotyping ▸ Export library for ML… — every stored call and correction as training rows (see MARK_LIBRARY.md).
+• Auto genotyping ▸ CTCE analysis… — cycling temperature CE (see the section CTCE analysis).
 Marks, calls and learned standards are kept in the library/ folder beside the program, so a restart does not lose a marked plate."""),
+
+    ("CTCE analysis", """\
+Cycling temperature capillary electrophoresis separates the duplexes of a fragment by how they melt (Ekstrøm, Bjørheim & Thilly 2007). Raising the temperature moves the partly melted duplex peaks later, while ssDNA, primers and the labelled oligo keep their relative position. Too cold: all duplexes still run as one peak; in the window: they resolve (four peaks for two variants — two homoduplexes, two heteroduplexes — up to n² for n variants); too hot: they stop moving apart and merge again.
+
+Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and measures them:
+• **Plate** — the runs of one plate (folders that differ only by RunNN). Each run's temperature is read from its .rsd, and the runs are ordered by it, so a hotter run done first still shifts the right way.
+• **Sample channel** — the analysis uses ONE channel, the strongest by default. **Internal standard** — choose its channel when the plate carries one; its bands then line the runs up (offset and stretch). Without it the runs are lined up on the early primer peak.
+• How the peaks of interest are found:
+```
+  two or more temperatures   peaks that move LATER as it warms, each by its
+                             own amount, are the melting duplexes; peaks that
+                             hold still (ssDNA drifts slightly earlier) are
+                             static
+  one temperature            by shape: a duplex has a sharp front and a tail,
+  (optimal run, or reruns)   ssDNA is symmetric; reruns count as replicates
+                             and the fractions get a ± SD
+  your picked peaks          tick "Use my picked peaks as template": click the
+                             peaks of interest in one or a few wells with
+                             Manual genotyping ▸ Manual peak picking…, and the
+                             same pattern is found in every well (it may sit
+                             a little earlier or later in each well)
+```
+• **Add stutter to its parent peak** — a smaller peak a few scans behind a duplex peak (Taq stutter / +A) is reported and, ticked, counted with its parent. Peaks you picked are never merged.
+• The table: per well the temperatures, method, peaks of interest per run, the run measured (the one with most resolved peaks), the fractions (± SD over replicates), the minor-variant fraction for four peaks (mass action: p = (A_hom + ½ A_het) / A_total) and flags (one temperature, merged again at the top temperature, no product). **Save table…** writes it as CSV.
+• **Double-click a well** (or Show well): its runs are overlaid, lined up as the analysis did, with the peaks marked — red ▼ peaks of interest (P1, P2 … when picked), orange ▽ stutter, grey ○ static.
+• Areas are measured between each peak's own valleys. Check the fractions against wells of known composition before trusting them.
+"""),
 
     ("Fragment-length sizing", """\
 Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peaks in bp against a ladder run in its own channel. It is a different analysis from peak picking and CTC-CE genotyping.

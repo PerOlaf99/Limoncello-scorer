@@ -40,6 +40,7 @@ The full user manual, with quick starts for each job, is in the app:
 | Mark library — durable internal-standard marks, engine calls and fitted standards (`library/`) | Yes — see [MARK_LIBRARY.md](MARK_LIBRARY.md) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
 | Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Auto genotyping menu |
+| CTCE analysis — peaks of interest from how they move between run temperatures (or by shape at one temperature, or from picked peaks), areas and fractions | Yes — Auto genotyping → CTCE analysis… (`ctce.py`) |
 | Fragment-length sizing — size PCR/ssDNA peaks against a ladder (bp), user-definable ladders | Yes — `scorer.py size` |
 
 ## Requirements

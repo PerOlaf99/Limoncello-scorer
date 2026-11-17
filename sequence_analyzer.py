@@ -613,6 +613,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                            command=self.auto_genotype_save)
         auto_m.add_command(label="Export library for ML…",
                            command=self.library_export_ml)
+        auto_m.add_separator()
+        auto_m.add_command(label="CTCE analysis…", command=self.show_ctce)
 
         help_m = tk.Menu(self, tearoff=0)
         help_m.add_command(label="User manual…", command=self.show_help)
@@ -6084,6 +6086,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self._axes_titles.append((ax.text(
                 0.004, 0.995, label, transform=ax.transAxes, ha="left", va="top",
                 fontsize=8, color="#222", zorder=6), label))
+            self._draw_ctce_marks(ax, path)
             self._style_x_axis(ax, i == n_ax - 1)
 
             if settings.view_mode == "esd":
@@ -6186,9 +6189,249 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if seg.size:
                 lo = float(np.nanmin(seg)) if lo is None else min(lo, float(np.nanmin(seg)))
                 hi = float(np.nanmax(seg)) if hi is None else max(hi, float(np.nanmax(seg)))
+        if primary is not None:
+            a_k, b_k = self._align.get(self._akey(path), (1.0, 0.0))
+            a_0, b_0 = self._align.get(primary, (1.0, 0.0))
+            self._draw_ctce_marks(ax, path, xmap=lambda s: (a_k * s + b_k - b_0) / a_0,
+                                  run=path.parent.name)
+        else:
+            self._draw_ctce_marks(ax, path, run=path.parent.name)
         return None if lo is None else (lo, hi, s1)
 
     # ------------------------------------------------------------------ I/O
+    # ------------------------------------------------------------- CTCE
+    CTCE_STYLE = {"melting": ("v", "#C62828", 9), "satellite": ("v", "#EF8A17", 6),
+                  "static": ("o", "#8A8F98", 5)}
+
+    def _draw_ctce_marks(self, ax, path, xmap=None, run=None):
+        """Mark the CTCE classes of *path*'s peaks on *ax*: peaks of interest
+        (red, with their template label), satellites (orange), static (grey).
+        *xmap* places an overlaid run's scans into the graph's coordinates."""
+        marks = (getattr(self, "_ctce_marks", None) or {}).get(self._akey(path))
+        if not marks:
+            return
+        lines = [ln for ln in ax.get_lines() if str(ln.get_label()).startswith("Ch")
+                 and ((run is not None and f"({run})" in str(ln.get_label()))
+                      or (run is None and "(" not in str(ln.get_label())))]
+        for raw, role, label in marks:
+            style = self.CTCE_STYLE.get(role)
+            if style is None:
+                continue
+            x = xmap(raw) if xmap else raw
+            y = max((float(np.interp(x, ln.get_xdata(), ln.get_ydata())) for ln in lines),
+                    default=0.0)
+            m, col, size = style
+            ax.plot([x], [y], marker=m, color=col, markersize=size, linestyle="none",
+                    zorder=8, markerfacecolor=col if role != "static" else "none",
+                    label="_ctce")
+            if label:
+                ax.annotate(label, (x, y), xytext=(0, 7), textcoords="offset points",
+                            ha="center", fontsize=7, color=col, zorder=9)
+
+    def _ctce_plates(self):
+        """{plate: [run folders]} for the runs in the file list."""
+        import ctce
+        return ctce.group_runs(sorted({Path(p).parent for p in (self.files or [])}))
+
+    def _ctce_picks(self, run_folders):
+        """Peaks picked in Manual peak picking on this plate's runs: the
+        template seeds, {trace path: [scans]}."""
+        folders = {str(Path(f).resolve()) for f in run_folders}
+        picks = {}
+        for pk in (getattr(self, "_gen_pickers", None) or {}).values():
+            for rec in getattr(pk, "records", []) or []:
+                if rec.get("kind", "main") != "main":
+                    continue
+                f = Path(rec.get("file", ""))
+                if str(f.parent.resolve()) in folders:
+                    picks.setdefault(str(f), []).append(float(rec["scan"]))
+        return picks
+
+    def show_ctce(self):
+        """Auto genotyping ▸ CTCE analysis…: find the peaks of interest of a
+        plate from how they move between runs at different temperatures (or
+        by shape at one temperature, or from picked peaks), and quantify."""
+        import ctce
+        plates = self._ctce_plates()
+        if not plates:
+            messagebox.showinfo("CTCE analysis", "Add the run folders of a plate first.")
+            return
+        win = tk.Toplevel(self)
+        win.title("CTCE analysis")
+        win.geometry("1180x620")
+        self._ctce_win = win
+        top = ttk.Frame(win, padding=8)
+        top.pack(fill=tk.X)
+
+        def label_for(plate):
+            temps = []
+            for f in plates[plate]:
+                try:
+                    rp = load_trace(next(Path(f).glob("*.rsd"))).run_params or {}
+                    temps.append(str(rp.get("Temperature", "?")))
+                except Exception:                          # noqa: BLE001
+                    temps.append("?")
+            return f"{plate}   ({len(plates[plate])} runs: {' / '.join(temps)} °C)"
+        names = {label_for(k): k for k in sorted(plates)}
+        ttk.Label(top, text="Plate").grid(row=0, column=0, sticky="w")
+        plate_var = tk.StringVar(value=next(iter(names)))
+        ttk.Combobox(top, textvariable=plate_var, values=list(names), state="readonly",
+                     width=70).grid(row=0, column=1, columnspan=5, sticky="w", padx=6)
+        ttk.Label(top, text="Sample channel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ch_var = tk.StringVar(value="Auto (strongest)")
+        ttk.Combobox(top, textvariable=ch_var, state="readonly", width=16,
+                     values=["Auto (strongest)", "1", "2", "3", "4"]).grid(row=1, column=1, sticky="w", padx=6, pady=(6, 0))
+        ttk.Label(top, text="Internal standard").grid(row=1, column=2, sticky="w", pady=(6, 0))
+        is_var = tk.StringVar(value="None")
+        ttk.Combobox(top, textvariable=is_var, state="readonly", width=8,
+                     values=["None", "1", "2", "3", "4"]).grid(row=1, column=3, sticky="w", padx=6, pady=(6, 0))
+        merge_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Add stutter to its parent peak", variable=merge_var).grid(
+            row=1, column=4, sticky="w", padx=(12, 0), pady=(6, 0))
+        tpl_var = tk.BooleanVar(value=True)
+        tpl_chk = ttk.Checkbutton(top, text="Use my picked peaks as template", variable=tpl_var)
+        tpl_chk.grid(row=2, column=1, columnspan=3, sticky="w", padx=6, pady=(4, 0))
+        info = ttk.Label(top, foreground="#555")
+        info.grid(row=2, column=4, columnspan=2, sticky="w", padx=(12, 0))
+
+        def refresh_info(*_):
+            n = len(self._ctce_picks(plates[names[plate_var.get()]]))
+            info.config(text=(f"{n} picked well(s) on this plate" if n else
+                              "no picks — Manual genotyping ▸ Manual peak picking to guide it"))
+            tpl_chk.state(["!disabled"] if n else ["disabled"])
+        plate_var.trace_add("write", refresh_info)
+        refresh_info()
+
+        cols = ("well", "temperatures", "method", "regimes", "measured_at", "n_peaks",
+                "fractions", "fraction_sd", "minor_fraction", "shifts", "flags")
+        heads = {"well": "well", "temperatures": "°C", "method": "method", "regimes": "peaks per run",
+                 "measured_at": "measured", "n_peaks": "n", "fractions": "fractions",
+                 "fraction_sd": "± SD", "minor_fraction": "minor", "shifts": "shift (scans)",
+                 "flags": "flags"}
+        widths = {"well": 50, "temperatures": 80, "method": 70, "regimes": 150, "measured_at": 70,
+                  "n_peaks": 30, "fractions": 170, "fraction_sd": 120, "minor_fraction": 60,
+                  "shifts": 90, "flags": 360}
+        mid = ttk.Frame(win)
+        mid.pack(fill=tk.BOTH, expand=True, padx=8)
+        tree = ttk.Treeview(mid, columns=cols, show="headings", height=18)
+        for c in cols:
+            tree.heading(c, text=heads[c])
+            tree.column(c, width=widths[c], stretch=(c == "flags"), anchor="w")
+        vs = ttk.Scrollbar(mid, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vs.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vs.pack(side=tk.RIGHT, fill=tk.Y)
+        bot = ttk.Frame(win, padding=8)
+        bot.pack(fill=tk.X)
+        status = ttk.Label(bot, text="Choose the plate and press Analyse.")
+        status.pack(side=tk.LEFT)
+        state = {"results": [], "folders": []}
+
+        def analyse():
+            plate = names[plate_var.get()]
+            folders = plates[plate]
+            channel = None if ch_var.get().startswith("Auto") else int(ch_var.get())
+            is_ch = None if is_var.get() == "None" else int(is_var.get())
+            template = None
+            picks = self._ctce_picks(folders) if tpl_var.get() else {}
+            if picks:
+                template = ctce.template_from_picks(picks, channel)
+            wells = ctce.plate_wells(folders)
+            tree.delete(*tree.get_children())
+            results = []
+            self._busy, self._cancel = True, False
+            try:
+                for k, w in enumerate(wells, 1):
+                    if self._cancel:
+                        status.config(text=f"Cancelled after {k - 1} wells.")
+                        break
+                    status.config(text=f"Analysing {w} ({k}/{len(wells)})…  Esc cancels")
+                    win.update()
+                    try:
+                        results.append(ctce.analyse_well(
+                            [Path(f) / f"{w}.rsd" for f in folders], channel, is_ch,
+                            merge_var.get(), template))
+                    except Exception as e:                 # noqa: BLE001
+                        print(f"ctce: {w}: {e}", file=sys.stderr)
+            finally:
+                self._busy = False
+            ctce.flag_no_product(results)
+            state["results"], state["folders"] = results, folders
+            marks = {}
+            for r in results:
+                for run in r.runs:
+                    marks[self._akey(run.path)] = [(p.raw_pos, p.role, p.label) for p in run.peaks]
+            self._ctce_marks = marks
+            for r in results:
+                s = r.summary()
+                tree.insert("", tk.END, iid=r.well, values=[s[c] for c in cols])
+            how = {"template": "your picked peaks", "shape": "peak shape (one temperature)",
+                   "change": "the change between temperatures"}
+            methods = {r.method for r in results}
+            status.config(text=f"{len(results)} wells — peaks of interest from "
+                               + ", ".join(how.get(m, m) for m in sorted(methods))
+                               + ".  Double-click a well to show it.")
+            self.redraw()
+
+        def show_well(_e=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            w = sel[0]
+            files = [Path(f) / f"{w}.rsd" for f in state["folders"]]
+            # show the runs the way the engine lined them up (session only;
+            # the alignments saved in the library are not touched)
+            res = next((r for r in state["results"] if r.well == w), None)
+            if res is not None:
+                ref = res.runs[0]
+                for run in res.runs:
+                    a = run.scale / ref.scale
+                    b = (run.offset - ref.offset) / ref.scale
+                    key = self._akey(run.path)
+                    if abs(a - 1.0) < 1e-9 and abs(b) < 1e-9:
+                        self._align.pop(key, None)
+                    else:
+                        self._align[key] = (a, b)
+            self.overlay_runs.set(True)
+            self.selected = files
+            idx = {str(p.resolve()): i for i, p in enumerate(self.files)}
+            self.file_list.selection_clear(0, tk.END)
+            for f in files:
+                i = idx.get(str(f.resolve()))
+                if i is not None:
+                    self.file_list.selection_set(i)
+                    self.file_list.see(i)
+            self.redraw()
+
+        def save():
+            if not state["results"]:
+                return
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Save CTCE table", defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+            if not path:
+                return
+            import csv
+            rows = [r.summary() for r in state["results"]]
+            try:
+                with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                    wtr = csv.DictWriter(fh, fieldnames=list(rows[0]))
+                    wtr.writeheader()
+                    wtr.writerows(rows)
+                status.config(text=f"Saved {len(rows)} wells to {Path(path).name}")
+            except OSError as e:
+                messagebox.showerror("Save CTCE table", str(e), parent=win)
+
+        tree.bind("<Double-1>", show_well)
+        tree.bind("<Return>", show_well)
+        ttk.Button(bot, text="Close", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(bot, text="Save table…", command=save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(bot, text="Show well", command=show_well).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(bot, text="Analyse", command=analyse).pack(side=tk.RIGHT, padx=4)
+        self._ctce_ui = SimpleNamespace(win=win, analyse=analyse, show_well=show_well, tree=tree,
+                                        plate_var=plate_var, names=names, state=state,
+                                        status=status, tpl_var=tpl_var)
+
     def _docs_for_export(self):
         out = []
         for p in self.selected:

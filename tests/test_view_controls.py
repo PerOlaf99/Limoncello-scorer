@@ -400,3 +400,21 @@ def test_in_overlay_a_graph_moves_with_all_its_runs(app):
     assert app._align[k2] == (1.0, 35.0)          # ... and its overlaid run with it
     app._reset_alignment("hover")
     assert k1 not in app._align and k2 not in app._align
+
+
+def test_ctce_window_analyses_a_plate_and_shows_a_well(app):
+    app.show_ctce()
+    app.update()
+    u = app._ctce_ui
+    key = next(k for k in u.names if "PLATE_X" in k)
+    u.plate_var.set(key)
+    u.analyse()
+    rows = u.tree.get_children()
+    assert len(rows) == 3                                   # A01..A03 in both runs
+    assert app._ctce_marks                                  # classes to mark in the graphs
+    u.tree.selection_set(rows[0])
+    u.show_well()
+    app.update()
+    assert app.overlay_runs.get()
+    assert {p.parent.name for p in app.selected} == {"PLATE_X_Run01", "PLATE_X_Run02"}
+    u.win.destroy()
