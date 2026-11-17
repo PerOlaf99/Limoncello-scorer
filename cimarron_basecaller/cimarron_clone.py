@@ -149,7 +149,7 @@ def has_signal(z: np.ndarray, threshold: float = 12.0) -> bool:
     return float(np.percentile(z.max(axis=1), 90)) >= threshold
 
 
-def signal_onset(z: np.ndarray, level: float = 8.0, sustain: int = 10, smooth: int = 11) -> int | None:
+def signal_onset(z: np.ndarray, level: float = 8.0, sustain: int = 20, smooth: int = 11) -> int | None:
     """First scan after the pre-run window where the (smoothed) max-channel
     z-score stays above `level` for `sustain` scans: the arrival of the first
     labelled fragments, where Cimarron begins calling (it calls the faint

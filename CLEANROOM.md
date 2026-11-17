@@ -66,7 +66,7 @@ Development scripts (not part of the repo) live in the session scratchpad
 - Start: Cimarron calls the faint early bands from the first sustained rise of
   the signal above the pre-run noise (m13: ~120 scans before track_bases' 10%
   region). Decision: start tracking at the first scan where the 11-scan-smoothed
-  max-channel z-score (vs. scans 200-1200) stays > 8 for 10 scans (start median
+  max-channel z-score (vs. scans 200-1200) stays > 8 for 20 scans (start median
   error 120 -> 10 scans on m13). On mb4000 Cimarron skips the first ~55 scans
   after START RAW DATA (an isolated leading peak); a start skip/taper was tried and
   did not move agreement/extra, so it is not used.
@@ -98,3 +98,24 @@ Development scripts (not part of the repo) live in the session scratchpad
 - Tried and dropped: a start skip / linear start taper (no effect), a hard
   "broad read" clamp floor by spacing threshold (works, 0.827/0.200 on mb4000,
   but the threshold sat on the boundary of clean reads).
+- Onset sustain 10 -> 20 scans: mb4000 I22 (signal only from scan ~8700) had a
+  20-scan noise excursion at 2155 taken as the onset (+600 noise calls).
+  m13/even 0.9446/0.0467 -> 0.9446/0.0439, mb4000/even extra 0.170 -> 0.157.
+
+### Remaining disagreements (even wells, after the above)
+- m13: read-middle (scans 3000-7200) is essentially error-free. Errors sit in
+  the first ~600 scans (faint early bands: ~95 ins / 94 del / 95 mismatches per
+  1000 Cimarron bases) and the last ~1500 (spacing falls to ~6.3 scans, raw
+  signal is poor; ~150 ins and 100-190 mismatches per 1000), plus homopolymer
+  under-calls at 7200-8100 where Cimarron places two calls 3-5 scans apart
+  inside one broad same-colour peak.
+- Peak width (FWHM vs local median) does not identify those merged
+  homopolymer peaks (most wide peaks are single bases); not pursued.
+- Cimarron's N calls (235 on m13/even, 94% in the last 15% of the read) are not
+  predictable from channel dominance at our call (any threshold loses more
+  agreeing bases than it gains); we never emit N.
+- mb4000: wells with an M13-like read are as clean as m13 in the middle; the
+  plate also has ~10 capillaries whose calls (Cimarron's and ours) do not match
+  M13 at all (P18, O16, L24 ...: junk), and ~80 broad-peak capillaries that
+  Cimarron decimated by 2 or 4 (coordinates not emulated: their positions and
+  start/end metrics are meaningless for us).
