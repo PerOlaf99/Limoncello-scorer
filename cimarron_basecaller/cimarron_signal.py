@@ -80,8 +80,10 @@ DEFAULT_OFFSET = np.zeros(4)
 FLATTEN_SCALE = 0.60
 
 # Estimate the separation matrix from the run even for a known instrument
-# (the profile's table is then only the seed).
-ESTIMATE_KNOWN = False
+# (the profile's table is then only the seed).  Measured on m13 even wells:
+# end-to-end agreement 0.940 with the estimate vs 0.931 with the PLAYER1
+# table and 0.934 with each well's own Cimarron matrix (CLEANROOM_rewrite.md).
+ESTIMATE_KNOWN = True
 
 PROFILES = {
     "PLAYER1": dict(dye_order="TGCA", separation=PLAYER1_SEPARATION, delays=PLAYER1_DELAYS,
@@ -118,6 +120,21 @@ def read_meta(footer: bytes) -> dict:
         val = footer[k:k + n].rstrip(b"\0").decode("latin-1")
         out.setdefault(m.group(2).decode(), val)
     return out
+
+
+_CHANNEL_BASE = re.compile(rb"CHANNEL([1-4])\x00\x01.\x05\x05BASE\x00\x05\x02([ACGTacgt])\x00", re.S)
+
+
+def dye_order_from_footer(footer: bytes) -> str | None:
+    """Base letter of each instrument channel (e.g. "TGCA") from the
+    CHANNEL1..4 / BASE records of an .rsd or .esd footer, or None."""
+    found: dict = {}
+    for m in _CHANNEL_BASE.finditer(footer or b""):
+        found.setdefault(int(m.group(1)), m.group(2).decode().upper())
+    if len(found) != 4:
+        return None
+    order = "".join(found[i] for i in range(1, 5))
+    return order if sorted(order) == list("ACGT") else None
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +315,15 @@ def homomorphic_deconvolve(seg: np.ndarray, W: float) -> np.ndarray:
     return np.real(np.fft.ifft(Z, axis=0))
 
 
-FBW_FIRST = 135.0
+# Width of the spacing-estimation pass.  SPEC_signal §5.4 uses 135; with 135
+# the band count misses merged bands late in the read and the spacing comes
+# out 23 % long in the last segment (7 % in the first); 170 brings the bias to
+# -5..+6 % in every segment (measured against Cimarron's call spacing).
+FBW_FIRST = 170.0
 FBW_CONSTANT = 1210.8
-FBW_SEG_K = None      # optional f(segment index, n segments, K) -> K (development hook)
+BAND_THRESH = 0.18
+FBW_PASSES = 1        # spacing re-estimations before the final pass
+FBW_SEG_W = None      # optional f(segment index, n segments, W, spacing) -> W (development hook)
 
 
 def band_spacing(first_pass: np.ndarray, n_real: int, margin: int = 100) -> float:
@@ -313,7 +336,7 @@ def band_spacing(first_pass: np.ndarray, n_real: int, margin: int = 100) -> floa
     i = np.arange(max(1, margin), n_real - margin)
     if len(i) == 0:
         return 10.0
-    pos = i[(r[i] > r[i - 1]) & (r[i] >= r[i + 1]) & (r[i] > 0.18)]
+    pos = i[(r[i] > r[i - 1]) & (r[i] >= r[i + 1]) & (r[i] > BAND_THRESH)]
     if len(pos) < 10:
         return 10.0
     return float(np.mean(np.diff(pos)))
@@ -332,12 +355,12 @@ def deconvolve(sep: np.ndarray) -> tuple[np.ndarray, list[float]]:
         n_real = len(seg)
         if n_real < N:
             seg = np.vstack([seg, np.repeat(seg[-1:], N - n_real, axis=0)])
-        first = homomorphic_deconvolve(seg, FBW_FIRST)
-        sp = band_spacing(first, n_real)
-        K = FBW_CONSTANT
-        if FBW_SEG_K is not None:
-            K = FBW_SEG_K(kseg, len(starts), K)
-        W = float(np.clip(K / max(sp, 3.0), 40.0, 400.0))
+        W = FBW_FIRST
+        for _ in range(FBW_PASSES):
+            sp = band_spacing(homomorphic_deconvolve(seg, W), n_real)
+            W = float(np.clip(FBW_CONSTANT / max(sp, 3.0), 40.0, 400.0))
+        if FBW_SEG_W is not None:
+            W = float(FBW_SEG_W(kseg, len(starts), W, sp))
         widths.append(W)
         res = homomorphic_deconvolve(seg, W)
         out[a:b] = res[a - s:b - s]
@@ -388,11 +411,11 @@ def flatten(internal: np.ndarray, lam: np.ndarray, gain: np.ndarray, offset: np.
 
 
 def unflatten(flattened: np.ndarray, lam: np.ndarray, gain: np.ndarray, offset: np.ndarray) -> np.ndarray:
-    """Exact inverse of `flatten` where the flattened value is positive; rows
-    clipped to zero come back as zero (the internal value there was at or
-    below the clipping point)."""
+    """Exact inverse of `flatten` wherever neither clip was active (internal
+    value positive and gain*F - offset positive); clipped entries come back
+    as zero."""
     F = np.where(flattened > 0, (flattened + offset[None, :]) / gain[None, :], 0.0)
-    return F * lam[:, None] / FLATTEN_SCALE
+    return np.clip(F, 0, None) * lam[:, None] / FLATTEN_SCALE
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +438,15 @@ class SignalResult:
     @property
     def flattened(self) -> np.ndarray:
         return self.trace
+
+    @property
+    def caller_trace(self) -> np.ndarray:
+        """The flattened trace with the flattening divisor multiplied back
+        (exactly: flattened * lambda / 0.60).  Keeps the channel gains, the
+        offsets that suppress small cross-talk bumps, and the clipping of the
+        .esd trace, but restores the internal amplitude course.  This is what
+        the calling stage is fed."""
+        return self.trace * (self.divisor / FLATTEN_SCALE)[:, None]
 
 
 def process(raw: np.ndarray, dye_order: str | None = None, meta: dict | None = None,
@@ -450,9 +482,10 @@ def process(raw: np.ndarray, dye_order: str | None = None, meta: dict | None = N
                         separated=sep, estimated=estimated, info=info)
 
 
-def process_rsd(path: str) -> tuple[SignalResult, dict]:
-    """Convenience: read an .rsd file and process it. Returns (result, meta)."""
+def process_rsd(path: str) -> tuple[SignalResult, dict, str | None]:
+    """Read an .rsd file and process it. Returns (result, meta, dye_order)."""
     from .rsd_io import read_rsd
     r = read_rsd(path)
     meta = read_meta(r.footer_raw)
-    return process(r.trace, None, meta), meta
+    order = dye_order_from_footer(r.footer_raw)
+    return process(r.trace, order, meta), meta, order
