@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy.special import erfc
+from scipy.stats import exponnorm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ctce  # noqa: E402
@@ -15,9 +15,7 @@ N = 4000
 
 def emg(x, mu, sigma, tau, area):
     """Exponentially modified Gaussian: sharp front, exponential tail."""
-    lam = 1.0 / tau
-    return area * lam / 2 * np.exp(lam / 2 * (2 * mu + lam * sigma ** 2 - 2 * x)) * \
-        erfc((mu + lam * sigma ** 2 - x) / (np.sqrt(2) * sigma))
+    return area * exponnorm.pdf(x, tau / sigma, loc=mu, scale=sigma)
 
 
 def gauss(x, mu, sigma, area):
@@ -139,3 +137,64 @@ def test_one_temperature_uses_shape_and_replicates(monkeypatch):
     assert duplex.asym >= ctce.DUPLEX_ASYM
     assert all(p.role != "melting" for p in best.peaks if p.asym < ctce.SSDNA_ASYM)
     assert res.fraction_sd and all(s < 0.01 for s in res.fraction_sd)   # identical replicates
+
+
+# ------------------------------------------------------------ species model
+def _species_well(k, p=0.15, rng=None):
+    """A well with Hom2 / Hom3 / Het4 / Het5 (each with its stutter), a
+    static ssDNA peak and the early peak, on a well-specific migration scale."""
+    rng = rng or np.random.default_rng(k)
+    x = np.arange(N, dtype=float)
+    anchor = 1850 + 12 * k
+    total = 4.0e5 * (1 + 0.3 * (k % 3))
+    shares = [(1 - p) ** 2, p ** 2, p * (1 - p), p * (1 - p)]
+    h2 = 1.31 * anchor * (1 + 0.004 * ((k % 5) - 2))
+    pos = [h2, h2 * 1.046, h2 * 1.095, h2 * 1.107]
+    y = gauss(x, anchor, 3.0, 2.0e5) + gauss(x, 1.226 * anchor, 4.0, 6.0e4)
+    for c, s in zip(pos, shares):
+        y += emg(x, c, 2.0, 4.0, 0.7 * s * total) + emg(x, c + 16, 2.0, 4.0, 0.3 * s * total)
+    y += rng.normal(0, 5, N)
+    rt = ctce.RunTrace(path=Path(f"x/PL_Run01/W{k:02d}.rsd"), run="PL_Run01", plate="PL",
+                       well=f"W{k:02d}", temperature=55.0, start="", channel=2, y=y)
+    rt.peaks = ctce.detect_peaks(y)
+    rt.anchor = ctce.anchor_scan(rt)
+    truth = [s * total for s in shares]
+    return rt, [int(round(c)) for c in pos], truth
+
+
+def test_species_are_found_as_a_plate_pattern_and_measured_as_blocks():
+    wells = [_species_well(k) for k in range(12)]
+    results = [ctce.WellResult(plate="PL", well=rt.well, runs=[rt], shifts=[], regimes=[],
+                               best=0, method="shape") for rt, _, _ in wells]
+    pattern = ctce.quantify_species(results)
+    assert pattern.r3 is not None and abs(pattern.r3 - 1.046) < 0.006
+    assert any(abs(s - 1.226) < 0.012 for s in pattern.static)       # ssDNA learnt as static
+    for res, (rt, pos, truth) in zip(results, wells):
+        assert res.method == "species"
+        assert res.species == ["Hom2", "Hom3", "Het4", "Het5"]
+        marked = {p.label: p.raw_pos for p in rt.peaks if p.label}
+        for name, c in zip(ctce.SPECIES_NAMES, pos):
+            assert abs(marked[name] - c) <= 4                         # the main peak, not the stutter
+        for a, t in zip(res.areas[:2], truth[:2]):
+            assert abs(a - t) / t < 0.05                              # block = main + stutter
+        het, het_true = sum(res.areas[2:]), sum(truth[2:])          # the two overlap: their sum
+        assert abs(het - het_true) / het_true < 0.1
+        assert abs(res.minor_fraction - 0.15) < 0.01
+
+
+def test_a_clipped_peak_is_measured_in_another_channel():
+    from types import SimpleNamespace
+    x = np.arange(N, dtype=float)
+    true = 300.0 + emg(x, 2400, 2.0, 4.0, 1.5e6) + emg(x, 2520, 2.0, 4.0, 6.0e4)
+    raw = np.column_stack([0.12 * true + 40, 0.02 * true + 30, np.minimum(true, 65535.0), 0.05 * true + 20])
+    rt = ctce.RunTrace(path=Path("x/PL_Run01/A01.rsd"), run="PL_Run01", plate="PL", well="A01",
+                       temperature=55.0, start="", channel=3,
+                       y=ctce.channel_trace(raw, "ACGT", 3))
+    rt._doc, rt._order = SimpleNamespace(acgt=raw), "ACGT"
+    assert true.max() > 65535                                         # the sample channel clips
+    y = ctce.quant_trace(rt)
+    assert rt._desat[0] == "A"                                        # the strongest clean channel
+    big = ctce.species_areas(y, [2400])[0]
+    assert abs(big - 1.5e6) / 1.5e6 < 0.03
+    clipped = ctce.species_areas(ctce.channel_trace(raw, "ACGT", 3, ctce.SPECIES_BASELINE), [2400])[0]
+    assert clipped < 0.8 * 1.5e6                                      # what clipping would have cost

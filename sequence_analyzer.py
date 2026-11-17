@@ -6291,6 +6291,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         tpl_var = tk.BooleanVar(value=True)
         tpl_chk = ttk.Checkbutton(top, text="Use my picked peaks as template", variable=tpl_var)
         tpl_chk.grid(row=2, column=1, columnspan=3, sticky="w", padx=6, pady=(4, 0))
+        species_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Measure Hom2 / Hom3 / heteroduplex blocks (plate pattern)",
+                        variable=species_var).grid(row=3, column=1, columnspan=4, sticky="w",
+                                                   padx=6, pady=(4, 0))
         info = ttk.Label(top, foreground="#555")
         info.grid(row=2, column=4, columnspan=2, sticky="w", padx=(12, 0))
 
@@ -6302,14 +6306,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         plate_var.trace_add("write", refresh_info)
         refresh_info()
 
-        cols = ("well", "temperatures", "method", "regimes", "measured_at", "n_peaks",
+        cols = ("well", "temperatures", "method", "regimes", "measured_at", "species",
                 "fractions", "fraction_sd", "minor_fraction", "shifts", "flags")
         heads = {"well": "well", "temperatures": "°C", "method": "method", "regimes": "peaks per run",
-                 "measured_at": "measured", "n_peaks": "n", "fractions": "fractions",
+                 "measured_at": "measured", "species": "species", "fractions": "fractions",
                  "fraction_sd": "± SD", "minor_fraction": "minor", "shifts": "shift (scans)",
                  "flags": "flags"}
         widths = {"well": 50, "temperatures": 80, "method": 70, "regimes": 150, "measured_at": 70,
-                  "n_peaks": 30, "fractions": 170, "fraction_sd": 120, "minor_fraction": 60,
+                  "species": 150, "fractions": 170, "fraction_sd": 120, "minor_fraction": 60,
                   "shifts": 90, "flags": 360}
         mid = ttk.Frame(win)
         mid.pack(fill=tk.BOTH, expand=True, padx=8)
@@ -6355,6 +6359,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                         print(f"ctce: {w}: {e}", file=sys.stderr)
             finally:
                 self._busy = False
+            if species_var.get() and results:
+                status.config(text="Learning the plate's species pattern…")
+                win.update()
+                ctce.quantify_species(results)
             ctce.flag_no_product(results)
             state["results"], state["folders"] = results, folders
             marks = {}
@@ -6366,7 +6374,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 s = r.summary()
                 tree.insert("", tk.END, iid=r.well, values=[s[c] for c in cols])
             how = {"template": "your picked peaks", "shape": "peak shape (one temperature)",
-                   "change": "the change between temperatures"}
+                   "change": "the change between temperatures",
+                   "species": "the plate's Hom2/Hom3/het pattern (blocks with stutter)"}
             methods = {r.method for r in results}
             status.config(text=f"{len(results)} wells — peaks of interest from "
                                + ", ".join(how.get(m, m) for m in sorted(methods))

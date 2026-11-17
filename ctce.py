@@ -34,7 +34,11 @@ temperatures (read from each .rsd, never assumed from the run number):
    added to its parent;
 6. fractions: each melting peak's share, and for four peaks (two
    homoduplexes, then two heteroduplexes, in migration order) the minor
-   variant fraction by mass action, p = (A_hom + A_het / 2) / A_total.
+   variant fraction by mass action, p = (A_hom + A_het / 2) / A_total;
+7. plate level (quantify_species): each species measured as a block (main
+   peak + Taq stutter) on a near-flat baseline, Hom2 / Hom3 / heteroduplexes
+   found as a pattern the plate learns in migration-time ratios, clipped
+   peaks rebuilt from another channel's crosstalk.
 
 Headless and free of Tk, so it can be scripted and tested.
 """
@@ -122,8 +126,9 @@ class WellResult:
     areas: List[float] = field(default_factory=list)       # melting peaks at the best run
     fractions: List[float] = field(default_factory=list)
     fraction_sd: List[float] = field(default_factory=list)  # over replicate runs (same temperature)
-    method: str = "change"              # change (temperatures) / shape (one temperature) / template
+    method: str = "change"              # change / shape / template / species
     minor_fraction: Optional[float] = None
+    species: List[str] = field(default_factory=list)       # names of the areas (species mode)
     flags: List[str] = field(default_factory=list)
 
     def summary(self) -> Dict:
@@ -136,6 +141,7 @@ class WellResult:
             "regimes": "/".join(self.regimes),
             "measured_at": "" if best is None else f"{best.temperature:g}",
             "n_peaks": len(self.areas),
+            "species": "/".join(self.species),
             "areas": "/".join(f"{a:.0f}" for a in self.areas),
             "fractions": "/".join(f"{f:.3f}" for f in self.fractions),
             "fraction_sd": "/".join(f"{s:.3f}" for s in self.fraction_sd),
@@ -606,6 +612,353 @@ def _run_areas(run: RunTrace, merge_satellites: bool) -> List[float]:
 
 
 # --------------------------------------------------------------------------- #
+# species: main peak + stutter, quantified as a block (plate level)
+# --------------------------------------------------------------------------- #
+# Each duplex species is a cluster: the main peak, often a shoulder, and its
+# Taq stutter about 15 scans later.  The species are found as a pattern the
+# plate teaches itself, in migration-time ratios (stable from capillary to
+# capillary, unlike scan offsets): Hom2 the largest species, Hom3 after
+# Hom2's cluster at a ratio the strong wells share, then up to two
+# heteroduplexes.  Peaks that sit at the same ratio to the early peak in most
+# wells, without a stutter, are static (ssDNA) and never a species.
+# Validated against hand-integrated areas of 010823 #19_20 (94 wells):
+# Hom2 and Hom3 areas within 2-3 % (median), minor fraction within 0.03 in
+# 85 % of the wells.
+SPECIES_BASELINE = 1601       # quantify on a near-flat floor (wide running minimum)
+SPECIES_WINDOW = (10, 30)     # a species block: 10 scans before its main peak, 30 after
+SPECIES_PROMINENCE = 10       # peaks: prominence >= 10 x the noise
+SPECIES_MIN_GAP = 40          # Hom3 lies beyond Hom2's own cluster (stutter, shoulders)
+SPECIES_MAX_R3 = 1.075        # ... and before 1.075 x Hom2's migration time
+SPECIES_R3_SIGMA = 0.015      # spread of Hom3 / Hom2 between capillaries
+SPECIES_HET_MIN = 25          # heteroduplex main peak >= 25 x the noise
+SPECIES_BAND = 0.06           # Hom2 / early peak within +-0.06 of the plate's typical value
+STATIC_SHARE = 0.6            # static: at one ratio to the early peak in >= 60 % of wells ...
+STATIC_CHANGE_SHARE = 0.25    # ... or seen static between temperatures in >= 25 % of them
+CLIP_LEVEL = 65000            # raw counts at or above this are clipped (16-bit ADC)
+SPECIES_NAMES = ("Hom2", "Hom3", "Het4", "Het5")
+
+
+@dataclass
+class SpeciesPattern:
+    """What a plate taught itself about where its species sit."""
+    static: List[float] = field(default_factory=list)   # static peaks / early peak
+    band: Optional[tuple] = None                        # Hom2 / early peak range
+    r3: Optional[float] = None                          # Hom3 / Hom2
+    temperature: Optional[float] = None
+
+
+def noise_level(y: np.ndarray) -> float:
+    """Robust noise of a trace (MAD of the first difference)."""
+    d = np.diff(np.asarray(y, float))
+    return max(float(1.4826 * np.median(np.abs(d)) / np.sqrt(2)), 1e-9)
+
+
+def quant_trace(rt: RunTrace) -> np.ndarray:
+    """The trace areas are measured on: the sample channel over a wide
+    baseline, with clipped stretches rebuilt from the strongest unclipped
+    channel (its crosstalk scaled by the gain fitted on the unclipped part of
+    the same well) -- measuring an out-of-scale peak in another channel."""
+    cached = getattr(rt, "_yq", None)
+    if cached is not None:
+        return cached
+    doc = getattr(rt, "_doc", None)
+    if doc is None:
+        rt._yq = rt.y
+        return rt.y
+    order = rt._order
+    raw = np.asarray(doc.acgt, float)
+    y = channel_trace(raw, order, rt.channel, SPECIES_BASELINE)
+    cs = "ACGT".index(order[rt.channel - 1])
+    clip = raw[:, cs] >= CLIP_LEVEL
+    rt._clipped = int(clip.sum())
+    if clip.any():
+        best = None
+        for k in range(4):
+            if k == cs or (raw[:, k] >= CLIP_LEVEL).any() or "ACGT"[k] not in order:
+                continue
+            yo = channel_trace(raw, order, order.index("ACGT"[k]) + 1, SPECIES_BASELINE)
+            good = (~clip) & (y > 0.03 * CLIP_LEVEL) & (yo > 0)
+            if good.sum() < 10:
+                continue
+            corr = float(np.corrcoef(y[good], yo[good])[0, 1])
+            if corr <= 0.9:              # not the same dye's crosstalk
+                continue
+            gain = float((y[good] * yo[good]).sum() / (yo[good] ** 2).sum())
+            if best is None or gain < best[0]:      # the strongest copy: least noise
+                best = (gain, yo, "ACGT"[k])
+        if best is not None:
+            from scipy.ndimage import binary_dilation
+            zone = binary_dilation(clip, iterations=4)
+            y = y.copy()
+            y[zone] = np.maximum(y[zone], best[0] * best[1][zone])
+            rt._desat = (best[2], best[0])
+    rt._yq = y
+    return y
+
+
+def _species_peaks(y: np.ndarray, anchor: float, nz: float) -> List[int]:
+    idx, _ = find_peaks(y, prominence=SPECIES_PROMINENCE * nz, distance=3)
+    return [int(i) for i in idx if i > anchor * 1.05]
+
+
+def _foot(y: np.ndarray, c: int) -> float:
+    lo, hi = SPECIES_WINDOW
+    return float(np.clip(y[max(0, c - lo):c + hi + 1], 0, None).sum())
+
+
+def _lead(idx: Sequence[int], y: np.ndarray, c: int) -> int:
+    """The first big peak of the cluster that ends at *c* (a species' main
+    peak can be lower than its shoulder or stutter)."""
+    return min([j for j in idx if c - 25 <= j <= c and y[j] > 0.4 * y[c]], default=c)
+
+
+def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern] = None,
+                 static_scans: Sequence[float] = ()) -> Optional[List[int]]:
+    """Main-peak scans of [Hom2, Hom3, Het4?, Het5?] in one trace, or None.
+    *static_scans*: peaks seen not to move between temperatures -- never a
+    species."""
+    pattern = pattern or SpeciesPattern()
+    nz = noise_level(y)
+    idx = [j for j in _species_peaks(y, anchor, nz) if j > anchor * 1.1]
+
+    def allowed(c):
+        if any(abs(c - s) <= 4 for s in static_scans):
+            return False
+        r = c / anchor
+        if any(abs(r - s) <= 0.012 for s in pattern.static):
+            return False
+        return pattern.band is None or pattern.band[0] <= r <= pattern.band[1]
+    h2 = None
+    for c in sorted(idx, key=lambda j: -_foot(y, j)):
+        if not allowed(c):
+            continue
+        lead = _lead(idx, y, c)
+        if any(lead + SPECIES_MIN_GAP <= j <= lead * SPECIES_MAX_R3 and y[j] < y[c] for j in idx):
+            h2 = lead
+            break
+    if h2 is None:
+        return None
+    c3 = [j for j in idx if h2 + SPECIES_MIN_GAP <= j <= h2 * SPECIES_MAX_R3]
+    if pattern.r3 is None:
+        score = lambda j: _foot(y, j)                                   # noqa: E731
+    else:
+        score = lambda j: _foot(y, j) * np.exp(                         # noqa: E731
+            -0.5 * ((j / h2 - pattern.r3) / SPECIES_R3_SIGMA) ** 2)
+    h3 = max(c3, key=score)
+    lead3 = _lead(idx, y, h3)
+    if lead3 >= h2 + SPECIES_MIN_GAP:
+        h3 = lead3
+    hets: List[int] = []
+    het_end = h2 * (1 + 4 * (h3 / h2 - 1))
+    c4 = [j for j in idx if h3 + SPECIES_MIN_GAP <= j <= het_end and y[j] > SPECIES_HET_MIN * nz]
+    for j in sorted(c4, key=lambda j: -_foot(y, j)):
+        j = _lead(idx, y, j)
+        if all(abs(j - k) > 18 for k in hets):
+            hets.append(j)
+        if len(hets) == 2:
+            break
+    return [h2, h3] + sorted(hets)
+
+
+def species_areas(y: np.ndarray, mains: Sequence[int]) -> List[float]:
+    """Block area of each species: from 10 scans before its main peak to 30
+    after (taking in the stutter).  Neighbours whose blocks would overlap
+    share one boundary: the valley after the first one's stutter."""
+    lo_w, hi_w = SPECIES_WINDOW
+    bounds = [[c - lo_w, c + hi_w] for c in mains]
+    for k in range(len(mains) - 1):
+        c, n = mains[k], mains[k + 1]
+        if n - c >= lo_w + hi_w or n - c < 6:
+            continue
+        a = c + min(20, int(0.6 * (n - c)))
+        v = int(a + np.argmin(y[a:n - 1])) if n - 1 > a else (c + n) // 2
+        bounds[k][1], bounds[k + 1][0] = v, v + 1
+    return [float(np.clip(y[max(0, lo):hi + 1], 0, None).sum()) for lo, hi in bounds]
+
+
+def species_minor_fraction(areas: Sequence[float]) -> Optional[float]:
+    """Mass action over [Hom2, Hom3, Het...]: p = (A_Hom3 + A_het / 2) / A_total."""
+    a = list(areas) + [0.0] * (4 - len(areas))
+    total = sum(a)
+    if total <= 0:
+        return None
+    p = (a[1] + (a[2] + a[3]) / 2.0) / total
+    return min(p, 1.0 - p)
+
+
+def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
+    """Teach the plate its pattern from one run per well (same temperature):
+    the static peaks, Hom2's band, and Hom3's ratio to Hom2."""
+    traces = [(r, quant_trace(r)) for r in runs if r.anchor]
+    pat = SpeciesPattern(temperature=next((r.temperature for r in runs), None))
+    if not traces:
+        return pat
+    # static: same ratio to the early peak in most wells, no stutter, not the largest species
+    bins = np.arange(1.05, 1.6, 0.004)
+    hits = np.zeros(len(bins))
+    for r, y in traces:
+        nz = noise_level(y)
+        ip = _species_peaks(y, r.anchor, nz)
+        if not ip:
+            continue
+        top = max(_foot(y, i) for i in ip)
+        ratios = np.array([i / r.anchor for i in ip
+                           if y[i] > 300 * nz and _foot(y, i) < 0.5 * top
+                           and not any(8 <= j - i <= 24 and 0.15 * y[i] < y[j] < y[i] for j in ip)
+                           and not any(8 <= i - j <= 24 and y[j] > y[i] for j in ip)])
+        if len(ratios):
+            hits += np.array([(np.abs(ratios - c) <= 0.008).any() for c in bins])
+    for k in np.argsort(-hits):
+        if hits[k] < STATIC_SHARE * len(traces):
+            break
+        if all(abs(bins[k] - s) > 0.02 for s in pat.static):
+            pat.static.append(round(float(bins[k]), 4))
+    # ... and wherever the temperature change showed static peaks in a good
+    # share of the wells (they are only paired where their heights agree)
+    moved = [r for r, _y in traces if getattr(r, "_static_scans", None) is not None]
+    if moved:
+        hs = np.zeros(len(bins))
+        for r in moved:
+            ratios = np.array([s / r.anchor for s in _static_scans(r) if s > r.anchor * 1.05])
+            if len(ratios):
+                hs += np.array([(np.abs(ratios - c) <= 0.006).any() for c in bins])
+        for k in np.argsort(-hs):
+            if hs[k] < STATIC_CHANGE_SHARE * len(moved):
+                break
+            if all(abs(bins[k] - s) > 0.02 for s in pat.static):
+                pat.static.append(round(float(bins[k]), 4))
+    # Hom2 band and Hom3 ratio from the strongest third of the wells
+    first = []
+    for r, y in traces:
+        sp = find_species(y, r.anchor, SpeciesPattern(static=pat.static), _static_scans(r))
+        if sp:
+            first.append((_foot(y, sp[0]), sp[0], r, y))
+    if not first:
+        return pat
+    first.sort(key=lambda t: -t[0])
+    strong = first[:max(5, len(first) // 3)]
+    mid = float(np.median([h2 / r.anchor for _f, h2, r, _y in strong]))
+    pat.band = (mid - SPECIES_BAND, mid + SPECIES_BAND)
+    rb = np.arange(1.01, 1.08, 0.002)
+    rh = np.zeros(len(rb))
+    for _f, h2, r, y in strong:
+        ip = _species_peaks(y, r.anchor, noise_level(y))
+        rr = np.array([j / h2 for j in ip if h2 + SPECIES_MIN_GAP <= j <= h2 * 1.08
+                       and y[j] > 0.03 * y[h2]])
+        if len(rr):
+            rh += np.array([(np.abs(rr - c) <= 0.004).any() for c in rb])
+    if rh.any():
+        pat.r3 = round(float(rb[int(np.argmax(np.convolve(rh, np.ones(5) / 5, mode="same")))]), 4)
+    return pat
+
+
+def _static_scans(run: RunTrace) -> List[float]:
+    """Scans of the peaks the temperature change showed to be static."""
+    return list(getattr(run, "_static_scans", ()) or ())
+
+
+def _label_species(run: RunTrace, mains: Sequence[int]) -> None:
+    """Mark the species on the run's peaks for display: the main peak red and
+    labelled, the rest of its block as its satellites."""
+    for p in run.peaks:
+        if p.role in ("melting", "satellite"):
+            p.role, p.parent = "other", None
+    lo_w, hi_w = SPECIES_WINDOW
+    for name, c in zip(SPECIES_NAMES, mains):
+        near = [k for k, p in enumerate(run.peaks) if abs(p.raw_pos - c) <= 3]
+        if near:
+            k = min(near, key=lambda k: abs(run.peaks[k].raw_pos - c))
+        else:                                   # found on the quantification trace only
+            run.peaks.append(Peak(pos=int(round(run.scale * c + run.offset)), height=float(run.y[c]),
+                                  left=c - lo_w, right=c + hi_w, area=0.0, front=0, tail=0,
+                                  raw_pos=c))
+            k = len(run.peaks) - 1
+        run.peaks[k].role, run.peaks[k].label = "melting", name
+        for j, p in enumerate(run.peaks):
+            if j != k and c + 3 < p.raw_pos <= c + hi_w and p.role not in ("anchor", "melting"):
+                p.role, p.parent = "satellite", k
+
+
+def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
+    """Plate level: find Hom2 / Hom3 / heteroduplexes in every well as a
+    pattern the plate teaches itself, and measure them as blocks (main peak
+    + stutter).  Replaces the areas, fractions and minor fraction of each
+    well not guided by a template.  Measured at the temperature where the
+    most wells resolve all four species (ties: the warmer), replicate runs
+    there averaged; peaks the temperature change showed to be static are
+    never a species."""
+    todo = [r for r in results if r.method != "template" and r.runs]
+    if not todo:
+        return None
+    for res in todo:                     # what the temperatures showed to be static
+        if res.method == "change":
+            for run in res.runs:
+                run._static_scans = [p.raw_pos for p in run.peaks if p.role == "static"]
+    temps = sorted({round(x.temperature, 1) for r in todo for x in r.runs if x.temperature is not None})
+
+    def runs_at(res, t):
+        if t is None:
+            return list(res.runs)
+        return [x for x in res.runs if x.temperature is not None
+                and abs(x.temperature - t) <= SAME_TEMPERATURE]
+    # the measuring temperature: where the most wells resolve all four species
+    best_t, best_n, pattern = None, -1, SpeciesPattern()
+    for t in (temps or [None]):
+        firsts = [rr[0] for rr in (runs_at(r, t) for r in todo) if rr]
+        pat = learn_species_pattern(firsts)
+        n = sum(1 for x in firsts if x.anchor and len(
+            find_species(quant_trace(x), x.anchor, pat, _static_scans(x)) or []) == 4)
+        if n >= best_n:                  # ties: the warmer run
+            best_t, best_n, pattern = t, n, pat
+    t_meas = best_t
+    pattern.temperature = t_meas
+
+    for res in todo:
+        reps = [x for x in runs_at(res, t_meas) if x.anchor]
+        found = []
+        for run in reps:
+            y = quant_trace(run)
+            mains = find_species(y, run.anchor, pattern, _static_scans(run))
+            if mains:
+                found.append((run, mains, species_areas(y, mains)))
+        res.flags = [f for f in res.flags if not f.startswith(("no melting", "satellite"))
+                     and "satellite peak(s)" not in f]
+        if not found:
+            res.flags.append("species: Hom2/Hom3 not found")
+            continue
+        run, mains, areas = found[0]
+        _label_species(run, mains)
+        for x, m, _a in found:
+            k = res.runs.index(x)
+            if k < len(res.regimes):
+                res.regimes[k] = f"{len(m)} species"
+        res.flags = [f.replace("one temperature: peaks classified by shape", "one temperature")
+                     for f in res.flags]
+        res.best = res.runs.index(run)
+        res.method = "species"
+        res.species = list(SPECIES_NAMES[:len(mains)])
+        res.areas = areas
+        total = sum(areas)
+        res.fractions = [a / total for a in areas] if total > 0 else []
+        res.fraction_sd = []
+        res.minor_fraction = species_minor_fraction(areas)
+        same = [f for f in found if len(f[1]) == len(mains)]
+        if len(same) > 1:
+            fr = np.asarray([[a / sum(f[2]) for a in f[2]] for f in same])
+            res.fractions = [float(x) for x in fr.mean(axis=0)]
+            res.fraction_sd = [float(x) for x in fr.std(axis=0, ddof=1)]
+            mfs = [species_minor_fraction(f[2]) for f in same]
+            res.minor_fraction = float(np.mean(mfs))
+        clipped = [x for x, *_ in found if getattr(x, "_desat", None)]
+        if clipped:
+            ch, gain = clipped[0]._desat
+            res.flags.append(f"clipped peak measured in channel {ch} (x{gain:.1f})")
+        elif any(getattr(x, "_clipped", 0) for x, *_ in found):
+            res.flags.append("clipped peak (no clean channel to measure it in)")
+    return pattern
+
+
+# --------------------------------------------------------------------------- #
 # a plate
 # --------------------------------------------------------------------------- #
 def flag_no_product(results: Sequence[WellResult]) -> None:
@@ -644,13 +997,18 @@ def group_runs(folders: Sequence) -> Dict[str, List[Path]]:
 def analyse_plate(run_folders: Sequence, channel: Optional[int] = None,
                   is_channel: Optional[int] = None, merge_satellites: bool = True,
                   wells: Optional[Sequence[str]] = None,
-                  template: Optional[Template] = None) -> List[WellResult]:
-    """Every well present in all the given runs of one plate."""
+                  template: Optional[Template] = None,
+                  species: bool = True) -> List[WellResult]:
+    """Every well present in all the given runs of one plate.  With
+    *species* (the default), wells not guided by a template are quantified
+    as Hom2 / Hom3 / heteroduplex blocks learnt over the plate."""
     run_folders = [Path(f) for f in run_folders]
     names = plate_wells(run_folders)
     if wells:
         names = [w for w in names if w in set(wells)]
     results = [analyse_well([f / f"{w}.rsd" for f in run_folders], channel, is_channel,
                             merge_satellites, template) for w in names]
+    if species:
+        quantify_species(results)
     flag_no_product(results)
     return results

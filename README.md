@@ -40,7 +40,7 @@ The full user manual, with quick starts for each job, is in the app:
 | Mark library — durable internal-standard marks, engine calls and fitted standards (`library/`) | Yes — see [MARK_LIBRARY.md](MARK_LIBRARY.md) |
 | Scoring & QC — genotype calls + confidence, per-well read QC, HTML report | Yes — `scorer.py` (headless CLI `limoncello-scorer`) |
 | Batch auto-genotyping — find the internal-standard quartet and call every well | Yes — Auto genotyping menu |
-| CTCE analysis — peaks of interest from how they move between run temperatures (or by shape at one temperature, or from picked peaks), areas and fractions | Yes — Auto genotyping → CTCE analysis… (`ctce.py`) |
+| CTCE analysis — peaks of interest from how they move between run temperatures (or by shape at one temperature, or from picked peaks); Hom2/Hom3/heteroduplex blocks (main peak + stutter) found as a plate-learnt pattern, clipped peaks measured in another channel, minor-variant fraction by mass action | Yes — Auto genotyping → CTCE analysis… (`ctce.py`) |
 | Fragment-length sizing — size PCR/ssDNA peaks against a ladder (bp), user-definable ladders | Yes — `scorer.py size` |
 
 ## Requirements
@@ -469,6 +469,46 @@ Windows paths survive, and fields such as `Comment` may span several lines.
 Most `OY/` runs on this system have no `Text/` export — only the `mt_nucl`
 runs do. When none is found, the block says so explicitly rather than showing
 empty values; re-export the run from the instrument software to populate it.
+
+## CTCE analysis (`ctce.py`)
+
+Cycling temperature CE separates the duplexes of a fragment by how they melt
+(Ekstrøm, Bjørheim & Thilly, BMC Genetics 2007). **Auto genotyping → CTCE
+analysis…** works on the runs of one plate (folders that differ only by
+`RunNN`), in ONE channel, the sample channel:
+
+1. **What melts** — between runs at different temperatures (read from each
+   `.rsd`, so a hotter run done first still shifts the right way) the duplex
+   peaks move later, each by its own amount; ssDNA and primers hold still.
+   At one temperature the shape decides (a duplex has a sharp front and a
+   tail), and picked peaks can serve as a template.
+2. **Species blocks** — each duplex species is its main peak + shoulder +
+   Taq stutter (~15 scans later), measured as one block (10 scans before the
+   main peak to 30 after) on a near-flat baseline. The plate learns its own
+   pattern as migration-time ratios: Hom2 the largest species, Hom3 beyond
+   Hom2's cluster at the ratio the strong wells share, then up to two
+   heteroduplexes. Peaks seen static between temperatures, or at a fixed
+   ratio to the early peak in most wells without a stutter (ssDNA), are never
+   a species. The measuring temperature is the one where most wells resolve
+   all four.
+3. **Clipped peaks** — where the sample channel hits the 16-bit limit, the
+   clipped stretch is rebuilt from the strongest other channel carrying the
+   same dye's crosstalk, scaled by the gain fitted on the unclipped part of
+   the same well (flagged in the table).
+4. **Minor-variant fraction** by mass action, p = (A_Hom3 + ½ A_het) / A_total,
+   with ± SD over reruns at the measuring temperature.
+
+Checked against hand-integrated areas (mtDNA #19_20, 96 wells, 55 °C): Hom2
+and Hom3 areas within 1–3 % (median), minor fraction within 0.03 of the hand
+value in 85 % of wells (mean |error| 0.020). On fragment #8 the agreement is
+weaker (mean |error| ≈ 0.05), so check a new fragment against wells you have
+integrated yourself.
+
+```python
+import ctce
+for res in ctce.analyse_plate(["plate_Run01", "plate_Run02"]):
+    print(res.summary())          # species, areas, fractions, minor_fraction, flags
+```
 
 ## Scoring, QC and reports (`scorer.py`)
 
