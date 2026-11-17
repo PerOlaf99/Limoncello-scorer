@@ -1,4 +1,4 @@
-"""Interface contract of the clean-room Cimarron 3.12 clone (cimarron_clone.call)."""
+"""Interface contract of the clean-room Cimarron 3.12 clone (cimarron_clone)."""
 from pathlib import Path
 
 import numpy as np
@@ -9,11 +9,15 @@ from cimarron_basecaller.rsd_io import read_rsd, to_acgt_trace
 M13 = Path(__file__).resolve().parent.parent / "example_data" / "M13"
 
 
-def _trace(name="A01.rsd"):
+def _path(name="A01.rsd"):
     path = M13 / name
     if not path.exists():
         pytest.skip(f"example_data/M13/{name} missing")
-    return to_acgt_trace(read_rsd(str(path)), base_order="TGCA")
+    return path
+
+
+def _trace(name="A01.rsd"):
+    return to_acgt_trace(read_rsd(str(_path(name))), base_order="TGCA")
 
 
 def test_call_returns_sequence_and_int_positions():
@@ -21,7 +25,9 @@ def test_call_returns_sequence_and_int_positions():
     trace, order = _trace()
     seq, pos = call(trace, order)
     assert isinstance(seq, str) and len(seq) > 300
-    assert set(seq) <= set(order)
+    # Cimarron calls N where two channels compete; everything else is a base
+    assert set(seq) <= set(order) | {"N"}
+    assert seq.count("N") < 0.05 * len(seq)
     pos = np.asarray(pos)
     assert pos.shape == (len(seq),)
     assert np.issubdtype(pos.dtype, np.integer)
@@ -35,6 +41,17 @@ def test_call_respects_base_order_alphabet():
     seq_lower, pos_lower = call(trace, "acgt")
     assert seq_lower == seq_acgt.lower()
     assert np.array_equal(pos_acgt, pos_lower)
+
+
+def test_call_is_independent_of_column_order():
+    """The same raw data given in another column order (with the matching
+    base_order) gives the same calls."""
+    from cimarron_basecaller.cimarron_clone import call
+    trace, order = _trace()
+    perm = [3, 1, 0, 2]
+    seq1, pos1 = call(trace, order)
+    seq2, pos2 = call(trace[:, perm], "".join(order[i] for i in perm))
+    assert seq1 == seq2 and np.array_equal(pos1, pos2)
 
 
 def test_call_is_deterministic():
@@ -55,13 +72,17 @@ def test_call_on_flat_trace_returns_no_bases():
     assert seq == "" and len(pos) == 0
 
 
-def test_shared_signal_path_matches_track_bases_golden():
-    """The clone re-implements the GOLDEN signal path; pin it to track_bases."""
-    import configs
-    from cimarron_basecaller import track_bases
-    from cimarron_basecaller.cimarron_clone import golden_equivalent
+def test_call_rsd_matches_call_and_reports_everything():
+    from cimarron_basecaller.cimarron_clone import call, call_rsd
+    res = call_rsd(str(_path()))
     trace, order = _trace()
-    seq, _q, bands = track_bases(trace, base_order=order, **configs.GOLDEN)
-    seq2, bands2 = golden_equivalent(trace, order)
-    assert seq == seq2
-    assert [b.position for b in bands] == [b.position for b in bands2]
+    seq, pos = call(trace, order)
+    assert res.dye_order == "TGCA"
+    assert res.sequence == seq and np.array_equal(res.positions, pos)
+    assert len(res.qualities) == len(seq)
+    assert 0 <= res.good_start <= res.good_end < len(seq)
+    sig = res.signal
+    assert sig is not None and sig.estimated is False
+    assert sig.trace.shape == sig.internal.shape == (sig.end_tp - sig.start_tp, 4)
+    # positions are in Cimarron's PEAK POSITIONS convention: raw scan + 2
+    assert sig.start_tp + 1 <= pos[0] and pos[-1] <= sig.end_tp + 1
