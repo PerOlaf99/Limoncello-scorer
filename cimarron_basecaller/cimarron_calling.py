@@ -119,7 +119,10 @@ SUBGAP_OFFSET = 0.6
 _TRI = [(-0.100, 0.010, 0.125), (0.010, 0.125, 0.250), (0.125, 0.250, 0.375), (0.250, 0.375, 0.500),
         (0.375, 0.500, 0.625), (0.500, 0.625, 0.750), (0.625, 0.750, 0.875), (0.750, 0.875, 0.990),
         (0.875, 0.990, 1.105)]
-QUAL_DEFUZZ = Defuzzer([[(a, 0), (b, 1), (c, 0)] for a, b, c in _TRI], 0.0, 1.0, n=10001)
+# SPEC_calling §13.3 says "centroid over the domain 0...1", but its own
+# reference values (rule 9 alone = 99.0, rule 8 alone = 87.167) are the
+# centroids of the untruncated triangles, so the domain spans the triangles.
+QUAL_DEFUZZ = Defuzzer([[(a, 0), (b, 1), (c, 0)] for a, b, c in _TRI], -0.100, 1.105, n=12051)
 
 N_FRACTION = 0.80
 
@@ -500,6 +503,7 @@ class WindowResult:
     letter: np.ndarray  # channel index, -1 = N
     q: np.ndarray
     sp40: float
+    ins: np.ndarray = None
 
 
 def run_window(E, dom, X, B, trace, a, b, g_idx, c_idx, prev_sp):
@@ -534,7 +538,7 @@ def run_window(E, dom, X, B, trace, a, b, g_idx, c_idx, prev_sp):
     ev = E[gp]
     nN = np.sum(v >= N_FRACTION * ev[:, None], axis=1)
     letter = np.where(nN >= 2, -1, dom[gp])
-    return WindowResult(gp, letter, q, sp)
+    return WindowResult(gp, letter, q, sp, bands.ins.copy())
 
 
 def window_starts(m):
@@ -555,14 +559,14 @@ JOIN_ORDER = (4, 5, 3, 6, 2, 7, 1, 8, 0, 9)
 
 
 def stitch(windows):
-    acc_p = np.zeros(0, int); acc_l = np.zeros(0, int); acc_q = np.zeros(0)
+    acc_p = np.zeros(0, int); acc_l = np.zeros(0, int); acc_q = np.zeros(0); acc_i = np.zeros(0, bool)
     prev = None
     n_fallback = 0
     for w in windows:
         if w is None or len(w.p) == 0:
             continue
         if prev is None:
-            acc_p, acc_l, acc_q = w.p.copy(), w.letter.copy(), w.q.copy()
+            acc_p, acc_l, acc_q, acc_i = w.p.copy(), w.letter.copy(), w.q.copy(), w.ins.copy()
             prev = w
             continue
         best = None
@@ -582,6 +586,7 @@ def stitch(windows):
             acc_p = np.concatenate([acc_p[cut], w.p[k:]])
             acc_l = np.concatenate([acc_l[cut], w.letter[k:]])
             acc_q = np.concatenate([acc_q[cut], w.q[k:]])
+            acc_i = np.concatenate([acc_i[cut], w.ins[k:]])
         else:
             n_fallback += 1
             last = acc_p[-1] if len(acc_p) else -10 ** 9
@@ -589,8 +594,9 @@ def stitch(windows):
             acc_p = np.concatenate([acc_p, w.p[sel]])
             acc_l = np.concatenate([acc_l, w.letter[sel]])
             acc_q = np.concatenate([acc_q, w.q[sel]])
+            acc_i = np.concatenate([acc_i, w.ins[sel]])
         prev = w
-    return acc_p, acc_l, acc_q, n_fallback
+    return acc_p, acc_l, acc_q, acc_i, n_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -705,13 +711,16 @@ def call_trace(trace, dye_order, start_tp, flattened=False, clip=True, scale_to=
         if w is not None:
             prev_sp = w.sp40
         wins.append(w)
-    p, let, q, nfb = stitch(wins)
+    p, let, q, ins, nfb = stitch(wins)
     keep = p <= (m - 1) - END_MARGIN
-    p, let, q = p[keep], let[keep], q[keep]
+    # a join can leave a band at or before the last kept one: keep positions strictly increasing
+    if len(p):
+        keep &= p > np.concatenate([[-1], np.maximum.accumulate(p)[:-1]])
+    p, let, q, ins = p[keep], let[keep], q[keep], ins[keep]
     seq = "".join("N" if c < 0 else dye_order[c] for c in let)
     gs, ge = good_limits(q)
     return CallResult(seq, (p + start_tp + 1).astype(int), q, gs, ge,
-                      info=dict(join_fallbacks=nfb, windows=len(wins)))
+                      info=dict(join_fallbacks=nfb, windows=len(wins), inserted=ins))
 
 
 def call_processed(trace, dye_order, start_tp, meta=None, flattened=False):
