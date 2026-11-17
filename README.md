@@ -172,7 +172,9 @@ Things to know:
   scans.
 - The shared zoom, scroll bars and mouse wheel move all graphs together,
   each keeping its own offset.
-- Alignments last for the session (they are not saved to the library).
+- Alignments are **saved in the mark library** per run and well (field
+  `align`, see [MARK_LIBRARY.md](MARK_LIBRARY.md)) and come back when the
+  plate is opened again; a reset removes them.
 
 ## Keyboard and mouse
 

@@ -214,6 +214,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # 'splash' window with a drawn title bar lost them on Linux and was
         # ignored on Windows/macOS, which then showed two title bars.)
         self.geometry("1440x920")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._zoomed = False
         self._pre_zoom = ""
         self._busy = False
@@ -413,6 +414,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
             self._zoomed = True
 
+    def _on_close(self):
+        """Write anything still waiting (batched alignment saves) and quit."""
+        try:
+            if getattr(self, "_align_save_job", None) is not None:
+                self.after_cancel(self._align_save_job)
+                self._flush_alignment()
+        except Exception:                                  # noqa: BLE001
+            pass
+        self.destroy()
+
     def _popup_menu(self, menu, mb):
         """Open a top menu bar dropdown (stock Menubutton posting fails here)."""
         try:
@@ -445,7 +456,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         file_m.add_command(label="Save settings JSON…", command=self.save_settings)
         file_m.add_command(label="Load settings JSON…", command=self.load_settings)
         file_m.add_separator()
-        file_m.add_command(label="Exit", command=self.destroy)
+        file_m.add_command(label="Exit", command=self._on_close)
 
         view_m = tk.Menu(self, tearoff=0)
         for mode, label in [
@@ -1810,6 +1821,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 doc.dye_order = order
                 doc.dye_order_source = src
                 self.docs[key] = doc
+                self._restore_alignment(path)
                 if self.status_var.get().startswith("Loading "):
                     self.status_var.set(prev_status)
             except RuntimeError as e:
@@ -5485,6 +5497,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _on_plot_release(self, event):
         d, self._plot_drag = self._plot_drag, None
         if d is not None and d["kind"] == "align":
+            self._persist_alignment([d["key"]])
             a, b = self._align.get(d["key"], (1.0, 0.0))
             self.status_var.set(f"{Path(d['key']).parent.name}/{Path(d['key']).stem}: "
                                 f"shifted {b:+.0f} scans  (Alt+Home resets this graph)")
@@ -5584,6 +5597,64 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._refresh_align_titles()
         self._apply_zoom()
 
+    def _restore_alignment(self, path):
+        """Give a freshly loaded trace back the alignment saved for its well
+        (library/<run>.json, key "align": [a, b]).  A session change wins."""
+        key = self._akey(path)
+        if key in self._align:
+            return
+        try:
+            entry = (self._library_wells(Path(path).parent.name) or {}).get(Path(path).stem) or {}
+            a, b = entry.get("align") or (1.0, 0.0)
+            a, b = float(a), float(b)
+        except Exception:                                  # noqa: BLE001
+            return
+        if a > 0 and (abs(a - 1.0) > 1e-9 or abs(b) > 1e-9):
+            self._align[key] = (a, b)
+
+    def _persist_alignment(self, keys):
+        """Write the alignments of *keys* to the library -- batched, so a run
+        of Alt-nudges or an auto-align is one write per run, not one per step."""
+        pending = getattr(self, "_align_pending", None)
+        if pending is None:
+            pending = self._align_pending = set()
+        pending.update(k for k in keys if k)
+        job = getattr(self, "_align_save_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        try:
+            self._align_save_job = self.after(500, self._flush_alignment)
+        except tk.TclError:
+            self._flush_alignment()
+
+    def _flush_alignment(self):
+        self._align_save_job = None
+        pending, self._align_pending = getattr(self, "_align_pending", set()) or set(), set()
+        by_run = {}
+        for key in pending:
+            by_run.setdefault(Path(key).parent.name, []).append(key)
+        for run, keys in by_run.items():
+            try:
+                wells = self._library_wells(run)
+                for key in keys:
+                    well = Path(key).stem
+                    entry = dict(wells.get(well) or {})
+                    ab = self._align.get(key)
+                    if ab is None:
+                        entry.pop("align", None)
+                    else:
+                        entry["align"] = [round(ab[0], 8), round(ab[1], 4)]
+                    if entry:
+                        wells[well] = entry
+                    else:
+                        wells.pop(well, None)
+                mark_library.save_run(run, wells)
+            except Exception as exc:                      # noqa: BLE001
+                print(f"library: could not save alignment for {run}: {exc}", file=sys.stderr)
+
     def _refresh_align_titles(self):
         for i, (artist, base) in enumerate(getattr(self, "_axes_titles", []) or []):
             a, b = self._ab(i)
@@ -5606,6 +5677,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return "break"
         a, b = self._align.get(keys[i], (1.0, 0.0))
         self._set_alignment(keys[i], (a, b + scans))
+        self._persist_alignment([keys[i]])
         return "break"
 
     def _reset_alignment(self, which="hover"):
@@ -5614,12 +5686,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
             for k in list(self._align):
                 if k in keys:
                     self._align.pop(k)
+            self._persist_alignment(keys)
             self.redraw()
             self.status_var.set("Alignment reset for the graphs on screen.")
             return "break"
         i = self._hover_idx
         if i is not None and i < len(self._axes_keys) and self._axes_keys[i]:
             self._set_alignment(self._axes_keys[i], (1.0, 0.0), redraw=True)
+            self._persist_alignment([self._axes_keys[i]])
         return "break"
 
     def _envelope(self, i, grid, own_runs_only=True, run=None):
@@ -5695,6 +5769,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                         a, b = self._align.get(k, (1.0, 0.0))
                         self._align[k] = (a, b + lag * step * self._ab(i)[0])
                         moved.append(f"{other.parent.name[-5:]}/{other.stem} {lag * step:+.0f}")
+        self._persist_alignment([k for k in self._axes_keys if k] + [
+            self._akey(p) for g in (self._view_groups(self._graph_count())
+                                    if self.overlay_runs.get() else []) for p in g])
         self.redraw()
         self.status_var.set("Aligned on the scans in view: " + (", ".join(moved) or "already aligned"))
 
@@ -5737,6 +5814,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 m, c = 1.0, float(np.median(r - s))
             self._align[k] = (a0 * m, a0 * c + b0)
             done.append(Path(k).stem)
+        self._persist_alignment(keys)
         self.redraw()
         msg = f"Aligned on the internal standard of {Path(ref).stem}: {', '.join(done) or 'nothing to move'}"
         if skipped:

@@ -137,7 +137,7 @@ Slide one graph left or right so a feature lines up with the same feature in the
         offset, plus stretch when 3 or more bands agree
   Reset this graph (Alt+Home) / Reset all alignments
 ```
-• A shifted graph says so in its label, e.g. “⇄ +23 scans” (and “×1.004” when stretched). The tick numbers and the Scans boxes are the bottom graph's own scans. Alignments last for the session."""),
+• A shifted graph says so in its label, e.g. “⇄ +23 scans” (and “×1.004” when stretched). The tick numbers and the Scans boxes are the bottom graph's own scans. Alignments are saved in the library/ folder per run and well and come back when the plate is opened again; a reset removes them."""),
 
     ("View menu", """\
 Plot styles

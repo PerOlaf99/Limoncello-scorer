@@ -350,3 +350,39 @@ def test_shift_click_does_not_pick(app):
     _event(app, "button_press_event", ax, 3000, button=1, key="shift")
     _event(app, "button_release_event", ax, 3000, button=1, key="shift")
     assert sum(len(pk.records) for pk in app._gen_pickers.values()) == before
+
+
+def test_alignment_is_saved_in_the_library_and_restored(app, tmp_path):
+    import mark_library
+    _two_runs_of_a01(app)
+    key1 = app._axes_keys[1]
+    app._hover_idx = 1
+    app._nudge(10)
+    app._nudge(5)
+    app._flush_alignment()                    # the batched save, without waiting
+    wells = mark_library.load_run("PLATE_X_Run02")
+    assert wells["A01"]["align"] == [1.0, 15.0]
+    # a fresh session on the same library finds it again
+    app._align.clear()
+    app.docs.clear()
+    app._library_cache.clear()
+    _two_runs_of_a01(app)
+    assert app._align.get(key1) == (1.0, 15.0)
+    assert "+15 scans" in app._axes_titles[1][0].get_text()
+    # resetting removes it from the library too
+    app._hover_idx = 1
+    app._reset_alignment("hover")
+    app._flush_alignment()
+    assert "align" not in (mark_library.load_run("PLATE_X_Run02").get("A01") or {})
+
+
+def test_saving_an_alignment_keeps_the_wells_marks(app):
+    import mark_library
+    mark_library.save_run("PLATE_X_Run02", {"A01": {"std": [[2100, "HOM1"]], "std_source": None}})
+    app._library_cache.clear()
+    _two_runs_of_a01(app)
+    app._hover_idx = 1
+    app._nudge(3)
+    app._flush_alignment()
+    entry = mark_library.load_run("PLATE_X_Run02")["A01"]
+    assert entry["std"] == [[2100, "HOM1"]] and entry["align"] == [1.0, 3.0]

@@ -39,7 +39,8 @@ rename), so a crash mid-write cannot half-write a plate.
             "std_col": 2,
             "result": {"call": "hom-1", "frac": 0.02, "flags": "",
                        "std_scans": "2135,2214,2425,2520",
-                       "label_source": "engine"}}
+                       "label_source": "engine"},
+            "align": [1.0, 23.0]}
  }}
 ```
 
@@ -56,8 +57,14 @@ rename), so a crash mid-write cannot half-write a plate.
   significances, flags, reason), plus `label_source`:
   - `engine` — the automatic call;
   - `edited` — the operator corrected it in the results table.
+- `align` — the graph alignment of this well, `[a, b]` with
+  `reference = a · scan + b` (offset `b` in scans, stretch `a`, normally 1).
+  Written when a graph is slid (Shift+drag, Alt+←/→, ⇄ Align …) and removed
+  again on reset; restored when the trace is next opened. Display only — no
+  scan stored anywhere else in the library is shifted by it.
 
-Only wells that carry a standard are stored as marks. Peaks picked but not yet
+Only wells that carry a standard are stored as marks (a well may also have an
+entry for its alignment alone). Peaks picked but not yet
 named a standard stay in the session: the library is a record of answers, not of
 half-finished clicks.
 
