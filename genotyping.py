@@ -803,6 +803,27 @@ class PlateISModel:
         model.sample_snr = [float(v) for v in (data.get("sample_snr") or [])]
         return model
 
+    def copy(self):
+        """A detached copy, ready to be re-primed for another sample channel.
+
+        The geometry, the marked centres and the marked-well signal references
+        are shared -- they describe the standard, which is one physical object.
+        Only the per-duplex product offsets (``co_mig``) are cleared, because
+        those are the one thing that differs channel to channel: a different
+        fluorophore carries the same fragment a different distance from the
+        standard, and that shift is what a per-channel model is for.  The
+        mutable lists are copied into fresh ones so re-priming one channel
+        cannot reach back and disturb another.
+        """
+        clone = PlateISModel(
+            self.geometry, list(self.centers), self.n_marked,
+            self.merged_geometry, self.merged_seen, scaled=self.scaled)
+        clone.std_snr = list(self.std_snr)
+        clone.std_heights = list(self.std_heights)
+        clone.sample_snr = list(self.sample_snr)
+        clone.co_mig = [[] for _ in range(4)]
+        return clone
+
     @classmethod
     def from_marks(cls, marks):
         """Fit from every marked well, splitting by 4-band and 3-band wells.
@@ -1353,6 +1374,52 @@ def semi_auto_plate_model(traces, seeds, is_col, samp_col=None, max_rounds=6):
         if moved < 0.5:
             break               # the shape has settled
     return model, found
+
+
+def per_channel_models(traces, seeds, is_col, sample_channels, base_order="ACTG",
+                       max_rounds=6):
+    """Fit the plate standard once, then a model per sample channel.
+
+    The internal standard is one physical object on one channel, so the plate's
+    shape -- the gaps d1/d2/d3, the marked centres, the merged template and the
+    marked-well signal references -- is the same for every dye.  What a
+    different fluorophore changes is where the sample product sits relative to
+    the standard, so the fit runs once (with no product channel) and each sample
+    channel gets a detached copy primed with its own product offsets.  This is
+    how a well carrying three differently-labelled samples can be genotyped
+    three ways against the one standard it shares.
+
+    *traces* is ``{well: acgt}``, *seeds* is ``{well: [scans]}`` for the wells
+    the operator marked, *is_col* is the ``acgt`` column the standard sits on,
+    and *sample_channels* are the MegaBACE channels (1..4) to learn -- each
+    mapped through :func:`acgt_index_for_channel` with *base_order*.  The
+    internal-standard channel is refused as a sample channel: it would score the
+    standard's own peaks as the product.
+
+    Returns ``(models, found)``.  *models* maps each sample channel's ``acgt``
+    column to its own :class:`PlateISModel` (all sharing one geometry); *found*
+    is the same ``semi_auto_plate_model`` placement map the single-channel
+    path returns, since where the standard sits does not depend on which dye
+    the sample carries.
+    """
+    base_model, found = semi_auto_plate_model(
+        traces, seeds, is_col, samp_col=None, max_rounds=max_rounds)
+    cols = []
+    for channel in sample_channels:
+        col = acgt_index_for_channel(base_order, channel)
+        if col == is_col:
+            raise ValueError(
+                f"sample channel {channel} is the standard channel")
+        if col not in cols:
+            cols.append(col)
+    marked = {w: sorted({int(x) for x in s}) for w, s in seeds.items() if s}
+    models = {}
+    for col in cols:
+        model = base_model.copy()
+        prime_plate_co_migration(
+            model, [(traces[w], col, s) for w, s in marked.items()])
+        models[col] = model
+    return models, found
 
 
 # --------------------------------------------------------------------------- #
