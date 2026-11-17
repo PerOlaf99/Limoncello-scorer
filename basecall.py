@@ -31,19 +31,7 @@ from cimarron_basecaller.rsd_io import read_rsd, to_acgt_trace
 # (0.008 -> 0.001 over the last 2/3 of the read) recovers the degraded 3' tail,
 # and retuning the Wiener band filter (sigma_scale 1.05, noise_reg 0.06) cuts
 # substitutions and lengthens the error-free runs without losing matched bases.
-WIN_CONFIG = dict(
-    use_gaussian_reconstruction=True,
-    gaussian_recon_segment_size=384,
-    gaussian_recon_noise_reg=0.06,
-    gaussian_recon_sigma_scale=1.05,
-    use_combined_channel_score=True,
-    window_frac=(0.75, 1.25),
-    local_norm_window=1800,
-    channel_peak_bonus=1.2,
-    pullback_weight=(0.008, 0.001),
-    ema_alpha=0.08,
-    profile_fracs=(0.33, 1.0),
-)
+from configs import GOLDEN as WIN_CONFIG  # noqa: E402
 
 # Fallback for the rare well whose profiled read runs away (tracker follows
 # noise past the true end; those reads are implausibly long and have low mean
@@ -68,12 +56,7 @@ QUALITY_GATE = 2.0
 # 96-well plate this gives 98.19% identity / 473 bp longest run vs Cimarron
 # 3.12's 96.76% / 490.7 bp (golden mode: 94.30% / 363.9 bp, but more matched
 # bases). Use `--mode precision` to select it.
-WIN_CONFIG_PRECISION = dict(WIN_CONFIG)
-WIN_CONFIG_PRECISION.update(
-    gaussian_recon_noise_reg=0.128,
-    use_spacing_anchor_curve=True,
-    trim_quality_percentile=38.0,
-)
+from configs import PRECISION as WIN_CONFIG_PRECISION  # noqa: E402
 
 PHRED_OFFSET = 33
 

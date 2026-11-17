@@ -52,81 +52,6 @@ def _windowed_area(trace_col: np.ndarray, lo: int, hi: int, half_width: float) -
     return csum[right] - csum[left]
 
 
-def track_bases_area(
-    trace: np.ndarray,
-    base_order: str = "ACGT",
-    initial_spacing: float = 11.0,
-    window_frac: tuple[float, float] = (0.6, 1.5),
-    min_area_fraction: float = 0.15,
-    ema_alpha: float = 0.15,
-    baseline_window: int = 151,
-    local_norm_window: int = 300,
-    mobility_shifts: list[int] | None = None,
-    area_half_width_frac: float = 0.4,
-    max_misses: int = 6,
-) -> tuple[str, list[float], list[TrackedBase]]:
-    """Like track_bases, but selects the next base by integrated local
-    AREA (per channel, within a window that scales with the current
-    tracked spacing) rather than raw point height -- see module docstring
-    rationale on peak broadening vs. migration time.
-    """
-    baseline_subtracted = robust_baseline_subtract(trace, window=baseline_window)
-    norm_trace = normalize_channels_local(baseline_subtracted, window=local_norm_window)
-    if mobility_shifts is not None:
-        norm_trace = apply_mobility_correction(norm_trace, mobility_shifts)
-
-    n = norm_trace.shape[0]
-    global_scale = np.percentile(norm_trace.max(axis=1), 90)
-
-    pos = find_start_position(norm_trace.max(axis=1))
-    spacing = initial_spacing
-    misses = 0
-    results: list[TrackedBase] = []
-
-    while pos < n:
-        expected_next = pos + spacing
-        lo = int(expected_next - spacing * (1 - window_frac[0]))
-        hi = int(expected_next + spacing * (window_frac[1] - 1))
-        lo = max(lo, pos + 2)
-        hi = min(hi, n - 1)
-        if lo > hi:
-            break
-
-        half_width = max(1.0, spacing * area_half_width_frac)
-        best_area, best_pos, best_ch = -1.0, None, None
-        for ch in range(norm_trace.shape[1]):
-            areas = _windowed_area(norm_trace[:, ch], lo, hi, half_width)
-            i = int(np.argmax(areas))
-            if areas[i] > best_area:
-                best_area, best_pos, best_ch = float(areas[i]), lo + i, ch
-
-        # Normalize area by window width so it's comparable to the
-        # point-height-scale thresholds used elsewhere.
-        area_norm = best_area / (2 * half_width + 1) if best_pos is not None else 0.0
-
-        if best_pos is None or area_norm < min_area_fraction * global_scale:
-            misses += 1
-            pos = int(expected_next)
-            if misses > max_misses:
-                break
-            continue
-
-        misses = 0
-        observed_spacing = best_pos - pos
-        spacing = (1 - ema_alpha) * spacing + ema_alpha * observed_spacing
-        spacing = float(np.clip(spacing, initial_spacing * 0.4, initial_spacing * 2.5))
-
-        results.append(TrackedBase(
-            position=best_pos, channel=best_ch, height=float(area_norm),
-            expected_position=expected_next, spacing_used=spacing,
-        ))
-        pos = best_pos
-
-    sequence = "".join(base_order[b.channel] for b in results)
-    qualities = [b.height for b in results]
-    return sequence, qualities, results
-
-
 def detect_signal_region(
     baseline_subtracted: np.ndarray,
     min_fraction: float = 0.1,
@@ -169,6 +94,11 @@ def detect_signal_region(
         lo, hi = search_bounds
         hi = n + hi if hi < 0 else hi
         lo, hi = max(0, lo), min(n, hi)
+        if lo >= hi:
+            # Trace shorter than the timing prior (a short or pre-trimmed
+            # export): the prior does not apply, so search all of it rather
+            # than return an empty, inverted region.
+            lo, hi = 0, n
 
     run = 0
     start = lo
@@ -217,6 +147,8 @@ def trim_to_quality_block(
 
     best_len, best_range = -1, (0, len(tracked))
     for w in filter_widths:
+        if w > len(heights):
+            continue          # "same" would return w samples, not one per base
         kernel = np.ones(w) / w
         filtered = np.convolve(heights, kernel, mode="same")
         above = filtered >= threshold
@@ -329,16 +261,16 @@ def apply_spectral_separation(baseline_subtracted: np.ndarray, chm: np.ndarray) 
 # correction) was tuned empirically and found to genuinely help: mean
 # identity 79.8%->80.7%, coverage 85.6%->96.3%, AND meaningfully more
 # consistent across wells (identity std 1.9->1.7, and critically the
-# worst-case well jumps from 70% to 78.9% identity). DEFAULT_CHM_SHRUNK
-# is what track_bases actually uses by default; DEFAULT_CHM is kept for
-# reference / further calibration work.
+# worst-case well jumps from 70% to 78.9% identity). That shrunk matrix was
+# later dropped: track_bases applies the full DEFAULT_CHM (see smooth_trace and
+# the spectral_separation_matrix default), which the plate-tuned configs were
+# measured with.
 DEFAULT_CHM = np.array([
     [1.000, 0.162, 0.333, 0.459],
     [1.736, 1.000, 0.376, 0.584],
     [0.188, 0.089, 1.000, 0.145],
     [0.460, 0.100, 0.923, 1.000],
 ])
-DEFAULT_CHM_SHRUNK = 0.1 * DEFAULT_CHM + 0.9 * np.eye(4)
 
 
 def smooth_trace(trace: np.ndarray, window: int = 2) -> np.ndarray:
@@ -363,93 +295,6 @@ def smooth_trace(trace: np.ndarray, window: int = 2) -> np.ndarray:
     return uniform_filter1d(trace, size=window, axis=0, mode="nearest")
 
 
-def _looks_periodic(envelope: np.ndarray, threshold: float, min_peaks: int = 4, cv_max: float = 0.6) -> bool:
-    """Check whether the region ahead shows regularly-spaced peaks (the
-    signature of real signal) rather than isolated noise excursions.
-    Real base calls come out roughly periodically; noise crossing a
-    threshold once or twice, with no regular follow-up, shouldn't count.
-    """
-    from scipy.signal import find_peaks
-    idx, _ = find_peaks(envelope, height=threshold * 0.5, distance=3)
-    if len(idx) < min_peaks:
-        return False
-    spacings = np.diff(idx[:min_peaks + 3])
-    if len(spacings) == 0 or np.mean(spacings) < 1e-9:
-        return False
-    cv = np.std(spacings) / np.mean(spacings)
-    return cv < cv_max
-
-
-def detect_signal_region_auto(
-    baseline_subtracted: np.ndarray,
-    calib_samples: int = 500,
-    k: float = 5.0,
-    sustained: int = 20,
-    validate_window: int = 600,
-) -> tuple[int, int]:
-    """Fully self-contained start/stop detection -- no prior knowledge of
-    a specific run's injection timing baked in (contrast with the earlier
-    `detect_signal_region`, which relies on a hard-coded search window
-    empirically fit to one specific plate's timing and won't generalize
-    to a run with different instrument settings).
-
-    Two-stage: (1) find candidate crossings of a per-trace, robust
-    (median + k*MAD) amplitude threshold estimated from this trace's own
-    early samples; (2) validate each candidate by checking that
-    regularly-spaced peaks actually follow it (see _looks_periodic) --
-    this rejects isolated noise excursions that happen to cross the
-    amplitude threshold without being followed by real periodic signal
-    (this combination was needed: amplitude threshold alone gave exact
-    matches on some wells but was badly fooled on others where baseline
-    noise dispersion happens to be proportionally larger relative to
-    early, still-weak real signal).
-    """
-    envelope = baseline_subtracted.max(axis=1)
-    n = len(envelope)
-
-    med = np.median(envelope[:calib_samples])
-    mad = np.median(np.abs(envelope[:calib_samples] - med)) * 1.4826
-    threshold = med + k * mad
-
-    above = envelope > threshold
-    run = 0
-    start = 0
-    i = 0
-    while i < n:
-        run = run + 1 if above[i] else 0
-        if run >= sustained:
-            candidate = i - sustained + 1
-            window_end = min(n, candidate + validate_window)
-            if _looks_periodic(envelope[candidate:window_end], threshold):
-                start = candidate
-                break
-            # Not validated -- likely an isolated noise excursion. Reset
-            # and keep scanning forward past it.
-            run = 0
-        i += 1
-    else:
-        start = 0
-
-    # End: same idea, scanning backward from the trace's end.
-    run = 0
-    end = n
-    i = n - 1
-    while i >= start:
-        run = run + 1 if above[i] else 0
-        if run >= sustained:
-            candidate = i + sustained
-            window_start = max(start, candidate - validate_window)
-            if _looks_periodic(envelope[window_start:candidate], threshold):
-                end = candidate
-                break
-            run = 0
-        i -= 1
-    else:
-        end = n
-
-    return start, min(end, n)
-
-
 def precompute_channel_peak_masks(norm_trace: np.ndarray, prominence: float = 0.04) -> np.ndarray:
     """Boolean (n_samples, 4) mask: True where that sample is an
     independently-detected local peak on THAT channel alone (not just the
@@ -465,19 +310,6 @@ def precompute_channel_peak_masks(norm_trace: np.ndarray, prominence: float = 0.
         idx, _ = find_peaks(norm_trace[:, c], prominence=prominence, distance=2)
         mask[idx, c] = True
     return mask
-
-
-def combined_channel_score(
-    norm_trace: np.ndarray, channel_peak_mask: np.ndarray, position: int, channel_bonus: float = 0.5
-) -> np.ndarray:
-    """Per-channel combined score at one position: the channel's own
-    normalized amplitude, boosted if that sample is ALSO independently a
-    local peak on that specific channel (corroborating evidence from two
-    different detectors -- envelope-relative height, and single-channel
-    peak detection -- rather than trusting either alone)."""
-    row = norm_trace[position].copy()
-    boost = channel_peak_mask[position].astype(float) * channel_bonus
-    return row * (1.0 + boost)
 
 
 def trim_mott(
@@ -509,7 +341,7 @@ def trim_mott(
     running = 0.0
     running_start = 0
     best_score = 0.0
-    best_range = (0, len(tracked))
+    best_range = (0, 0)       # no base above the cutoff: keep nothing, not everything
 
     for i, s in enumerate(scores):
         if running <= 0:
@@ -521,32 +353,6 @@ def trim_mott(
             best_range = (running_start, i + 1)
 
     return best_range
-
-
-def band_filter(trace: np.ndarray, spike_width: int = 3) -> np.ndarray:
-    """'Band filter' -- reinterpreted after the frequency-domain band-pass
-    version tested poorly (every tested cutoff hurt coverage 15-24pp for
-    no identity gain, likely filtfilt ringing/edge artifacts fighting the
-    position-domain peak detector downstream).
-
-    In gel/capillary electrophoresis terminology, "bands" are the DNA
-    fragment peaks themselves (as in gel electrophoresis "bands") -- so a
-    "band filter" more plausibly means a DESPIKING filter: remove noise
-    spikes narrower than any real band could physically be (a genuine DNA
-    peak has a minimum width from diffusion during migration), while
-    preserving real band shapes, via a median filter with a window
-    narrower than the minimum plausible band width. This is a standard
-    despiking technique for chromatography-style signals, and unlike mean
-    smoothing, a median filter doesn't blur genuine peaks -- it only
-    suppresses features narrower than its window.
-    """
-    from scipy.signal import medfilt
-
-    out = np.empty_like(trace, dtype=float)
-    k = spike_width if spike_width % 2 == 1 else spike_width + 1
-    for c in range(trace.shape[1]):
-        out[:, c] = medfilt(trace[:, c], kernel_size=k)
-    return out
 
 
 def _gaussian_psf(spatial_sigma: float, n: int) -> np.ndarray:
@@ -583,10 +389,8 @@ def gaussian_reconstruction_filter(
     deletion errors.
     """
     K = 2.0 * np.sqrt(np.log(0.23) / -0.5)
-    fbw = K * segment_size / (2.0 * np.pi * max(spacing, 1e-6))
-    fbw = float(np.clip(fbw, 1.0, segment_size / 4))
 
-    # fbw as computed above is a FREQUENCY-domain parameter (bandwidth in
+    # The patent's fbw = K*segment_size/(2*pi*spacing) is a FREQUENCY-domain parameter (bandwidth in
     # FFT-bin-equivalent units over the segment) -- the corresponding
     # SPATIAL-domain Gaussian sigma is segment_size/(2*pi*fbw), which
     # algebraically simplifies to spacing/K (~0.29*spacing). Using fbw
@@ -738,18 +542,6 @@ def apply_position_adaptive_spectral_separation(
         out[lo:hi] = baseline_subtracted[lo:hi] @ chm_inv.T
 
     return out
-
-
-def find_start_position(envelope: np.ndarray, threshold: float = 0.15, sustained: int = 20) -> int:
-    """Find the first point where the envelope sustainably rises above
-    `threshold` (avoiding triggering on an isolated early noise spike)."""
-    above = envelope > threshold
-    run = 0
-    for i, ok in enumerate(above):
-        run = run + 1 if ok else 0
-        if run >= sustained:
-            return max(0, i - sustained)
-    return 0
 
 
 def estimate_global_spacing(envelope: np.ndarray, sig_start: int, sig_end: int) -> float:
@@ -941,6 +733,9 @@ def track_bases(
     start and end), so a parameter can e.g. loosen its pull-back toward the
     global spacing across the degraded 3' tail. A scalar, or a (v, v) pair,
     reproduces the un-profiled caller byte-for-byte.
+
+    initial_spacing is accepted for compatibility and ignored: tracking starts
+    from the read's measured global spacing (estimate_global_spacing).
     """
     baseline_subtracted = robust_baseline_subtract(smooth_trace(trace, smoothing_window), window=baseline_window)
     if spectral_separation_matrix is not None:
