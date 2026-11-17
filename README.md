@@ -141,6 +141,39 @@ To try it immediately: **File → Add data folder** →
 - **File → Save graph image…** writes the current plot area to PNG/PDF/SVG.
   The old matplotlib toolbar was removed in favour of these controls.
 
+### Aligning graphs
+
+Slide one graph left or right so a feature lines up with the same feature in
+the graphs above or below it — two runs of one plate, wells that migrated a
+little faster, or a peak you want to compare across wells.
+
+| How | What it does |
+|-----|--------------|
+| **Shift + drag** on a graph | slides that graph, live; the others stay put (works in every mode, also while picking) |
+| **Alt + ← / →** | moves the graph under the mouse 1 scan (**Alt + Shift**: 10) |
+| **Alt + Home** | resets the graph under the mouse |
+| **⇄ Align → Align shown graphs to the top one** (view bar, or **View → Alignment**) | cross-correlates the scans **in view** and slides every graph onto the top one; with *Overlay runs* each overlaid run is also aligned onto its graph's first run |
+| **⇄ Align → Align on internal standard** | maps each well's marked IS bands onto the top marked well's — an offset, plus a stretch when three or more bands agree on one |
+| **⇄ Align → Reset this graph / Reset all alignments** | back to the unshifted view |
+
+Things to know:
+
+- **Alignment is display only.** Each graph keeps its true scan numbers;
+  alignment changes *which* scans it shows (internally a per-file map
+  `reference = a · scan + b`). Picked peaks, measured areas, IS marks, the
+  genotyping table and every export stay in true scans, so you can align and
+  then pick as usual.
+- **Zoom onto the feature first** before *Align shown graphs to the top one*:
+  it lines up whatever dominates the visible window (with the whole trace in
+  view that is usually the large primer peak).
+- A shifted graph says so in its label, e.g. **⇄ +23 scans**, and **×1.004**
+  when it is also stretched.
+- The tick numbers and the **Scans** boxes are the **bottom graph's own**
+  scans.
+- The shared zoom, scroll bars and mouse wheel move all graphs together,
+  each keeping its own offset.
+- Alignments last for the session (they are not saved to the library).
+
 ## Keyboard and mouse
 
 | Key / mouse | Action |
