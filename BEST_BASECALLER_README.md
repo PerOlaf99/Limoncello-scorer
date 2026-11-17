@@ -100,13 +100,15 @@ byte-for-byte.
 
 - `basecall.py` - command-line entry point (`WIN_CONFIG` here).
 - `cimarron_basecaller/` - DSP + tracking package:
-  - `spacing_caller.py` - `track_bases`, the recommended caller.
-  - `preprocessing.py`, `deconvolution.py`, `peaks.py`, `scoring.py`,
-    `alignment.py` - baseline, spectral separation, Gaussian band filter,
-    mobility shift, combined scoring.
-  - `rsd_io.py` - MegaBACE `.rsd` reader (`to_acgt_trace`).
-  - `dp_caller.py`, `simple_caller.py` - alternate callers (much worse; kept
-    for reference).
+  - `spacing_caller.py` - `track_bases`, the caller: spectral separation,
+    Gaussian band filter, mobility shift, combined-channel scoring, tracking
+    and quality trimming.
+  - `simple_caller.py` - shared signal helpers (baseline subtraction, local
+    normalisation, mobility correction).
+  - `rsd_io.py` / `scf_io.py` - MegaBACE `.rsd` and SCF readers.
+  - `scoring.py` - alignment scoring against a reference (needs Biopython).
+  The earlier patent-literal pipeline and the DP / peak-picking callers were
+  removed (much worse; see git history).
 
 ## Notes
 
