@@ -27,8 +27,9 @@ Limoncello shows capillary-electrophoresis traces (.rsd, .scf, ABI .ab1 and text
 The window:
 ```
  ┌ menus: File  View  Base calling  Manual genotyping  Auto genotyping  Comments  Help
- ├ channel bar: Ch1..Ch4 · µA · Time (min) · Mark IS in shown wells · Trace colors
- ├ view bar: Graphs · wells shown · Zoom · Scans · Y scale · Fit Y · Overlay · Reset
+ ├ channel bar: Ch1..Ch4 · µA · Time (min) · Trace colors
+ ├ view bar: Graphs · wells shown · Zoom · Scans · Y scale · Fit Y · Overlay · Plate · Reset
+ ├ (while picking) a coloured banner: what the mouse does now · Exit
  │ Data folders │
  │ Samples list │     graphs (one per well, stacked)
  │ Sort, Jump   │
@@ -45,14 +46,15 @@ New here? Open a folder (File ▸ Add data folder…), click a well in the Sampl
 2. Click a well. Ctrl-click or Shift-click to select several, then set **Graphs** in the view bar to how many to stack (1–12).
 3. Zoom with the mouse wheel on the graph; drag to zoom to a range; double-click to reset. (All gestures: Moving around the graphs.)
 4. Page through the plate with ↓ / ↑ (or ← / →, PgDn / PgUp). The view bar shows which wells are on screen, e.g. “A01–A04 · 4 of 96 files”.
-5. To compare two runs of the same plate: tick **Overlay runs**. Each graph then shows one well with every run of it on top — Run01 solid, Run02 dashed, Run03 dotted."""),
+5. To compare two runs of the same plate: tick **Overlay runs**. Each graph then shows one well with every run of it on top — Run01 solid, Run02 dashed, Run03 dotted.
+6. **▦ Plate** (or View ▸ Plate map…) shows the run as a 96-well plate coloured by genotype call; click a well, a row letter or a column number to show those wells."""),
 
     ("Quick start: base calling", """\
 1. Load the sequencing run and select the wells.
 2. Base calling ▸ Basecall selected (or Basecall all in list). The default caller, mb1000_accuracy, suits MegaBACE 1000 runs.
 3. The letters appear on the peaks (View ▸ Base-called (with peaks)) and the sequence in the table under the graphs — use **Show sequence** there if the genotyping table is showing.
 4. File ▸ Export sequence (FASTA)… writes the reads for BLAST.
-• Wrong dye order? DYEnamic runs are TGCA, ET-primer runs ACTG. Set it in ⚙ Basecall settings… → Dye / channel → Base order (instrument). Comments ▸ Run info… shows what the file itself says.
+• Dye order: sequencing runs declare it in their own files, and that is used automatically (Comments ▸ Run info… shows it). For a run that declares none, the general setting applies (⚙ Basecall settings… → Dye / channel → Base order (instrument); DYEnamic runs are TGCA, ET-primer runs ACTG); Comments ▸ Dye order of this run… overrides it for one run.
 • Called a fragment run by mistake? Base calling ▸ Clear base calls (undo) removes the letters; the data files are never changed."""),
 
     ("Quick start: genotyping (CTC-CE)", """\
@@ -78,19 +80,19 @@ Do NOT size CTC-CE runs this way: their internal standard is four conformers of 
     ("Data folders and the samples list", """\
 Data folders (top left)
 • Click a run to list only its files; Ctrl/Shift-click several runs to list them together; double-click to open the run's first sample.
-• – Remove unloads the selected runs; File ▸ Clear folders unloads all.
+• – Remove run unloads the selected runs; File ▸ Clear folders unloads all.
 
 Samples / files
 • Each line is one trace, shown as run/file. Click to plot; Ctrl/Shift-click to plot several.
 • **Sort** (the box above the list, or View ▸ Sort files):
 ```
-  Well (letter first)   A01, A02 … A12, B01 …   runs of one well next to each other
-  Well (number first)   A01, B01 … H01, A02 …   column by column
+  Well, row order       A01, A02 … A12, B01 …   runs of one well next to each other
+  Well, column order    A01, B01 … H01, A02 …   column by column
   File name             alphabetical
-  Folder + name         run by run
+  Run, then file        run by run
 ```
 • **Jump/well** filters the list by well, file or run name as you type.
-• – Remove file(s) or the Delete key hides the selected files from the list.
+• – Hide file(s) or the Delete key hides the selected files from the list.
 • ▶ (bottom left) starts the auto-tour, which pages through the list every Tour (ms) milliseconds; Space starts and stops it. View ▸ Tour interval sets common speeds."""),
 
     ("Moving around the graphs", """\
@@ -112,6 +114,7 @@ The view bar
 • **Y scale**: **Shared** — one height scale for all graphs, to compare wells. **Each graph** — every graph scaled to its own peaks, so a weak well is not flattened by a strong one.
 • **Fit Y to view** — the height follows the scans on screen, so zooming into a region also scales up to its peaks.
 • **Overlay runs** — one graph per well with every run of that plate on top (Run01 solid, Run02 dashed, Run03 dotted, Run04 dash-dot). Runs of one plate are folders whose names differ only by a trailing RunNN. ↓ / ↑ then page whole wells.
+• **▦ Plate** — the plate map (see View menu).
 • **⟲ Reset view** — back to the whole trace.
 
 The scroll bars still work: the bottom bar pans across, the right bar up and down; the wheel over a bar zooms that direction; double-click a bar to reset it. All graphs always move together.
@@ -134,8 +137,13 @@ On/off
 • View ▸ Show base letters on peaks, View ▸ Show quality numbers (zoomed), View ▸ Show quality profile (0-100) (a green quality line, off by default), View ▸ Show instrument current (µA) (also the µA tick in the channel bar).
 • View ▸ Y scale, View ▸ Fit Y to view, View ▸ Overlay runs of the same well, View ▸ Always show table under graphs — as in the view bar.
 
+Plate map
+• View ▸ Plate map… (or ▦ Plate in the view bar) draws one run as a plate — 96 wells, or 384 when the run has wells beyond H or 12 — each coloured by its genotype call: hom-1 blue “1”, hom-2 orange “2”, het green “H”, no-call grey “–”, white = not scored yet, light grey = no file. Wells on screen have a red outline.
+• Click a well to show it; Ctrl-click adds or removes one; click a row letter or a column number to show that whole row or column (Graphs is raised to fit). With Overlay runs on, a click shows that well in every run of the plate.
+• It stays open beside the main window and follows what is on screen and every new call.
+
 Channels and colours
-• The channel bar ticks Ch1–Ch4 in the run's physical order, each labelled with the base it carries for the dye order in use. Hiding a channel hides it everywhere, including from picking and area measurement.
+• The channel bar ticks Ch1–Ch4 in the run's physical order, each labelled with the base it carries in the run on screen (runs can differ — see Base calling menu). Hiding a channel hides it everywhere, including from picking and area measurement.
 • View ▸ Trace colors (or the box at the right of the channel bar) chooses a colour scheme:
 ```
   Classic                    MegaBACE look, colour per BASE:
@@ -153,7 +161,13 @@ Paging
     ("Base calling menu", """\
 • Base calling ▸ Basecall selected — calls the wells on screen.
 • Base calling ▸ Basecall all in list — calls every listed file (asks first above 96).
-• Base calling ▸ ⚙ Basecall settings… — the caller and its tuning; **Apply + redraw** re-runs the shown wells, **Basecall selected with these** calls with the new settings. The dye order is set here too: Dye / channel → Base order (instrument). MegaBACE default ACTG; DYEnamic runs TGCA.
+• Base calling ▸ ⚙ Basecall settings… — the caller and its tuning; **Apply + redraw** re-runs the shown wells, **Basecall selected with these** calls with the new settings.
+
+Dye order — which base each channel carries — is decided per run:
+1. an order chosen for that run (Comments ▸ Dye order of this run…);
+2. otherwise the order the run's files declare (sequencing .rsd files do; genotyping runs leave it out);
+3. otherwise the general setting: ⚙ Basecall settings… → Dye / channel → Base order (instrument). MegaBACE default ACTG; DYEnamic runs TGCA.
+Comments ▸ Run info… says which of the three applies to the well on screen.
 • Base calling ▸ Sequencing trace (ESD peaks) / Base calling ▸ Plain channels (processed) — the two plot styles, so a call and its picture sit together.
 • Base calling ▸ Clear base calls (undo) — removes letters, peak marks and the quality line (e.g. after calling fragment data by mistake). Data files are never changed.
 
@@ -170,12 +184,12 @@ Callers
 ```"""),
 
     ("Manual genotyping menu", """\
-Two click modes share the main window — the same graphs, zoom, channels and paging; only the left mouse button changes meaning and the table under the graphs becomes the picks table. Choose a mode again, or Manual genotyping ▸ Exit peak picking, to return to plain viewing.
+Two click modes share the main window — the same graphs, zoom, channels and paging; only the left mouse button changes meaning and the table under the graphs becomes the picks table. A coloured banner above the graphs says which mode is on (amber: peak picking, blue: area by drag) and what the mouse does. Leave with **Esc**, the banner's **Exit** button, Manual genotyping ▸ Exit peak picking, or by choosing the mode again.
 
 • Manual genotyping ▸ Manual peak picking… — click a peak (or beside it): it is found, shaded and logged with scan, channel, height and area. Hovering shows a crosshair and a readout of the nearest peak.
 • Manual genotyping ▸ Peak area by drag… — hold the left button and drag between two points: the straight line between them is the baseline and the area above it is measured, exactly as drawn. For crowded or odd-shaped peaks. The channel measured is the one with the largest area in the span among the channels switched on — untick the standard's channel to measure only the sample.
 • Manual genotyping ▸ Mark peaks as standard… — marks the internal standard in every well you picked peaks in: the earlier two picked peaks become HOM1/HOM2, the later two HET1/HET2. An optional fragment length (bp) can be entered. Marks are saved to library/ and seed auto-genotyping.
-• Manual genotyping ▸ Mark IS in all shown wells (also the button in the channel bar) — places the standard in every well on screen from the shape learned by Semi automatic standard…; wells with picks but no mark are marked from their picks. Automatic marks are labelled as such in the table.
+• Manual genotyping ▸ Mark IS in all shown wells (also the button in the picking banner) — places the standard in every well on screen from the shape learned by Semi automatic standard…; wells with picks but no mark are marked from their picks. Automatic marks are labelled as such in the table.
 • Manual genotyping ▸ Marked IS wells… — lists the wells that carry a mark, i.e. what the plate will be fitted to.
 • Manual genotyping ▸ Undo last pick / measurement (Ctrl+Z) and Manual genotyping ▸ Clear picks / measurements. To remove one particular peak: hold R and click it (if it was a standard band it is dropped from the standard too). Right-click does NOT remove — it resets the zoom.
 • Manual genotyping ▸ Tag duplex species for MF… — tags the last-picked position's peaks HOM1/HOM2/HET1/HET2 so the MF column can be filled in (below).
@@ -217,6 +231,7 @@ Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peak
 • Results: a CSV/JSON table or an HTML report."""),
 
     ("Comments and run info", """\
+• Comments ▸ Dye order of this run… — fix the dye order for the run of the selected well (Automatic = what its files declare, else the general setting). Its traces are reloaded at once.
 • Comments ▸ Run comments… — a note for the selected run, saved beside the data file as <file>.comment.txt (the data file is not touched) and shown under the sequence.
 • Comments ▸ Run info… — what the file says about the run: well, scan count, run time, dye order, caller, per-channel signal, current; for .rsd also plate ID, machine, method, laser, filters, dye per channel, and the run conditions (voltage, injection, temperature, PMT). A “Dye order note” appears when the file's dye order differs from the one in use — the first thing to check when traces look channel-swapped."""),
 
@@ -238,7 +253,7 @@ Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peak
   R + click                remove that picked peak
   Enter (Scans boxes)      zoom to the typed scan range
   F1                       this manual          F11   full screen / restore
-  Esc                      cancel a long job, or leave full screen
+  Esc                      cancel a long job, leave full screen, or leave peak picking
 
   wheel / Ctrl+wheel / Shift+wheel     zoom across / zoom height / pan
   drag (Ctrl+drag while picking)       zoom to a range
@@ -249,12 +264,13 @@ In this manual: Ctrl+F jumps to the search box; Enter finds the next match."""),
 
     ("When something looks wrong", """\
 • **Only one graph although several wells are selected** — raise Graphs in the view bar; the text beside it says how many are selected.
-• **Channels look swapped** — the dye order is wrong: Comments ▸ Run info… shows the file's own order; set it in ⚙ Basecall settings… → Dye / channel.
+• **Channels look swapped** — the dye order is wrong for that run: Comments ▸ Run info… shows which order is used and where it came from; Comments ▸ Dye order of this run… fixes it for that run.
 • **A weak well looks flat** — Y scale: Each graph, or zoom in with Fit Y to view on.
 • **The table under the graphs is gone** — the wells on screen have nothing for it; View ▸ Always show table under graphs keeps it.
 • **Auto-genotyping finds no standard in some wells** — mark a few more wells, spread over different columns, and run Auto genotyping ▸ Semi automatic standard… again. Check Auto genotyping ▸ Channel roles (standard / sample)… too.
 • **Letters on a fragment run** — Base calling ▸ Clear base calls (undo).
-• **Clicking does not pick a peak** — picking needs Manual genotyping ▸ Manual peak picking…; with Ctrl held the click zooms instead."""),
+• **Clicking does not pick a peak** — picking needs Manual genotyping ▸ Manual peak picking… (the amber banner shows it is on); with Ctrl held the click zooms instead.
+• **Where is well H07?** — ▦ Plate shows the plate; click the well."""),
 ]
 
 

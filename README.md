@@ -18,7 +18,10 @@ The full user manual, with quick starts for each job, is in the app:
 | Basecaller versions | `mb1000_accuracy`, `mb1000_length`, `mb4000_accuracy`, `mb4000_length`, `pos_bonus07`, `pos_profile`, `hz_soften`, `raw_peaks` |
 | Advanced params (knobs) | Base calling → ⚙ Basecall settings… (dialog) |
 | Wrap rows, tour interval | View menu |
-| Per-graph label (folder/file) | Yes — drawn in each plot's top-left |
+| Per-graph label | Well in bold + run name, in each plot's top-left |
+| Plate map (96 / 384 wells, coloured by call; click to show wells) | Yes — ▦ Plate in the view bar / View → Plate map… |
+| Dye order per run (declared by the file, or chosen per run) | Yes — Comments → Dye order of this run… |
+| Picking-mode banner (what the mouse does, Exit / Esc) | Yes |
 | X axis | Tick numbers only on the bottom pane; **Time (min)** toggle (1.75 Hz) |
 | Trace colors / dye sets | Combobox beside the channel toggles + View → Trace colors palette |
 | Pan/zoom | Wheel on the graphs zooms at the cursor (Ctrl: Y, Shift: pan), drag zooms a box, middle-drag pans; Zoom −/+ and a scan-range box; right-click/double-click/Home resets |
@@ -153,7 +156,7 @@ To try it immediately: **File → Add data folder** →
 | middle-drag | pan |
 | F1 | user manual (contents + search) |
 | F11 | full screen / restore |
-| Esc | cancel a long job, or leave full screen |
+| Esc | cancel a long job, leave full screen, or leave peak picking |
 
 ## Basecaller versions
 
@@ -176,8 +179,13 @@ vendored `configs.py`.
 > The `mb4000_*` names are kept for MegaBACE 4000 data, but until a 4000
 > spectral (colour-separation) matrix is bundled they run the MB1000 settings.
 
-Base order default **ACTG** (MegaBACE: Ch1=A, Ch2=C, Ch3=T, Ch4=G).
-DYEnamic runs are **TGCA** — set it under ⚙ Basecall settings → Dye/channel.
+**Dye order is per run.** A run's own files declare it when they can
+(sequencing `.rsd` files name the base on each channel, e.g. TGCA for the
+MB1000 M13 runs) and that is used automatically. Runs that declare nothing
+(genotyping runs) use the general setting under ⚙ Basecall settings →
+Dye / channel — default **ACTG** (MegaBACE: Ch1=A, Ch2=C, Ch3=T, Ch4=G);
+DYEnamic runs are **TGCA**. **Comments → Dye order of this run…** overrides it
+for one run, and **Comments → Run info…** says which order a well uses and why.
 
 ## Trace colors / MegaBACE dye sets
 

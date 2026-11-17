@@ -64,6 +64,10 @@ class StubApp:
     def _ensure_doc(self, path):
         return self._docs[str(Path(path))]
 
+    def _doc_order(self, doc):
+        # these traces declare no dye order: the general setting applies
+        return self.base_order_var.get()
+
 
 @pytest.fixture
 def stub_app(tmp_path):

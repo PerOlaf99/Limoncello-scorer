@@ -183,3 +183,64 @@ def test_ctrl_is_read_from_the_key_or_the_tk_state():
     assert sa._event_mods(SimpleNamespace(key=None,
                                           guiEvent=SimpleNamespace(state=0x0005))) == (True, True)
     assert sa._event_mods(SimpleNamespace(key=None, guiEvent=None)) == (False, False)
+
+
+# --------------------------------------------------------------- dye order
+def test_a_sequencing_file_declares_its_dye_order():
+    import analyzer_core
+    doc = analyzer_core.load_trace(M13 / "A01.rsd")
+    assert analyzer_core.declared_dye_order(doc.footer_fields) == "TGCA"
+    assert analyzer_core.declared_dye_order({"CHANNEL BASES": ["", "", "", ""]}) == ""
+    assert analyzer_core.declared_dye_order({}) == ""
+
+
+def test_declared_order_beats_the_general_setting_and_a_run_choice_beats_both(app):
+    app.base_order_var.set("ACTG")
+    _select(app, [0], 1)
+    doc = app.docs[str(app.selected[0].resolve())]
+    assert (doc.dye_order, doc.dye_order_source) == ("TGCA", "file")
+    assert [cb.cget("text").strip() for cb in app._chan_cbs] == [
+        "Ch1 T", "Ch2 G", "Ch3 C", "Ch4 A"]
+    app._run_orders()["PLATE_X_Run01"] = "ACTG"          # chosen for this run
+    app.docs.clear()
+    _select(app, [0], 1)
+    doc = app.docs[str(app.selected[0].resolve())]
+    assert (doc.dye_order, doc.dye_order_source) == ("ACTG", "run")
+
+
+# ------------------------------------------------------------- plate map
+def test_well_and_call_parsing():
+    rc = sa.LimoncelloAnalyzerApp._well_rc
+    assert rc("A01") == ("A", 1) and rc("p24") == ("P", 24) and rc("Run01") is None
+    cls = sa.LimoncelloAnalyzerApp._call_class
+    assert [cls(c) for c in ("hom-1", "hom-2", "het", "no-call", "")] == [
+        "hom1", "hom2", "het", "nocall", "unscored"]
+
+
+def test_plate_map_click_shows_a_well_and_a_row(app):
+    app.show_plate_map()
+    app.update()
+    app._plate_run.set("PLATE_X_Run02")
+    app._plate_map_refresh(force=True)
+    rows, ncol, cell, x0, y0 = app._plate_layout
+    assert (rows, ncol) == ("ABCDEFGH", 12)
+    ev = SimpleNamespace(x=int(x0 + 1.5 * cell), y=int(y0 + 0.5 * cell))   # A02
+    app._plate_click(ev)
+    assert [f"{p.parent.name}/{p.stem}" for p in app.selected] == ["PLATE_X_Run02/A02"]
+    ev = SimpleNamespace(x=int(x0 / 2), y=int(y0 + 0.5 * cell))            # row A
+    app._plate_click(ev)
+    assert sorted(p.stem for p in app.selected) == ["A01", "A02", "A03"]
+    assert app._graph_count() >= 3
+
+
+# ------------------------------------------------------------ mode banner
+def test_picking_shows_a_banner_and_esc_leaves(app):
+    _select(app, [0], 1)
+    app.toggle_genotyping_picking()
+    app.update()
+    assert app._mode_banner.winfo_ismapped()
+    assert "picking" in app._mode_banner_lbl.cget("text").lower()
+    app._on_escape()
+    app.update()
+    assert not app.genotyping_active
+    assert not app._mode_banner.winfo_ismapped()

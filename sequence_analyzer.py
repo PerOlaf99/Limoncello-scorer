@@ -65,6 +65,7 @@ from analyzer_core import (
     TraceDocument,
     discover_files,
     find_run_folders,
+    declared_dye_order,
     load_trace,
     run_basecall,
     display_trace,
@@ -150,10 +151,10 @@ MAX_GRAPHS = 12
 RUN_STYLES = ["-", "--", ":", "-."]
 
 SORT_OPTIONS = [
-    ("well_row", "Well (letter first)"),
-    ("well_col", "Well (number first)"),
+    ("well_row", "Well, row order"),
+    ("well_col", "Well, column order"),
     ("name", "File name"),
-    ("folder", "Folder + name"),
+    ("folder", "Run, then file"),
 ]
 SORT_CODES = {label: code for code, label in SORT_OPTIONS}
 SORT_LABELS = {code: label for code, label in SORT_OPTIONS}
@@ -208,15 +209,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.title("Limoncello CE Analyzer")
         self.minsize(1040, 720)
         self.configure(bg="#F2F4F7")
-        # Undecorated but STILL WM-managed: 'splash' removes the gray OS
-        # titlebar while mutter keeps managing the window (focus, placement).
-        # Unlike override-redirect, this does not wedge the desktop.
-        try:
-            self.attributes("-type", "splash")
-        except tk.TclError:
-            pass
+        # The system title bar stays: minimise, maximise, edge-resize and window
+        # snapping come from the window manager on every platform.  (A
+        # 'splash' window with a drawn title bar lost them on Linux and was
+        # ignored on Windows/macOS, which then showed two title bars.)
         self.geometry("1440x920")
-        self._drag_off = (0, 0)
         self._zoomed = False
         self._pre_zoom = ""
         self._busy = False
@@ -386,32 +383,21 @@ class LimoncelloAnalyzerApp(tk.Tk):
                         foreground="#1A1C22")
         style.configure("TCheckbutton", background=bg)
 
-    # ------------------------------------------------------ custom titlebar
-    def _start_move(self, event):
-        self._drag_off = (event.x_root - self.winfo_x(),
-                          event.y_root - self.winfo_y())
-
-    def _on_move(self, event):
-        x = event.x_root - self._drag_off[0]
-        y = event.y_root - self._drag_off[1]
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        # keep at least a sliver on-screen so the bar can always be grabbed
-        x = max(200 - self.winfo_width(), min(x, sw - 200))
-        y = max(0, min(y, sh - 60))
-        self.geometry(f"+{x}+{y}")
-
     def _toggle_zoom(self):
-        if self._zoomed:
+        """F11: full screen and back, through the window manager."""
+        try:
+            self._zoomed = not bool(self.attributes("-fullscreen"))
+            self.attributes("-fullscreen", self._zoomed)
+            return
+        except tk.TclError:
+            pass
+        if self._zoomed:                       # no fullscreen support: fill the screen
             self.geometry(self._pre_zoom)
             self._zoomed = False
         else:
             self._pre_zoom = self.geometry()
-            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-            self.geometry(f"{sw}x{sh}+0+0")
+            self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
             self._zoomed = True
-
-    def _close(self):
-        self.destroy()
 
     def _popup_menu(self, menu, mb):
         """Open a top menu bar dropdown (stock Menubutton posting fails here)."""
@@ -427,6 +413,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.status_var.set("Cancelling…")
         elif self._zoomed:
             self._toggle_zoom()
+        elif getattr(self, "genotyping_active", False):
+            self.exit_genotyping_picking()
 
     # ------------------------------------------------------------------ UI
     def _build_menu(self):
@@ -482,6 +470,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         view_m.add_checkbutton(label="Overlay runs of the same well",
                                variable=self.overlay_runs,
                                command=lambda: self._view_option_changed(redraw=True))
+        view_m.add_command(label="Plate map…", command=self.show_plate_map)
         view_m.add_checkbutton(label="Always show table under graphs",
                                variable=self.always_table,
                                command=lambda: (self._save_view_prefs(),
@@ -512,7 +501,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         view_m.add_command(label="Page forward", command=lambda: self._page_by(1))
         view_m.add_command(label="Start/stop auto-tour", command=self.toggle_tour)
         view_m.add_command(label="Reset view (X & Y)", command=self._reset_zoom)
-        view_m.add_command(label="Mark IS in all shown wells", command=self._gen_mark_std_batch)
         view_m.add_command(label="Redraw", command=self.redraw)
 
         chan_m = tk.Menu(self, tearoff=0)
@@ -605,6 +593,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         help_m.add_command(label="About", command=self.show_about)
 
         comments_m = tk.Menu(self, tearoff=0)
+        comments_m.add_command(label="Dye order of this run…",
+                               command=self.set_run_dye_order)
         comments_m.add_command(label="Run comments…", command=self.edit_comments)
         comments_m.add_command(label="Run info…", command=self.show_run_info)
 
@@ -635,8 +625,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return m
 
     def _build_layout(self):
-        # Yellow title bar — the window is undecorated ('splash'), so this is
-        # the top of the app and carries the name (centred) + window buttons.
+        # Yellow banner with the app's name; the window buttons are the
+        # system's own.
         tbar = tk.Frame(self, bg=LIMON_BAR, bd=0)
         tbar.pack(side=tk.TOP, fill=tk.X)
         tbar.columnconfigure(0, weight=1)
@@ -655,19 +645,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                             background=LIMON_BAR, foreground="#4A5A18")
         sub_lbl.pack()
 
-        btn_style = dict(relief=tk.FLAT, bd=0, font=("DejaVu Sans", 12),
-                         bg=LIMON_BAR, fg=LIMON_DRK,
-                         activebackground=LIMON_ACCENT, activeforeground=LIMON_DRK,
-                         takefocus=0, cursor="hand2", padx=10, pady=3)
-        btns = tk.Frame(tbar, bg=LIMON_BAR)
-        btns.grid(row=0, column=2, sticky="e")
-        tk.Button(btns, text="✕", command=self._close, **btn_style).pack(side=tk.RIGHT)
-        tk.Button(btns, text="□", command=self._toggle_zoom, **btn_style).pack(side=tk.RIGHT)
-
-        for widget in (tbar, left_pad, mid, title_lbl, sub_lbl, btns):
-            widget.bind("<ButtonPress-1>", self._start_move)
-            widget.bind("<B1-Motion>", self._on_move)
-            widget.bind("<Double-Button-1>", lambda e: self._toggle_zoom())
         acc = tk.Frame(self, bg=LIMON_ACCENT, height=2)
         acc.pack(side=tk.TOP, fill=tk.X)
         acc.pack_propagate(False)
@@ -720,7 +697,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         fb = ttk.Frame(left)
         fb.pack(fill=tk.X, padx=4)
         ttk.Button(fb, text="⊕ Add…", command=self.add_folder).pack(side=tk.LEFT)
-        ttk.Button(fb, text="– Remove", command=self.remove_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(fb, text="– Remove run", command=self.remove_folder).pack(side=tk.LEFT, padx=4)
 
         self.samples_label = ttk.Label(left, text="◧ Samples / files",
                                        font=("", 10, "bold"),
@@ -774,7 +751,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         rrow = ttk.Frame(left)
         rrow.pack(fill=tk.X, padx=4, pady=(0, 2))
-        ttk.Button(rrow, text="– Remove file(s)",
+        ttk.Button(rrow, text="– Hide file(s)",
                    command=self.remove_samples).pack(side=tk.LEFT)
 
         frow = ttk.Frame(left)
@@ -822,16 +799,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
             bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
             command=self.redraw)
         self._time_btn.pack(side=tk.LEFT, padx=(8, 2))
-        ttk.Label(chan_bar, text="Trace colors:").pack(side=tk.RIGHT, pady=4)
         self.theme_cb = ttk.Combobox(
             chan_bar, textvariable=self.theme, width=24, state="readonly",
             values=list(TRACE_THEMES))
         self.theme_cb.pack(side=tk.RIGHT, padx=(4, 8))
         self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
-        ttk.Button(chan_bar, text="Mark IS in shown wells",
-                   command=self._gen_mark_std_batch).pack(side=tk.RIGHT, padx=4)
+        ttk.Label(chan_bar, text="Trace colors:").pack(side=tk.RIGHT, pady=4)
 
         self._build_view_bar(center)
+        self._build_mode_banner(center)
 
         # Graphs above, the table for the current mode below, with a sash the
         # user can drag; the lower pane is taken away when it has nothing to
@@ -954,6 +930,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                         ).pack(side=tk.LEFT, padx=4)
         ttk.Button(bar, text="⟲ Reset view",
                    command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(bar, text="▦ Plate",
+                   command=self.show_plate_map).pack(side=tk.RIGHT, padx=4)
         ToolTip(spin, lambda: f"Graphs stacked at once (1–{MAX_GRAPHS})")
         ToolTip(ycb, lambda: "Shared: one height scale for all graphs (compare wells).\n"
                              "Each graph: every graph scaled to its own peaks.")
@@ -970,6 +948,261 @@ class LimoncelloAnalyzerApp(tk.Tk):
         cb = getattr(self, "_y_scale_cb", None)
         if cb is not None:
             cb.set("Each graph" if self.y_scale.get() == "each" else "Shared")
+
+    def _build_mode_banner(self, parent):
+        """A coloured strip saying the mouse now records peaks, with the
+        actions that only make sense in that mode.  Hidden while viewing."""
+        ban = tk.Frame(parent, bg="#FFE9A8", highlightthickness=0)
+        self._mode_banner = ban
+        self._mode_banner_lbl = tk.Label(ban, bg="#FFE9A8", fg="#5A3E00", anchor="w",
+                                         font=("DejaVu Sans", 10, "bold"))
+        self._mode_banner_lbl.pack(side=tk.LEFT, padx=8, pady=3)
+        self._mode_banner_hint = tk.Label(ban, bg="#FFE9A8", fg="#5A3E00", anchor="w")
+        self._mode_banner_hint.pack(side=tk.LEFT, padx=4)
+        ttk.Button(ban, text="Exit (Esc)",
+                   command=self.exit_genotyping_picking).pack(side=tk.RIGHT, padx=6, pady=2)
+        self._mode_banner_is = ttk.Button(ban, text="Mark IS in shown wells",
+                                          command=self._gen_mark_std_batch)
+        self._mode_banner_is.pack(side=tk.RIGHT, padx=2, pady=2)
+
+    def _update_mode_banner(self):
+        ban = getattr(self, "_mode_banner", None)
+        if ban is None:
+            return
+        if not getattr(self, "genotyping_active", False):
+            ban.pack_forget()
+            return
+        area = getattr(self, "area_mode", False)
+        colour = "#D9ECFF" if area else "#FFE9A8"
+        fg = "#0F3A6E" if area else "#5A3E00"
+        title = ("● Peak area by drag" if area else "● Manual peak picking")
+        hint = ("drag between two points to measure  ·  Ctrl+drag zooms  ·  Ctrl+Z undoes"
+                if area else
+                "click a peak to record it  ·  R+click removes  ·  Ctrl+drag zooms  ·  Ctrl+Z undoes")
+        for w in (ban, self._mode_banner_lbl, self._mode_banner_hint):
+            w.configure(bg=colour)
+        self._mode_banner_lbl.configure(text=title, fg=fg)
+        self._mode_banner_hint.configure(text=hint, fg=fg)
+        if area:
+            self._mode_banner_is.pack_forget()
+        elif not self._mode_banner_is.winfo_ismapped():
+            self._mode_banner_is.pack(side=tk.RIGHT, padx=2, pady=2)
+        if not ban.winfo_ismapped():
+            ban.pack(fill=tk.X, padx=4, pady=(2, 0), before=self.vsplit)
+
+    # ----------------------------------------------------------- plate map
+    PLATE_COLOURS = {
+        "hom1": ("#3B82C4", "1"), "hom2": ("#E08A2E", "2"), "het": ("#3BA55C", "H"),
+        "nocall": ("#9AA0A6", "–"), "other": ("#8E6CC7", "?"),
+        "unscored": ("#FFFFFF", ""), "missing": ("#ECEDEF", ""),
+    }
+
+    @staticmethod
+    def _call_class(call):
+        c = str(call or "").lower().replace("_", "-")
+        if not c:
+            return "unscored"
+        if "no" in c and "call" in c:
+            return "nocall"
+        if c.startswith("het"):
+            return "het"
+        if c in ("hom-1", "hom1"):
+            return "hom1"
+        if c in ("hom-2", "hom2"):
+            return "hom2"
+        return "other"
+
+    @staticmethod
+    def _well_rc(name):
+        """('A', 1) for 'A01' / 'a1' / '..._A01'; None if no well id."""
+        m = re.fullmatch(r"([A-Pa-p])(\d{1,2})", name)
+        if m:                                   # a bare well id, 96 or 384
+            return m.group(1).upper(), int(m.group(2))
+        m = WELL_RE.search(name)                # a well inside a longer name
+        if m:
+            w = m.group(1)
+            return w[0].upper(), int(w[1:])
+        return None
+
+    def _plate_runs(self):
+        runs = []
+        for p in list(self.selected or []) + list(self.files or []):
+            r = Path(p).parent.name
+            if r not in runs:
+                runs.append(r)
+        return runs
+
+    def _plate_files(self, run):
+        """{(row, col): path} for every trace of *run* in the loaded folders."""
+        cache = getattr(self, "_plate_files_cache", {})
+        if run not in cache:
+            files = [p for p in discover_files(self.folders) if p.parent.name == run]
+            out = {}
+            for p in files:
+                rc = self._well_rc(p.stem)
+                if rc and rc not in out:
+                    out[rc] = p
+            cache[run] = out
+            self._plate_files_cache = cache
+        return cache[run]
+
+    def show_plate_map(self):
+        """A 96-well (or 384-well) map of one run: each well coloured by its
+        call, the wells on screen outlined; click to show wells."""
+        win = getattr(self, "_plate_win", None)
+        try:
+            if win is not None and win.winfo_exists():
+                win.deiconify()
+                win.lift()
+                self._plate_map_refresh(force=True)
+                return
+        except tk.TclError:
+            pass
+        runs = self._plate_runs()
+        if not runs:
+            messagebox.showinfo("Plate map", "Add a data folder first.")
+            return
+        win = tk.Toplevel(self)
+        self._plate_win = win
+        win.title("Plate map")
+        win.transient(self)
+        top = ttk.Frame(win, padding=(8, 8, 8, 2))
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Run").pack(side=tk.LEFT)
+        self._plate_run = tk.StringVar(value=runs[0])
+        cb = ttk.Combobox(top, textvariable=self._plate_run, values=runs,
+                          state="readonly", width=40)
+        cb.pack(side=tk.LEFT, padx=6)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._plate_map_refresh(force=True))
+        self._plate_canvas = tk.Canvas(win, bg="#FFFFFF", highlightthickness=0)
+        self._plate_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        legend = ttk.Frame(win, padding=(8, 0, 8, 2))
+        legend.pack(fill=tk.X)
+        for key, text in (("hom1", "hom-1"), ("hom2", "hom-2"), ("het", "het"),
+                          ("nocall", "no-call"), ("unscored", "not scored"),
+                          ("missing", "no file")):
+            col, _ = self.PLATE_COLOURS[key]
+            sw = tk.Canvas(legend, width=14, height=14, highlightthickness=0, bg=win.cget("bg"))
+            sw.create_rectangle(1, 1, 13, 13, fill=col, outline="#888")
+            sw.pack(side=tk.LEFT, padx=(6, 2))
+            ttk.Label(legend, text=text).pack(side=tk.LEFT)
+        hint = ttk.Label(win, foreground="#555", padding=(8, 0, 8, 8), justify=tk.LEFT, text=(
+            "Click a well to show it · Ctrl-click to add/remove · click a row letter "
+            "or column number for the whole row/column · red outline = on screen"))
+        hint.pack(fill=tk.X)
+        hint.bind("<Configure>", lambda e: hint.configure(wraplength=max(200, e.width - 16)))
+        self._plate_canvas.bind("<Configure>", lambda e: self._plate_map_refresh(force=True))
+        self._plate_canvas.bind("<Button-1>", lambda e: self._plate_click(e, add=False))
+        self._plate_canvas.bind("<Control-Button-1>", lambda e: self._plate_click(e, add=True))
+        win.geometry("640x420")
+        self._plate_map_refresh(force=True)
+
+    def _plate_geometry(self, files):
+        rows = "ABCDEFGH"
+        ncol = 12
+        if any(r > "H" for r, _c in files) or any(c > 12 for _r, c in files):
+            rows, ncol = "ABCDEFGHIJKLMNOP", 24
+        cv = self._plate_canvas
+        w = max(200, cv.winfo_width())
+        h = max(150, cv.winfo_height())
+        cell = max(12, min((w - 30) / ncol, (h - 24) / len(rows)))
+        return rows, ncol, cell, 26, 20
+
+    def _plate_map_refresh(self, force=False):
+        win = getattr(self, "_plate_win", None)
+        try:
+            if win is None or not win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        run = self._plate_run.get()
+        files = self._plate_files(run)
+        calls = {}
+        for r in (getattr(self, "_geno_rows", None) or []):
+            if r.get("run") == run and r.get("well"):
+                rc = self._well_rc(str(r["well"]))
+                if rc:
+                    calls[rc] = r.get("call", "")
+        shown = {self._well_rc(Path(p).stem) for p in (self.selected or [])[: self._graph_count() * 4]
+                 if Path(p).parent.name == run}
+        cv = self._plate_canvas
+        cv.delete("all")
+        rows, ncol, cell, x0, y0 = self._plate_geometry(files)
+        self._plate_layout = (rows, ncol, cell, x0, y0)
+        small = cell < 26
+        for c in range(1, ncol + 1):
+            cv.create_text(x0 + (c - 0.5) * cell, y0 / 2, text=str(c),
+                           font=("DejaVu Sans", 7 if small else 9), tags=("hdr", f"col{c}"))
+        for ri, r in enumerate(rows):
+            cv.create_text(x0 / 2, y0 + (ri + 0.5) * cell, text=r,
+                           font=("DejaVu Sans", 7 if small else 9, "bold"), tags=("hdr", f"row{r}"))
+            for c in range(1, ncol + 1):
+                rc = (r, c)
+                if rc not in files:
+                    key = "missing"
+                else:
+                    key = self._call_class(calls.get(rc, ""))
+                fill, mark = self.PLATE_COLOURS[key]
+                xa, ya = x0 + (c - 1) * cell + 1, y0 + ri * cell + 1
+                on = rc in shown
+                cv.create_rectangle(xa, ya, xa + cell - 2, ya + cell - 2, fill=fill,
+                                    outline="#D62828" if on else "#B8BDC4",
+                                    width=3 if on else 1)
+                if mark and not small:
+                    cv.create_text(xa + cell / 2 - 1, ya + cell / 2 - 1, text=mark,
+                                   fill="#FFFFFF" if key != "unscored" else "#333",
+                                   font=("DejaVu Sans", 9, "bold"))
+
+    def _plate_click(self, event, add=False):
+        layout = getattr(self, "_plate_layout", None)
+        if not layout:
+            return "break"
+        rows, ncol, cell, x0, y0 = layout
+        run = self._plate_run.get()
+        files = self._plate_files(run)
+        col = int((event.x - x0) // cell) + 1
+        ri = int((event.y - y0) // cell)
+        targets = []
+        if event.x < x0 and 0 <= ri < len(rows):              # row header
+            targets = [files[(rows[ri], c)] for c in range(1, ncol + 1) if (rows[ri], c) in files]
+        elif event.y < y0 and 1 <= col <= ncol:                 # column header
+            targets = [files[(r, col)] for r in rows if (r, col) in files]
+        elif 0 <= ri < len(rows) and 1 <= col <= ncol and (rows[ri], col) in files:
+            targets = [files[(rows[ri], col)]]
+        if not targets:
+            return "break"
+        if self.overlay_runs.get():
+            # the same wells in every run of this plate
+            plate = self._plate_of(targets[0])
+            wells = {self._well_label(p) for p in targets}
+            targets = [p for p in self.files
+                       if self._plate_of(p) == plate and self._well_label(p) in wells] or targets
+        if add:
+            sel = list(self.selected or [])
+            keys = {str(Path(p).resolve()) for p in sel}
+            for p in targets:
+                k = str(Path(p).resolve())
+                if k in keys:
+                    sel = [s for s in sel if str(Path(s).resolve()) != k]
+                else:
+                    sel.append(p)
+            targets = sel
+        if len(targets) > 1 and not add:
+            per = len({self._well_label(p) for p in targets}) if self.overlay_runs.get() else len(targets)
+            self.n_graphs.set(min(MAX_GRAPHS, max(self._graph_count(), per)))
+        self.selected = list(targets)
+        try:
+            idx = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}
+            self.file_list.selection_clear(0, tk.END)
+            for p in self.selected:
+                i = idx.get(str(Path(p).resolve()))
+                if i is not None:
+                    self.file_list.selection_set(i)
+                    self.file_list.see(i)
+        except tk.TclError:
+            pass
+        self.redraw()
+        return "break"
 
     def _update_page_label(self, shown):
         """'Wells 5–8 of 192' -- and say so when the selection is bigger than
@@ -1334,6 +1567,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         runs = frozenset(f.parent.name for f in self.files)
         if runs != getattr(self, "_geno_runs_shown", None):
             self._geno_runs_shown = runs
+            self._plate_files_cache = {}        # folders changed: re-scan
             self._sync_geno_table()
 
     def on_file_select(self, _evt=None):
@@ -1525,10 +1759,26 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _ensure_doc(self, path: Path) -> TraceDocument:
         key = str(path.resolve())
         if key not in self.docs:
+            prev_status = self.status_var.get()
             self.status_var.set(f"Loading {path.name}…")
             self.update_idletasks()
             try:
-                self.docs[key] = load_trace(path, base_order=self.base_order_var.get())
+                order, src = self._order_for(path)
+                doc = load_trace(path, base_order=order)
+                declared = declared_dye_order(getattr(doc, "footer_fields", None))
+                if src == "default" and declared and declared != order:
+                    # The file says how its channels are dyed; believe it
+                    # over the general setting (a run-specific choice still
+                    # wins -- see Comments ▸ Dye order of this run…).
+                    order, src = declared, "file"
+                    doc = load_trace(path, base_order=order)
+                elif src == "default" and declared:
+                    src = "file"
+                doc.dye_order = order
+                doc.dye_order_source = src
+                self.docs[key] = doc
+                if self.status_var.get().startswith("Loading "):
+                    self.status_var.set(prev_status)
             except RuntimeError as e:
                 messagebox.showerror("Load error", f"{path.name}:\n{e}")
                 raise
@@ -1564,7 +1814,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     if doc.source == "rsd":
                         self.status_var.set(f"Basecalling {done + 1}/{total}: "
                                             f"{path.name} ({self.settings.basecaller})…")
-                        run_basecall(doc, self.settings)
+                        run_basecall(doc, self._settings_for(doc, self.settings))
                     else:
                         self.status_var.set(f"{path.name}: no {self.basecaller.get()} "
                                             f"params for {doc.source} files — "
@@ -1649,10 +1899,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "motion_notify_event", self._on_gen_motion)
         self.genotyping_active = True
         self._below_refresh()          # the pick table takes the slot
-        self.status_var.set("Manual genotyping — zoom in, click each peak you "
-                            "want; page the batch (Genotyping · Next/Previous "
-                            "batch) and pick the next wells. Hold R and click a "
-                            "picked peak to remove it.")
+        self.status_var.set("Manual peak picking — click each peak you want "
+                            "(Ctrl+drag zooms), page on with ↓ / ↑ and pick the "
+                            "next wells. R+click removes a pick; Esc leaves.")
         self.redraw()
 
     def toggle_area_picking(self):
@@ -1771,15 +2020,114 @@ class LimoncelloAnalyzerApp(tk.Tk):
         pk = self._area_pickers.get(key)
         if pk is None:
             doc = self._ensure_doc(path)
-            col2chan = self._col_to_chan()
+            col2chan = self._col_to_chan(self._doc_order(doc))
             pk = DragAreaPicker(doc, path, colors=self._theme_colors(),
-                                base_order=self.base_order_var.get(),
+                                base_order=self._doc_order(doc),
                                 theme_mode=self._theme_mode(),
                                 show=lambda c: self.chan_show[
                                     col2chan.get(c, c)].get(),
                                 run_name=path.parent.name)
             self._area_pickers[key] = pk
         return pk
+
+    def _run_orders(self):
+        """Dye orders chosen per run (folder name -> order), from the prefs."""
+        cache = getattr(self, "_run_orders_cache", None)
+        if cache is None:
+            try:
+                cache = dict(mark_library.load_prefs().get("run_dye_orders", {}))
+            except Exception:                              # noqa: BLE001
+                cache = {}
+            self._run_orders_cache = cache
+        return cache
+
+    def _order_for(self, path):
+        """(dye order, where it came from) for the run *path* belongs to.
+
+        "run": chosen for this run; "default": the general setting.  _ensure_doc
+        upgrades "default" to the order the file declares, when it declares one.
+        """
+        run = Path(path).parent.name
+        chosen = self._run_orders().get(run)
+        if chosen:
+            return chosen.upper(), "run"
+        return (self.base_order_var.get() or "ACTG").upper(), "default"
+
+    def _doc_order(self, doc):
+        return (getattr(doc, "dye_order", None) or self.base_order_var.get()
+                or "ACTG").upper()
+
+    def _settings_for(self, doc, settings):
+        """*settings* with the dye order of *doc*'s own run."""
+        import dataclasses
+        order = self._doc_order(doc)
+        if (settings.base_order or "").upper() == order:
+            return settings
+        return dataclasses.replace(settings, base_order=order)
+
+    def _display_order(self):
+        """The order the channel bar is labelled with: the first well on
+        screen, else the general setting."""
+        for p in (self.selected or [])[: self._graph_count()]:
+            doc = self.docs.get(str(Path(p).resolve()))
+            if doc is not None:
+                return self._doc_order(doc)
+        return (self.base_order_var.get() or "ACTG").upper()
+
+    def set_run_dye_order(self):
+        """Comments ▸ Dye order of this run…: fix the order for one run."""
+        paths = list(self.selected or [])
+        if not paths:
+            messagebox.showinfo("Dye order of this run", "Select a well of the run first.")
+            return
+        run = Path(paths[0]).parent.name
+        doc = self.docs.get(str(Path(paths[0]).resolve()))
+        declared = declared_dye_order(getattr(doc, "footer_fields", None)) if doc else ""
+        win = tk.Toplevel(self)
+        win.title("Dye order of this run")
+        win.transient(self)
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text=f"Run: {run}", font=("", 10, "bold")).pack(anchor=tk.W)
+        ttk.Label(body, wraplength=360, justify=tk.LEFT, text=(
+            (f"The file declares {declared}." if declared else
+             "The file does not declare a dye order (normal for genotyping runs).")
+            + f"\nGeneral setting: {(self.base_order_var.get() or 'ACTG').upper()}."
+        )).pack(anchor=tk.W, pady=(4, 8))
+        choices = ["Automatic (file, else general setting)", "ACTG", "TGCA", "GATC", "CTAG"]
+        cur = self._run_orders().get(run)
+        var = tk.StringVar(value=cur if cur in choices else choices[0])
+        ttk.Combobox(body, textvariable=var, values=choices, state="readonly",
+                     width=36).pack(anchor=tk.W)
+
+        def save():
+            v = var.get()
+            orders = self._run_orders()
+            if v == choices[0]:
+                orders.pop(run, None)
+            else:
+                orders[run] = v
+            try:
+                prefs = mark_library.load_prefs()
+                prefs["run_dye_orders"] = dict(orders)
+                mark_library.save_prefs(prefs)
+            except Exception:                              # noqa: BLE001
+                pass
+            # drop this run's traces (and its pickers, unless they hold picks)
+            for key in [k for k in self.docs if Path(k).parent.name == run]:
+                self.docs.pop(key, None)
+            for store in (self._gen_pickers, self._area_pickers):
+                for key in [k for k, pk in store.items()
+                            if Path(k).parent.name == run and not getattr(pk, "records", None)]:
+                    store.pop(key, None)
+            win.destroy()
+            self.redraw()
+            self.status_var.set(f"{run}: dye order {v}")
+        btns = ttk.Frame(body)
+        btns.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Save", command=save).pack(side=tk.RIGHT, padx=6)
+        self._grab_soon(win)
 
     def _gen_paths(self):
         n = self._graph_count()
@@ -1795,9 +2143,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             # the picker is handed acgt columns, the checkboxes are indexed by
             # physical channel -- translate, or a non-ACTG run hides one trace
             # and picks from another
-            col2chan = self._col_to_chan()
+            col2chan = self._col_to_chan(self._doc_order(doc))
             pk = PeakPicker(doc, path, colors=self._theme_colors(),
-                            base_order=self.base_order_var.get(),
+                            base_order=self._doc_order(doc),
                             theme_mode=self._theme_mode(),
                             show=lambda c: self.chan_show[
                                 col2chan.get(c, c)].get(),
@@ -1823,17 +2171,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
         try:
             entry = self._library_wells(path.parent.name).get(path.stem)
             if entry:
-                mark_library.apply_picker(pk, entry, default_col=self._is_col())
+                mark_library.apply_picker(pk, entry, default_col=self._is_col(path))
         except Exception:
             pass
 
-    def _is_col(self):
-        """The ACGT column the internal standard lives on, or None if the
-        settings are not readable yet."""
+    def _is_col(self, path=None):
+        """The ACGT column the internal standard lives on (in *path*'s run),
+        or None if the settings are not readable yet."""
         try:
             import genotyping
+            order = (self._order_for(path)[0] if path is not None
+                     else self.base_order_var.get())
+            doc = self.docs.get(str(Path(path).resolve())) if path is not None else None
+            if doc is not None:
+                order = self._doc_order(doc)
             return genotyping.acgt_index_for_channel(
-                self.base_order_var.get(), int(self._auto_is_channel.get()))
+                order, int(self._auto_is_channel.get()))
         except Exception:                              # noqa: BLE001
             return None
 
@@ -2266,7 +2619,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             # draw by PHYSICAL channel (run dye order) so pick mode shows the
             # same legend, colours, stacking and show/hide as the viewer
             for ci, base, col, color in self._channel_lines(
-                    self._settings_from_ui()):
+                    self._settings_for(doc, self._settings_from_ui())):
                 if not self.chan_show[ci].get():
                     continue
                 seg = doc.acgt[:, col]
@@ -2299,9 +2652,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
             else:
                 pk.plot_overlay(ax)
             ax.tick_params(labelsize=7)
-            ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
+            ax.text(0.004, 0.995,
+                    self._graph_title(path, doc.path.parent.name),
                     transform=ax.transAxes, ha="left", va="top",
-                    fontsize=6, color="#333", zorder=6)
+                    fontsize=8, color="#222", zorder=6)
             if not self.area_mode:
                 self._gen_cursors.append(self._make_gen_cursor(ax))
             self._style_x_axis(ax, i == len(paths) - 1)
@@ -2488,9 +2842,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         channel = simpledialog.askinteger(
             "Standard channel",
             "Which physical channel carries the internal standard?\n\n"
-            f"(dye order {self.base_order_var.get()}: "
+            f"(dye order {self._display_order()}: "
             + ", ".join(f"Ch{c + 1}={b}" for c, b in
-                        enumerate(self.base_order_var.get()[:4])) + ")",
+                        enumerate(self._display_order()[:4])) + ")",
             initialvalue=int(self._auto_is_channel.get()),
             minvalue=1, maxvalue=4, parent=self)
         if channel is None:
@@ -2517,7 +2871,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 continue
             try:
                 col = genotyping.acgt_index_for_channel(
-                    self.base_order_var.get(), channel)
+                    self._doc_order(pk.doc), channel)
                 self._model_mark(pk, self._model_for(path), col)
                 marked.append(path.stem)
                 pairs.append((path, pk))
@@ -2906,7 +3260,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         from genotyping import acgt_index_for_channel
         try:
             base = "ACGT"[acgt_index_for_channel(
-                self.base_order_var.get(), channel)]
+                self._display_order(), channel)]
         except Exception:
             base = "?"
         return f"Ch{channel} ({base})"
@@ -2958,10 +3312,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         is_c = int(self._auto_is_channel.get())
         sa_c = int(self._auto_sample_channel.get())
         try:
-            is_col = genotyping.acgt_index_for_channel(
-                self.base_order_var.get(), is_c)
-            samp_col = genotyping.acgt_index_for_channel(
-                self.base_order_var.get(), sa_c)
+            run_order = self._doc_order(self._ensure_doc(Path(targets[0])))
+            is_col = genotyping.acgt_index_for_channel(run_order, is_c)
+            samp_col = genotyping.acgt_index_for_channel(run_order, sa_c)
         except ValueError as e:
             messagebox.showerror("Semi automatic internal standard", str(e))
             return
@@ -3281,7 +3634,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "sample.\n\nUse Auto genotyping ▸ Channel "
                 "roles to\npoint them at two different channels.")
             return
-        base = self.base_order_var.get()
         # One standard shape per run: fit each run's from its own marks (marks
         # restored from the library count), so a window holding several runs
         # gets all of them genotyped instead of one run's shape applied
@@ -3292,7 +3644,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
             groups.setdefault(p.parent.name, []).append(p)
         models = {}
         for run, paths in groups.items():
-            models[run] = (self._auto_learn_from_marks(paths, is_c, sa_c, base)
+            # each run in its own dye order (declared by its files, or chosen)
+            run_base = self._doc_order(self._ensure_doc(paths[0]))
+            models[run] = (self._auto_learn_from_marks(paths, is_c, sa_c, run_base)
                            or self._auto_models.get(run)
                            or self._auto_saved_model)
         self._auto_rows = []
@@ -3330,7 +3684,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     manual_std = None
                 self._auto_rows.append(genotyping.auto_genotype(
                     doc, is_channel=is_c, sample_channel=sa_c,
-                    base_order=base, cut=genotyping.DEFAULT_IS_CUT,
+                    base_order=self._doc_order(doc), cut=genotyping.DEFAULT_IS_CUT,
                     run_name=path.parent.name,
                     std_scans_manual=manual_std,
                     is_model=models.get(path.parent.name),
@@ -3523,6 +3877,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if tags:
                 tree.item(iid, tags=tuple(tags))
             self._auto_iids[(r.get("run"), r.get("well"))] = iid
+        self._plate_map_refresh()
         self._below_refresh()
         self._below_follow()
 
@@ -3584,6 +3939,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         graphs get the room.
         """
         target = self._below_target()
+        upd = getattr(self, "_update_mode_banner", None)
+        if upd is not None:
+            upd()
         self._set_below_visible(target is not None)
         pick = getattr(self, "pick_table", None)
         geno = getattr(self, "_auto_table", None)
@@ -4059,7 +4417,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             new = genotyping.auto_genotype(
                 doc, is_channel=int(self._auto_is_channel.get()),
                 sample_channel=int(self._auto_sample_channel.get()),
-                base_order=self.base_order_var.get(),
+                base_order=self._doc_order(doc),
                 cut=genotyping.DEFAULT_IS_CUT, run_name=run,
                 std_scans_manual=list(scans),
                 is_model=models.get(run) or getattr(self, "_auto_is_model",
@@ -4205,7 +4563,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 results.append(size_trace(
                     doc, ladder, ladder_channel=ladder_channel,
                     sample_channel=sample_channel,
-                    base_order=self.base_order_var.get()))
+                    base_order=self._doc_order(doc)))
             except Exception as e:                          # noqa: BLE001
                 failures.append(f"{Path(path).name}: {e}")
         if not results:
@@ -4285,7 +4643,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         whole group to the end of the toolbar, away from its "Channels:"
         label.  Free of Tk so it can be tested.
         """
-        order = (order or self.base_order_var.get() or "ACTG").upper()[:4]
+        order = (order or self._display_order() or "ACTG").upper()[:4]
         return [(ci, f"  Ch{ci + 1} {order[ci]}  ")
                 for ci in range(min(len(order), len(CHANNEL_ORDER)))]
 
@@ -4422,10 +4780,19 @@ class LimoncelloAnalyzerApp(tk.Tk):
             for key in ("PLATE ID", "SAMPLE NAME", "WELL ID", "MACHINE ID",
                         "APPLICATION", "BASE CALLER", "NAME", "COMMENT",
                         "LASER MODE", "BEAMSPLITTER A", "BEAMSPLITTER B",
-                        "FILTER", "DYE", "BASE"):
+                        "FILTER"):
                 if fld.get(key):
                     add(key, fld[key])
-        add("Dye order (channels)", (self.base_order_var.get() or "ACTG").upper())
+            for key, label in (("CHANNEL DYES", "Dyes (Ch1–Ch4)"),
+                               ("CHANNEL BASES", "Bases (Ch1–Ch4)")):
+                vals = fld.get(key) or []
+                if any(vals):
+                    add(label, " · ".join(v or "–" for v in vals))
+        src = {"run": "chosen for this run (Comments ▸ Dye order of this run…)",
+               "file": "declared by the file",
+               "default": "general setting (⚙ Basecall settings…)"}.get(
+                   getattr(doc, "dye_order_source", "default"), "")
+        add("Dye order (channels)", f"{self._doc_order(doc)}  — {src}")
         # Run voltage / time / temperature / PMT come out of the .rsd itself;
         # a text export is merged in only for the extras it adds.
         rp = getattr(doc, "run_params", None) or {}
@@ -4448,7 +4815,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 if key.strip().lower() == "base order":
                     exp_order = val.strip().upper()
                     break
-            cur = (self.base_order_var.get() or "ACTG").upper()
+            cur = self._doc_order(doc)
             if exp_order and exp_order != cur:
                 add("Dye order note", f"run says {exp_order}, using {cur}")
             nl = ""
@@ -4480,7 +4847,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             # Report per *channel*, not per matrix column: doc.base_order is
             # the A,C,G,T matrix layout, so pairing it with tr[:, c] would
             # label the columns as channels and disagree with the channel bar.
-            order = (self.base_order_var.get() or "ACTG").upper()[:4]
+            order = self._doc_order(doc)[:4]
             col2chan = self._col_to_chan(order)
             per = ", ".join(
                 f"Ch{ci + 1} {order[ci]}={float(np.nanmax(tr[:, col])):.3f} V"
@@ -4541,7 +4908,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         cbs = getattr(self, "_chan_cbs", None)
         if not cbs:
             return
-        order = (self.base_order_var.get() or "ACTG").upper()
+        order = (self._display_order() or "ACTG").upper()
         colors = self._theme_colors()
         mode = self._theme_mode()
         for ci, base in enumerate(order[:4]):
@@ -4596,14 +4963,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 ax = axes[k * rows]
                 ax.text(0.5, 0.5, f"Load error: {path.name}", ha="center", transform=ax.transAxes)
                 continue
-            tr = display_trace(doc, settings)
+            dset = self._settings_for(doc, settings)
+            tr = display_trace(doc, dset)
             n = tr.shape[0]
             gx1 = max(gx1, n)
             segs = np.array_split(np.arange(n), rows)
             for r in range(rows):
                 ax = axes[k * rows + r]
                 sel = segs[r]
-                for ci, base, col, color in self._channel_lines(settings):
+                for ci, base, col, color in self._channel_lines(dset):
                     if self.chan_show[ci].get():
                         y = tr[sel, col]
                         ax.plot(sel, y, color=color, lw=0.6,
@@ -5163,6 +5531,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         what makes the two read as one view instead of two lists.
         """
         self._redraw_plots()
+        self._plate_map_refresh()
+        order = self._display_order()
+        if order != getattr(self, "_labelled_order", None):
+            # the channel bar names each channel's base for the wells on
+            # screen, which may be a run with its own dye order
+            self._labelled_order = order
+            self._refresh_channel_labels()
+            self._refresh_channel_buttons()
         self._below_refresh()
         self._below_follow()
 
@@ -5231,13 +5607,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     gy1 = gy[1] if gy1 is None else max(gy1, gy[1])
                     gx1 = gy[2] if gx1 is None else max(gx1, gy[2])
                     gx0 = 0 if gx0 is None else min(gx0, 0)
-            tr = display_trace(doc, settings)
+            dset = self._settings_for(doc, settings)
+            tr = display_trace(doc, dset)
             s0 = max(0, settings.signal_start)
             s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
             s1 = min(tr.shape[0], s1)
             x = np.arange(s0, s1)
             plotted = False
-            for ci, base, col, color in self._channel_lines(settings):
+            for ci, base, col, color in self._channel_lines(dset):
                 if not self.chan_show[ci].get():
                     continue
                 seg = tr[s0:s1, col]
@@ -5268,17 +5645,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 names = "   ".join(
                     f"{'━' if k == 0 else {'--': '╍', ':': '┈', '-.': '┄'}.get(RUN_STYLES[k % len(RUN_STYLES)], '━')} "
                     f"{g.parent.name}" for k, g in enumerate(group))
-                label = f"{self._well_label(path)}    {names}"
+                label = self._graph_title(path, names)
             else:
-                label = f"{doc.path.parent.name}/{doc.path.name}"
+                label = self._graph_title(path, doc.path.parent.name)
             ax.text(0.004, 0.995, label,
                     transform=ax.transAxes, ha="left", va="top",
-                    fontsize=6 if len(group) == 1 else 7, color="#333", zorder=6)
+                    fontsize=8, color="#222", zorder=6)
             self._style_x_axis(ax, i == n_ax - 1)
 
             if settings.view_mode == "esd":
                 self._draw_esd_peaks(
-                    ax, doc, s0, s1, self._channel_lines(settings))
+                    ax, doc, s0, s1, self._channel_lines(dset))
             elif doc.sequence and settings.view_mode == "called" and doc.peak_positions:
                 if self.show_letters.get():
                     self._draw_letters(ax, doc, s0, s1, colors, force=False)
@@ -5321,6 +5698,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         run number, so ..._270910Run01 and ..._270910Run02 are one plate."""
         return re.sub(r"[_\- ]?run\s*\d+$", "", Path(path).parent.name, flags=re.I)
 
+    def _graph_title(self, path, rest):
+        """Graph corner label: the well in bold, then *rest* (run name or the
+        overlay's run legend).  Only a clean well id goes through mathtext."""
+        well = self._well_label(path)
+        if re.fullmatch(r"[A-Za-z0-9]+", well or ""):
+            return f"$\\bf{{{well}}}$   {str(rest).replace('$', '')}"
+        return f"{well}   {str(rest).replace('$', '')}"
+
     def _view_groups(self, n):
         """What the viewer draws: n graphs, one file each -- or, with
         "Overlay runs", n wells, each holding every selected run of it."""
@@ -5344,13 +5729,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
             doc = self._ensure_doc(path)
         except Exception:                                  # noqa: BLE001
             return None
-        tr = display_trace(doc, settings)
+        dset = self._settings_for(doc, settings)
+        tr = display_trace(doc, dset)
         s0 = max(0, settings.signal_start)
         s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
         s1 = min(tr.shape[0], s1)
         x = np.arange(s0, s1)
         lo = hi = None
-        for ci, base, col, color in self._channel_lines(settings):
+        for ci, base, col, color in self._channel_lines(dset):
             if not self.chan_show[ci].get():
                 continue
             seg = tr[s0:s1, col]

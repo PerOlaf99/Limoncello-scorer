@@ -43,6 +43,10 @@ class _Bar:
     channel_bar_order = sa.LimoncelloAnalyzerApp.channel_bar_order
     _col_to_chan = sa.LimoncelloAnalyzerApp._col_to_chan
 
+    def _display_order(self):
+        # no wells on screen: the bar is labelled with the general setting
+        return self.base_order_var.get()
+
 
 def labels(order):
     return [t.strip() for _ci, t in _Bar(order).channel_bar_order()]

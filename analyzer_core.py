@@ -272,9 +272,26 @@ def parse_rsd_footer(footer_raw) -> dict:
         # "PLATE ID" is a key rather than "\x05\tPLATE ID".
         label = label.lstrip("".join(chr(c) for c in range(0x20))).strip()
         if label:
-            out[label] = value.decode("latin-1").rstrip("\x00").strip()
+            text = value.decode("latin-1").rstrip("\x00").strip()
+            out[label] = text
+            # BASE / DYE come once per channel, in channel order; keep all
+            # four instead of only the last one.
+            if label in ("BASE", "DYE"):
+                out.setdefault(f"CHANNEL {label}S", []).append(text)
         i = end + 3 + n
     return out
+
+
+def declared_dye_order(fields) -> str:
+    """The dye order a trace file declares for itself, e.g. "TGCA", or "".
+
+    Sequencing runs name the base on each of the four channels in their
+    footer; genotyping runs leave BASE empty (only the dyes are named), so
+    they declare nothing and the user's setting applies.
+    """
+    bases = (fields or {}).get("CHANNEL BASES") or []
+    order = "".join(b.strip().upper()[:1] for b in bases[:4])
+    return order if len(bases) >= 4 and sorted(order) == list("ACGT") else ""
 
 
 # Field labels for the run-settings block recovered from the RSD binary, in
