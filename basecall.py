@@ -10,7 +10,7 @@ a combined FASTA of all reads.
 Usage:
     python basecall.py --input /path/to/MB1000_M13_DT --out calls
     python basecall.py --input A01.rsd --out calls
-    python basecall.py --input plate_dir --out calls --format fq   # FASTQ with PHRED
+    python basecall.py --input plate_dir --out calls --format fq   # FASTQ with calibrated Phred
 """
 import argparse
 import os
@@ -23,6 +23,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from cimarron_basecaller import track_bases
+from cimarron_basecaller.phred import phred_qualities
 from cimarron_basecaller.rsd_io import read_rsd, to_acgt_trace
 
 # Best configuration on MB1000_M13_DT. Tuned against the project GOLDEN
@@ -62,13 +63,21 @@ PHRED_OFFSET = 33
 
 
 def basecall_well(path, config=WIN_CONFIG, base_order="TGCA"):
-    """Return (sequence, phred_quals) for one .rsd file."""
+    """Return (sequence, phred_quals) for one .rsd file.
+
+    The qualities are calibrated Phred scores (see cimarron_basecaller.phred),
+    priced with the model fitted for *config*; a read that drops to the
+    fallback config is priced with the golden model.
+    """
     rsd = read_rsd(path)
     trace, order = to_acgt_trace(rsd, base_order=base_order)
-    seq, quals, _bands = track_bases(trace, base_order=order, **config)
-    if len(quals) == 0 or float(np.mean(quals)) < QUALITY_GATE:
-        seq, quals, _bands = track_bases(trace, base_order=order, **FALLBACK_CONFIG)
-    return seq, np.asarray(quals, dtype=int)
+    model = "precision" if config == WIN_CONFIG_PRECISION else "golden"
+    seq, heights, bands = track_bases(trace, base_order=order, **config)
+    # QUALITY_GATE is on the tracker's peak heights, not on Phred.
+    if len(heights) == 0 or float(np.mean(heights)) < QUALITY_GATE:
+        seq, heights, bands = track_bases(trace, base_order=order, **FALLBACK_CONFIG)
+        model = "golden"
+    return seq, phred_qualities(bands, model)
 
 
 def _write_fasta(fh, name, seq, width=60):
@@ -98,7 +107,7 @@ def main():
     ap.add_argument("--input", required=True, help=".rsd file or directory")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--format", choices=("fa", "fq"), default="fa",
-                    help="fa = FASTA (default), fq = FASTQ with PHRED qualities")
+                    help="fa = FASTA (default), fq = FASTQ with calibrated Phred qualities")
     ap.add_argument("--mode", choices=("golden", "precision"), default="golden",
                     help="golden = matched-bases/bit-score optimum (default); "
                          "precision = longest-error-free-run/%%ID optimum")

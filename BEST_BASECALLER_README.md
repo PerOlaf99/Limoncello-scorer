@@ -103,6 +103,8 @@ byte-for-byte.
   - `spacing_caller.py` - `track_bases`, the caller: spectral separation,
     Gaussian band filter, mobility shift, combined-channel scoring, tracking
     and quality trimming.
+  - `phred.py` - calibrated Phred qualities for `--format fq` (logistic model
+    fitted on this plate against M13; see the module docstring).
   - `simple_caller.py` - shared signal helpers (baseline subtraction, local
     normalisation, mobility correction).
   - `rsd_io.py` / `scf_io.py` - MegaBACE `.rsd` and SCF readers.
