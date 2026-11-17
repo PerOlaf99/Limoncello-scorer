@@ -126,6 +126,28 @@ SRC_FG = {
 }
 
 # well sorting modes: "letter first" = A01,A02,…; "number first" = A01,B01,…H01,A02…
+def _event_mods(event):
+    """(ctrl, shift) held during a matplotlib mouse event."""
+    key = (getattr(event, "key", None) or "").lower()
+    ge = getattr(event, "guiEvent", None)
+    state = getattr(ge, "state", 0) if ge is not None else 0
+    try:
+        state = int(state)
+    except (TypeError, ValueError):
+        state = 0
+    ctrl = "control" in key or "ctrl" in key or bool(state & 0x0004)
+    shift = "shift" in key or bool(state & 0x0001)
+    return ctrl, shift
+
+
+# Most graphs stacked at once.  Every place that reads the Graphs box goes
+# through _graph_count(), so the box, the viewer and the picking modes agree.
+MAX_GRAPHS = 12
+
+# Line styles that tell runs apart when "Overlay runs" puts the same well from
+# several runs into one graph (colour stays the dye's).
+RUN_STYLES = ["-", "--", ":", "-."]
+
 SORT_OPTIONS = [
     ("well_row", "Well (letter first)"),
     ("well_col", "Well (number first)"),
@@ -225,6 +247,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.settings = AnalysisSettings()
         self.base_order_var = tk.StringVar(value=self.settings.base_order)
         self.n_graphs = tk.IntVar(value=1)
+        # View options (View menu + the view bar), remembered across sessions.
+        _vp = mark_library.load_prefs().get("view", {})
+        self.y_scale = tk.StringVar(
+            value=_vp.get("y_scale", "shared") if _vp.get("y_scale") in
+            ("shared", "each") else "shared")
+        self.fit_y = tk.BooleanVar(value=bool(_vp.get("fit_y", True)))
+        self.always_table = tk.BooleanVar(value=bool(_vp.get("always_table", False)))
+        self.overlay_runs = tk.BooleanVar(value=bool(_vp.get("overlay_runs", False)))
         self.view_mode = tk.StringVar(value="processed")
         self.basecaller = tk.StringVar(value="mb1000_accuracy")
         self.status_var = tk.StringVar(value="Ready — add a data folder to begin")
@@ -317,6 +347,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._plot_axes: List = []
         self._full_xlim = None
         self._full_ylim = None
+        self._wrap_active = False      # wrap rows: each row its own X slice
+        self._plot_drag = None         # box-zoom / pan gesture in progress
 
         # List sorting / filtering / tour
         self.sort_mode = tk.StringVar(value="well_row")
@@ -435,6 +467,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
         view_m.add_checkbutton(
             label="Show instrument current (µA)", variable=self.show_current,
             command=lambda: (self._sync_current_btn(), self.redraw()))
+        view_m.add_separator()
+        yscale_m = tk.Menu(self, tearoff=0)
+        for code, label in (("shared", "Shared by all graphs"),
+                            ("each", "Each graph its own")):
+            yscale_m.add_radiobutton(
+                label=label, variable=self.y_scale, value=code,
+                command=lambda: (self._view_y.__setitem__(slice(None), [0.0, 1.0]),
+                                 self._sync_y_scale_cb(), self._view_option_changed()))
+        view_m.add_cascade(label="Y scale", menu=yscale_m)
+        view_m.add_checkbutton(label="Fit Y to view", variable=self.fit_y,
+                               command=self._view_option_changed)
+        view_m.add_checkbutton(label="Overlay runs of the same well",
+                               variable=self.overlay_runs,
+                               command=lambda: self._view_option_changed(redraw=True))
+        view_m.add_checkbutton(label="Always show table under graphs",
+                               variable=self.always_table,
+                               command=lambda: (self._save_view_prefs(),
+                                                self._below_refresh()))
         view_m.add_separator()
 
         sort_m = tk.Menu(self, tearoff=0)
@@ -728,12 +778,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         frow = ttk.Frame(left)
         frow.pack(fill=tk.X, padx=4, pady=(0, 2))
-        ttk.Label(frow, text="Graphs").pack(side=tk.LEFT)
-        tk.Spinbox(
-            frow, from_=1, to=8, textvariable=self.n_graphs, width=3,
-            command=self.redraw, highlightthickness=0
-        ).pack(side=tk.LEFT, padx=2)
-        ttk.Label(frow, text="Tour (ms)").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(frow, text="Tour (ms)").pack(side=tk.LEFT)
         tk.Spinbox(
             frow, from_=500, to=20000, increment=500, textvariable=self.cycle_ms,
             width=5, highlightthickness=0
@@ -782,14 +827,25 @@ class LimoncelloAnalyzerApp(tk.Tk):
             values=list(TRACE_THEMES))
         self.theme_cb.pack(side=tk.RIGHT, padx=(4, 8))
         self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
-        ttk.Button(chan_bar, text="⟲ Reset view",
-                   command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
         ttk.Button(chan_bar, text="Mark IS in shown wells",
                    command=self._gen_mark_std_batch).pack(side=tk.RIGHT, padx=4)
 
+        self._build_view_bar(center)
+
+        # Graphs above, the table for the current mode below, with a sash the
+        # user can drag; the lower pane is taken away when it has nothing to
+        # show (see _below_refresh).
+        self.vsplit = ttk.Panedwindow(center, orient=tk.VERTICAL)
+        self.vsplit.pack(fill=tk.BOTH, expand=True)
+        plot_pane = ttk.Frame(self.vsplit)
+        self.below = ttk.Frame(self.vsplit)
+        self.vsplit.add(plot_pane, weight=4)
+        self._below_shown = False
+        self._below_sash = None
+
         # Axis bars: drag to pan, mouse-wheel to zoom. One bar per axis and it
         # drives every visible graph at once (shared X / shared Y).
-        plotf = self.plotf = ttk.Frame(center)
+        plotf = self.plotf = ttk.Frame(plot_pane)
         plotf.pack(fill=tk.BOTH, expand=True)
         plotf.rowconfigure(0, weight=1)
         plotf.columnconfigure(0, weight=1)
@@ -798,6 +854,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.canvas = FigureCanvasTkAgg(self.fig, master=plotf)
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
         self.canvas.get_tk_widget().bind("<Button-3>", self._on_right_click)
+        # On the graphs themselves: wheel zooms at the cursor (Ctrl: Y,
+        # Shift: pan), drag zooms a box (Ctrl+drag while picking), middle-drag
+        # pans, double-click resets.
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
+        self.canvas.mpl_connect("scroll_event", self._on_plot_scroll)
+        self.canvas.mpl_connect("button_press_event", self._on_plot_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_plot_release)
         self.xbar = ttk.Scrollbar(plotf, orient=tk.HORIZONTAL)
         self.xbar.grid(row=1, column=0, sticky="ew")
         self.ybar = ttk.Scrollbar(plotf, orient=tk.VERTICAL)
@@ -817,14 +881,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # a call and its standard can be checked while the traces are on
         # screen.  The basecalled sequence is one toggle away, and manual peak
         # picking / area measuring swap the same slot for their own table.
-        hdr = ttk.Frame(center)
+        hdr = ttk.Frame(self.below)
         hdr.pack(fill=tk.X, padx=4)
         self.seq_hdr = ttk.Label(hdr, text="Genotyping")
         self.seq_hdr.pack(side=tk.LEFT)
         self.seq_btn = ttk.Button(hdr, text="Show sequence",
                                   command=self._toggle_below, width=14)
         self.seq_btn.pack(side=tk.RIGHT)
-        self.seq_text = scrolledtext.ScrolledText(center, height=4, wrap=tk.CHAR,
+        self.seq_text = scrolledtext.ScrolledText(self.below, height=4, wrap=tk.CHAR,
                                                   font=("Courier", 9))
         # not packed here: _below_refresh() decides which pane goes where
         self._build_auto_table()
@@ -832,6 +896,106 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # ----- Advanced base-call parameters live in a menu dialog ----
         # (no right-hand knob panel → more room for plots, no flicker)
         self._build_settings_dialog()
+
+    def _build_view_bar(self, parent):
+        """Second toolbar row: what is on screen and how it is scaled."""
+        bar = ttk.Frame(parent)
+        bar.pack(fill=tk.X, padx=4, pady=(2, 0))
+        self.view_bar = bar
+
+        ttk.Label(bar, text="Graphs").pack(side=tk.LEFT)
+        spin = tk.Spinbox(bar, from_=1, to=MAX_GRAPHS, textvariable=self.n_graphs,
+                          width=3, command=self.redraw, highlightthickness=0)
+        spin.pack(side=tk.LEFT, padx=(2, 4))
+        spin.bind("<Return>", lambda e: (self.redraw(), "break")[1])
+        spin.bind("<FocusOut>", lambda e: self.redraw())
+        self._page_lbl = ttk.Label(bar, text="", foreground="#1E4E8C")
+        self._page_lbl.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=4)
+        ttk.Label(bar, text="Zoom").pack(side=tk.LEFT)
+        ttk.Button(bar, text="−", width=2,
+                   command=lambda: self._wheel_zoom("x", -1)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(bar, text="+", width=2,
+                   command=lambda: self._wheel_zoom("x", 1)).pack(side=tk.LEFT, padx=1)
+        ttk.Label(bar, text="Scans").pack(side=tk.LEFT, padx=(8, 2))
+        self.scan_from = tk.StringVar()
+        self.scan_to = tk.StringVar()
+        self._scan_from_entry = ttk.Entry(bar, textvariable=self.scan_from, width=6)
+        self._scan_from_entry.pack(side=tk.LEFT)
+        ttk.Label(bar, text="–").pack(side=tk.LEFT)
+        self._scan_to_entry = ttk.Entry(bar, textvariable=self.scan_to, width=6)
+        self._scan_to_entry.pack(side=tk.LEFT)
+        for e in (self._scan_from_entry, self._scan_to_entry):
+            e.bind("<Return>", self._scan_entry_go)
+            e.bind("<KP_Enter>", self._scan_entry_go)
+        ttk.Button(bar, text="Go", width=3,
+                   command=self._scan_entry_go).pack(side=tk.LEFT, padx=(2, 0))
+
+        ttk.Separator(bar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        ttk.Label(bar, text="Y scale").pack(side=tk.LEFT)
+        ycb = ttk.Combobox(bar, state="readonly", width=12,
+                           values=["Shared", "Each graph"])
+        ycb.set("Each graph" if self.y_scale.get() == "each" else "Shared")
+        ycb.pack(side=tk.LEFT, padx=(2, 6))
+
+        def _y_pick(_e=None):
+            self.y_scale.set("each" if ycb.get() == "Each graph" else "shared")
+            self._view_y[:] = [0.0, 1.0]
+            self._view_option_changed()
+        ycb.bind("<<ComboboxSelected>>", _y_pick)
+        self._y_scale_cb = ycb
+        self.y_scale.trace_add("write", lambda *_a: self._sync_y_scale_cb())
+        ttk.Checkbutton(bar, text="Fit Y to view", variable=self.fit_y,
+                        command=self._view_option_changed).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(bar, text="Overlay runs", variable=self.overlay_runs,
+                        command=lambda: self._view_option_changed(redraw=True)
+                        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="⟲ Reset view",
+                   command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
+        ToolTip(spin, lambda: f"Graphs stacked at once (1–{MAX_GRAPHS})")
+        ToolTip(ycb, lambda: "Shared: one height scale for all graphs (compare wells).\n"
+                             "Each graph: every graph scaled to its own peaks.")
+        ToolTip(self._scan_from_entry, lambda: "Type a scan range and press Enter")
+        hint = ttk.Label(bar, text=" ⓘ ", foreground="#1E4E8C", cursor="question_arrow")
+        hint.pack(side=tk.LEFT, padx=(2, 0))
+        ToolTip(hint, lambda: (
+            "On the graphs:\n"
+            "  wheel = zoom at the cursor    Ctrl+wheel = zoom Y    Shift+wheel = pan\n"
+            "  drag = zoom to a box (Ctrl+drag while picking peaks)\n"
+            "  middle-drag = pan    double-click / right-click / Home = reset"))
+
+    def _sync_y_scale_cb(self):
+        cb = getattr(self, "_y_scale_cb", None)
+        if cb is not None:
+            cb.set("Each graph" if self.y_scale.get() == "each" else "Shared")
+
+    def _update_page_label(self, shown):
+        """'Wells 5–8 of 192' -- and say so when the selection is bigger than
+        what fits, instead of silently drawing only the first few."""
+        lbl = getattr(self, "_page_lbl", None)
+        if lbl is None:
+            return
+        sel = list(self.selected or [])
+        if not sel:
+            lbl.config(text="")
+            return
+        unit = "wells" if self.overlay_runs.get() and not getattr(
+            self, "genotyping_active", False) else "graphs"
+        if len(sel) > len(shown) and unit == "graphs":
+            lbl.config(text=f"showing {len(shown)} of {len(sel)} selected — "
+                            "raise Graphs or page with ↓/↑", foreground="#A33")
+            return
+        wells = [self._well_label(p) for p in shown]
+        uniq = sorted(set(wells), key=lambda w: (w[:1], w[1:]))
+        runs = len({Path(p).parent.name for p in shown})
+        if not uniq:
+            lbl.config(text="")
+            return
+        span = uniq[0] if len(uniq) == 1 else f"{uniq[0]}–{uniq[-1]}"
+        extra = f" · {runs} runs" if runs > 1 else ""
+        lbl.config(text=f"{span}{extra} · {len(shown)} of {len(self.files)} files",
+                   foreground="#1E4E8C")
 
     def _build_settings_dialog(self):
         """Advanced base-call parameters in a separate (hidden) window."""
@@ -1192,8 +1356,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         m = len(self.files)
         if m == 0:
             return
-        n = max(1, self.n_graphs.get())
-        if m <= n:
+        n = self._graph_count()
+        if self.overlay_runs.get() and not getattr(self, "genotyping_active", False):
+            idxs = self._overlay_page(delta, n)
+        elif m <= n:
             idxs = list(range(m))
         else:
             start = self._current_page_start() + delta * n
@@ -1215,6 +1381,41 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.status_var.set("Page: " + "  ".join(
                 f"{p.parent.name}/{p.name}" for p in self.selected))
         self.redraw()
+
+    def _overlay_page(self, delta, n):
+        """List indices of the next/previous n wells (every run of each), for
+        paging while "Overlay runs" draws one graph per well of a plate."""
+        m = len(self.files)
+        key = lambda i: (self._plate_of(self.files[i]), self._well_label(self.files[i]))
+        byp = {str(p.resolve()): i for i, p in enumerate(self.files)}
+        shown = sorted(byp[str(p.resolve())] for p in (self.selected or [])
+                       if str(p.resolve()) in byp)
+        if delta > 0:
+            start = (shown[-1] + 1) if shown else 0
+            if start >= m:
+                start = 0
+        else:
+            j = (shown[0] - 1) if shown else m - 1
+            if j < 0:
+                j = m - 1
+            wells = []
+            while j >= 0:
+                w = key(j)
+                if w not in wells:
+                    if len(wells) == n:
+                        break
+                    wells.append(w)
+                j -= 1
+            start = j + 1
+        idxs, wells = [], []
+        for i in range(start, m):
+            w = key(i)
+            if w not in wells:
+                if len(wells) == n:
+                    break
+                wells.append(w)
+            idxs.append(i)
+        return idxs
 
     def _page_key(self, event):
         keys = event.keysym
@@ -1273,7 +1474,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if m == 0:
             self.toggle_tour()
             return
-        n = max(1, self.n_graphs.get())
+        n = self._graph_count()
         paths = [self.files[(self.cycle_pos + i) % m] for i in range(n)]
         self.selected = paths[:n]
         idxs = []
@@ -1528,7 +1729,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 pass
             self.pick_table = None
             self.pick_tree = None
-        tblf = ttk.Frame(self.center)
+        tblf = ttk.Frame(self.below)
         tblf.pack(fill=tk.X, padx=4, pady=2)
         if area:
             cols = ("run", "well", "ch", "start", "stop", "mid", "h V", "area")
@@ -1553,7 +1754,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                   stretch=(c in stretch))
         vs = ttk.Scrollbar(tblf, orient=tk.VERTICAL, command=self.pick_tree.yview)
         self.pick_tree.configure(yscrollcommand=vs.set)
-        self.pick_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.pick_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vs.pack(side=tk.RIGHT, fill=tk.Y)
         # The pick table takes focus when the operator clicks a peak; give it
         # the same arrow paging as the file list so the arrows keep working.
@@ -1580,7 +1781,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return pk
 
     def _gen_paths(self):
-        n = max(1, min(8, self.n_graphs.get()))
+        n = self._graph_count()
         sel = [Path(p) for p in (self.selected or [])]
         return sel[:n]
 
@@ -1760,6 +1961,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         if getattr(event, "button", 1) != 1:
             return
+        if _event_mods(event)[0]:
+            return                      # Ctrl+drag is box-zoom, not a pick
         hit = self._gen_axes_hit(event)
         if hit is None:
             return
@@ -2038,7 +2241,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._area_cursors = []
         self._full_xlim = None
         self._full_ylim = None
+        self._wrap_active = False
         paths = self._gen_paths()
+        self._update_page_label(paths)
         if not paths:
             self.canvas.draw_idle()
             self._sync_pick_table()
@@ -3191,7 +3396,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "flags", "reason")
         self._auto_cols = cols              # the editors address columns by
         #                                name, so a new column cannot shift one
-        tblf = ttk.Frame(self.center)
+        tblf = ttk.Frame(self.below)
         bar = ttk.Frame(tblf)
         bar.pack(fill=tk.X, padx=2, pady=(2, 0))
         ttk.Label(bar, text="double-click a call or the IS peaks to correct "
@@ -3317,7 +3522,55 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if tags:
                 tree.item(iid, tags=tuple(tags))
             self._auto_iids[(r.get("run"), r.get("well"))] = iid
+        self._below_refresh()
         self._below_follow()
+
+    def _below_target(self):
+        """Which pane belongs under the graphs right now, or None."""
+        if getattr(self, "genotyping_active", False):
+            return "pick"
+        if getattr(self, "_below_mode", "geno") == "sequence":
+            return "seq"
+        if getattr(self, "_auto_table", None) is None:
+            return "seq"
+        shown_runs = {Path(p).parent.name
+                      for p in (self.selected or [])[: self._graph_count()]}
+        if self.always_table.get() or any(
+                r.get("run") in shown_runs for r in (getattr(self, "_geno_rows", None) or [])):
+            return "geno"
+        # Nothing genotyped for these runs: the table would be an empty strip.
+        # Show the called sequence if a shown well has one, else nothing.
+        for p in (self.selected or [])[: self._graph_count()]:
+            doc = self.docs.get(str(Path(p).resolve()))
+            if doc is not None and getattr(doc, "sequence", ""):
+                return "seq"
+        return None
+
+    def _set_below_visible(self, show):
+        """Add or take away the lower pane, keeping the height it was given."""
+        vs = getattr(self, "vsplit", None)
+        if vs is None or show == self._below_shown:
+            return
+        if show:
+            self.vsplit.add(self.below, weight=1)
+            self._below_shown = True
+
+            def _restore():
+                try:
+                    total = self.vsplit.winfo_height()
+                    want = self._below_sash or max(120, int(total * 0.24))
+                    self.vsplit.sashpos(0, max(80, total - want))
+                except tk.TclError:
+                    pass
+            self.after_idle(_restore)
+        else:
+            try:
+                total = self.vsplit.winfo_height()
+                self._below_sash = max(60, total - self.vsplit.sashpos(0))
+            except tk.TclError:
+                pass
+            self.vsplit.forget(self.below)
+            self._below_shown = False
 
     def _below_refresh(self):
         """Pack exactly one pane under the graphs, and title the slot.
@@ -3326,32 +3579,32 @@ class LimoncelloAnalyzerApp(tk.Tk):
         otherwise it is the genotyping table, or the basecalled sequence when
         the toggle asks for it.  One place decides this so entering a mode,
         leaving it and swapping the toggle can never leave two panes stacked.
+        When none of them has anything to say, the slot is removed and the
+        graphs get the room.
         """
+        target = self._below_target()
+        self._set_below_visible(target is not None)
         pick = getattr(self, "pick_table", None)
         geno = getattr(self, "_auto_table", None)
         seq = getattr(self, "seq_text", None)
-        for w in (pick, geno, seq):
-            if w is None:
-                continue
-            try:
-                w.pack_forget()
-            except tk.TclError:
-                pass
-        if getattr(self, "genotyping_active", False):
-            title = ("Measured areas" if getattr(self, "area_mode", False)
-                     else "Picked peaks")
-            if pick is not None:
-                pick.pack(fill=tk.X, padx=4, pady=2)
-        elif getattr(self, "_below_mode", "geno") == "sequence":
-            title = "Called sequence"
-            if seq is not None:
-                seq.pack(fill=tk.X, padx=4, pady=2)
-        else:
-            title = "Genotyping"
-            if geno is not None:
-                geno.pack(fill=tk.BOTH, padx=4, pady=2)
-            elif seq is not None:
-                seq.pack(fill=tk.X, padx=4, pady=2)
+        want = {"pick": pick, "geno": geno, "seq": seq}.get(target)
+        if want is None or getattr(self, "_below_packed", None) is not want:
+            for w in (pick, geno, seq):
+                if w is None or w is want:
+                    continue
+                try:
+                    w.pack_forget()
+                except tk.TclError:
+                    pass
+            if want is not None:
+                try:
+                    want.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
+                except tk.TclError:
+                    want = None
+            self._below_packed = want
+        title = {"pick": ("Measured areas" if getattr(self, "area_mode", False)
+                          else "Picked peaks"),
+                 "seq": "Called sequence", "geno": "Genotyping"}.get(target, "")
         hdr = getattr(self, "seq_hdr", None)
         if hdr is not None:
             try:
@@ -3397,7 +3650,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if getattr(self, "genotyping_active", False):
             return                       # the pick table owns this slot
         paths = list((getattr(self, "selected", None) or
-                      [])[: self.n_graphs.get()])
+                      [])[: self._graph_count()])
         shown = [iids[(p.parent.name, p.stem)]
                  for p in paths
                  if (p.parent.name, p.stem) in iids]
@@ -3455,7 +3708,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.status_var.set(
                 f"{well or 'That well'}'s trace is not open in this window.")
             return
-        n = max(1, self.n_graphs.get())
+        n = self._graph_count()
         current = [Path(p) for p in (getattr(self, "selected", None) or [])]
         if path in current:
             window = [path] + [p for p in current if p != path][:n - 1]
@@ -4052,7 +4305,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
     def _show_sequence(self):
         self.seq_text.delete("1.0", tk.END)
-        for path in self.selected[: self.n_graphs.get()]:
+        for path in self.selected[: self._graph_count()]:
             key = str(path.resolve())
             doc = self.docs.get(key)
             if not doc:
@@ -4549,37 +4802,295 @@ class LimoncelloAnalyzerApp(tk.Tk):
         else:
             self._apply_zoom()
 
-    def _wheel_zoom(self, axis, direction):
-        """Mouse-wheel over an axis bar: zoom that axis around its centre."""
+    def _wheel_zoom(self, axis, direction, anchor=None):
+        """Zoom one axis in (direction > 0) or out, keeping *anchor* -- a
+        fraction of the full range, e.g. the point under the mouse -- where it
+        is on screen.  Without an anchor the view zooms about its centre."""
         v = self._view_x if axis == "x" else self._view_y
         lo, hi = v
         width = max(1e-9, hi - lo)
-        centre = 0.5 * (lo + hi)
         new_w = min(1.0, max(width / 1000.0, width * (0.8 if direction > 0 else 1.25)))
-        lo2 = min(max(0.0, centre - new_w / 2.0), 1.0 - new_w)
+        if anchor is None:
+            anchor = 0.5 * (lo + hi)
+        rel = 0.5 if width <= 0 else min(1.0, max(0.0, (anchor - lo) / width))
+        lo2 = anchor - rel * new_w
+        lo2 = min(max(0.0, lo2), 1.0 - new_w)
         v[:] = [lo2, lo2 + new_w]
         self._apply_zoom()
 
-    def _bar_cmd(self, axis, args):
-        """ttk scrollbar -> pan that axis (grab the thumb and slide)."""
-        if not args:
+    def _graph_count(self) -> int:
+        """The Graphs box, clamped to 1..MAX_GRAPHS (and safe while the box
+        is being edited and holds no number)."""
+        try:
+            n = int(self.n_graphs.get())
+        except (tk.TclError, ValueError):
+            n = 1
+        return max(1, min(MAX_GRAPHS, n))
+
+    def _save_view_prefs(self, *_):
+        try:
+            prefs = mark_library.load_prefs()
+            prefs["view"] = {"y_scale": self.y_scale.get(),
+                             "fit_y": bool(self.fit_y.get()),
+                             "overlay_runs": bool(self.overlay_runs.get()),
+                             "always_table": bool(self.always_table.get())}
+            mark_library.save_prefs(prefs)
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def _view_option_changed(self, redraw=False):
+        self._save_view_prefs()
+        if redraw:
+            self.redraw()
+        else:
+            self._apply_zoom()
+
+    @staticmethod
+    def _trace_yrange(ax, xlo, xhi):
+        """Min/max of the trace lines (labelled "Ch…") drawn on *ax* within
+        [xlo, xhi], or None when there are none.  X data is the scan axis,
+        ascending, so the window is a slice, not a scan of every point."""
+        lo = hi = None
+        for line in ax.get_lines():
+            if not str(line.get_label()).startswith("Ch"):
+                continue
+            xd = np.asarray(line.get_xdata(), dtype=float)
+            yd = np.asarray(line.get_ydata(), dtype=float)
+            if xd.size == 0:
+                continue
+            a = int(np.searchsorted(xd, xlo, side="left"))
+            b = int(np.searchsorted(xd, xhi, side="right"))
+            seg = yd[a:b]
+            seg = seg[np.isfinite(seg)] if seg.size else seg
+            if seg.size == 0:
+                continue
+            m0, m1 = float(seg.min()), float(seg.max())
+            lo = m0 if lo is None else min(lo, m0)
+            hi = m1 if hi is None else max(hi, m1)
+        return None if lo is None else (lo, hi)
+
+    def _y_references(self, xlo, xhi):
+        """Per-graph Y range the vertical view fraction applies to.
+
+        Shared: every graph uses one range, so heights compare across wells.
+        Each graph: every graph uses its own, so a weak well is not flattened
+        by a strong one.  With "Fit Y to view" the range is taken over the
+        scans on screen, so zooming into a region also scales to its peaks.
+        """
+        full = self._full_ylim
+        if self._wrap_active:
+            return [full] * len(self._plot_axes)
+        if self.fit_y.get():
+            x0, x1 = xlo, xhi
+        else:
+            x0, x1 = self._full_xlim
+        ranges = [self._trace_yrange(ax, x0, x1) for ax in self._plot_axes]
+        out = []
+        if self.y_scale.get() == "each":
+            for r in ranges:
+                out.append(full if r is None else r)
+        else:
+            got = [r for r in ranges if r is not None]
+            shared = (min(r[0] for r in got), max(r[1] for r in got)) if got else None
+            out = [shared or full] * len(self._plot_axes)
+        padded = []
+        for r in out:
+            lo, hi = r
+            pad = 0.04 * (hi - lo) or 1.0
+            padded.append((lo - pad * 0.5, hi + pad))
+        return padded
+
+    def _zoom_to_scans(self, a, b):
+        """Show scans a..b (on the full X range of the graphs)."""
+        if self._full_xlim is None:
             return
-        v = self._view_x if axis == "x" else self._view_y
-        lo, hi = v
-        width = hi - lo
-        cmd = args[0]
-        if cmd == "moveto" and len(args) > 1:
-            new_lo = min(max(0.0, float(args[1])), max(0.0, 1.0 - width))
-            v[:] = [new_lo, new_lo + width]
-        elif cmd == "scroll" and len(args) > 1:
-            n = float(args[1])
-            step = width * (0.1 if len(args) > 2 and args[2] == "units" else 1.0)
-            new_lo = min(max(0.0, lo + n * step), max(0.0, 1.0 - width))
-            v[:] = [new_lo, new_lo + width]
+        x0, x1 = self._full_xlim
+        a, b = sorted((float(a), float(b)))
+        a, b = max(x0, a), min(x1, b)
+        if b - a < 2:
+            return
+        span = x1 - x0
+        self._view_x[:] = [(a - x0) / span, (b - x0) / span]
+        self._apply_zoom()
+
+    def _scan_entry_go(self, *_):
+        try:
+            a = float(self.scan_from.get())
+            b = float(self.scan_to.get())
+        except (tk.TclError, ValueError):
+            self.status_var.set("Scan range: type two scan numbers, e.g. 1800 and 2700")
+            return "break"
+        self._zoom_to_scans(a, b)
+        self.canvas.get_tk_widget().focus_set()
+        return "break"
+
+    # --- mouse on the graphs: wheel zooms at the cursor, drag zooms a box ---
+    def _on_canvas_resize(self, _event=None):
+        """Margins were fitted for the old size; refit once resizing pauses,
+        so axis labels are not clipped after the table pane is dragged."""
+        job = getattr(self, "_relayout_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._relayout_job = self.after(150, self._relayout)
+
+    def _relayout(self):
+        self._relayout_job = None
+        if not self._plot_axes:
+            return
+        try:
+            if self._wrap_active:
+                self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.3, w_pad=0.2, pad=0.4)
+            else:
+                self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.25, pad=0.3)
+            self.canvas.draw_idle()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def _plot_hit(self, event):
+        """(graph axes, x, y) under the mouse, in that graph's data units.
+
+        The µA overlay is a twin axes drawn on top, so matplotlib reports the
+        twin as ``inaxes``; resolve by position to the graph underneath."""
+        for ax in self._plot_axes:
+            try:
+                if ax.get_window_extent().contains(event.x, event.y):
+                    xd, yd = ax.transData.inverted().transform((event.x, event.y))
+                    return ax, float(xd), float(yd)
+            except Exception:                              # noqa: BLE001
+                continue
+        return None
+
+    def _on_plot_scroll(self, event):
+        """Wheel: zoom X at the cursor.  Ctrl+wheel: zoom Y.  Shift+wheel: pan."""
+        hit = self._plot_hit(event) if self._full_xlim is not None else None
+        if hit is None:
+            return
+        hax, hx, hy = hit
+        up = getattr(event, "step", 0) > 0 or getattr(event, "button", "") == "up"
+        ctrl, shift = _event_mods(event)
+        x0, x1 = self._full_xlim
+        if shift:
+            lo, hi = self._view_x
+            w = hi - lo
+            step = 0.15 * w * (-1 if up else 1)
+            lo2 = min(max(0.0, lo + step), 1.0 - w)
+            self._view_x[:] = [lo2, lo2 + w]
+            self._apply_zoom()
+        elif ctrl:
+            ylo, yhi = hax.get_ylim()
+            frac_in_view = (hy - ylo) / max(1e-9, yhi - ylo)
+            vlo, vhi = self._view_y
+            self._wheel_zoom("y", 1 if up else -1,
+                             anchor=vlo + frac_in_view * (vhi - vlo))
+        else:
+            self._wheel_zoom("x", 1 if up else -1,
+                             anchor=(hx - x0) / max(1e-9, x1 - x0))
+
+    def _box_zoom_allowed(self, event):
+        """Plain drag zooms in the viewer; while picking or measuring, the
+        left button belongs to that tool, so box-zoom needs Ctrl."""
+        ctrl, _shift = _event_mods(event)
+        if getattr(self, "genotyping_active", False):
+            return ctrl
+        return True
+
+    def _on_plot_press(self, event):
+        hit = self._plot_hit(event) if self._full_xlim is not None else None
+        if hit is None:
+            return
+        hax, hx, hy = hit
+        if event.button == 2:                           # middle drag: pan
+            self._plot_drag = {"kind": "pan", "ax": hax,
+                               "px": event.x, "view": list(self._view_x)}
+        elif event.button == 1 and self._box_zoom_allowed(event):
+            if getattr(event, "dblclick", False):
+                self._reset_zoom()
+                return
+            from matplotlib.patches import Rectangle
+            ax = hax
+            rect = Rectangle((hx, hy), 0, 0, fill=True,
+                             facecolor="#2F6FB5", alpha=0.12,
+                             edgecolor="#2F6FB5", lw=0.8, zorder=20)
+            ax.add_patch(rect)
+            self._plot_drag = {"kind": "box", "ax": ax, "x": hx,
+                               "y": hy, "px": event.x, "py": event.y,
+                               "rect": rect}
+
+    def _on_plot_motion(self, event):
+        d = self._plot_drag
+        if d is None:
+            return
+        if d["kind"] == "pan":
+            x0, x1 = self._full_xlim
+            ax = d["ax"]
+            bbox = ax.get_window_extent()
+            lo, hi = d["view"]
+            w = hi - lo
+            dfrac = (event.x - d["px"]) / max(1.0, bbox.width) * w
+            lo2 = min(max(0.0, lo - dfrac), 1.0 - w)
+            self._view_x[:] = [lo2, lo2 + w]
+            self._apply_zoom()
+            return
+        ax = d["ax"]
+        ex, ey = ax.transData.inverted().transform((event.x, event.y))
+        xlo, xhi = ax.get_xlim()
+        ylo, yhi = ax.get_ylim()
+        ex = min(max(ex, xlo), xhi)
+        ey = min(max(ey, ylo), yhi)
+        x_only = abs(event.y - d["py"]) < 15
+        r = d["rect"]
+        r.set_x(min(d["x"], ex))
+        r.set_width(abs(ex - d["x"]))
+        if x_only:
+            r.set_y(ylo)
+            r.set_height(yhi - ylo)
+        else:
+            r.set_y(min(d["y"], ey))
+            r.set_height(abs(ey - d["y"]))
+        self.canvas.draw_idle()
+
+    def _on_plot_release(self, event):
+        d, self._plot_drag = self._plot_drag, None
+        if d is None or d["kind"] != "box":
+            return
+        r = d["rect"]
+        xa, w = r.get_x(), r.get_width()
+        ya, h = r.get_y(), r.get_height()
+        try:
+            r.remove()
+        except (ValueError, AttributeError):
+            pass
+        if abs(event.x - d["px"]) < 6 or w <= 0:
+            self.canvas.draw_idle()        # a click, not a drag
+            return
+        ylo, yhi = d["ax"].get_ylim()
+        box_y = h > 0 and (ya > ylo + 1e-9 or ya + h < yhi - 1e-9)
+        x0, x1 = self._full_xlim
+        a, b = max(x0, xa), min(x1, xa + w)
+        if b - a < 2:
+            self.canvas.draw_idle()
+            return
+        self._view_x[:] = [(a - x0) / (x1 - x0), (b - x0) / (x1 - x0)]
+        if box_y:
+            # The Y reference may itself follow the new X window ("Fit Y to
+            # view"), so take the drawn band against the range it will have.
+            try:
+                k = self._plot_axes.index(d["ax"])
+            except ValueError:
+                k = 0
+            ref_lo, ref_hi = self._y_references(a, b)[k]
+            span = max(1e-9, ref_hi - ref_lo)
+            self._view_y[:] = [min(max(0.0, (ya - ref_lo) / span), 1.0),
+                               min(1.0, max(0.0, (ya + h - ref_lo) / span))]
+            if self._view_y[1] - self._view_y[0] < 1e-6:
+                self._view_y[:] = [0.0, 1.0]
         self._apply_zoom()
 
     def _apply_zoom(self, *_):
-        """Push the shared X/Y view onto every visible graph + both bars."""
+        """Push the X/Y view onto every visible graph + both bars."""
         if self._full_xlim is None or not self._plot_axes:
             # Empty/background view: make sure nothing (e.g. a toolbar zoom)
             # has pushed the picture out of frame.
@@ -4594,20 +5105,34 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self.canvas.draw_idle()
             return
         x0, x1 = self._full_xlim
-        y0, y1 = self._full_ylim
         fx0, fx1 = self._view_x
         fy0, fy1 = self._view_y
         w = (x1 - x0) * max(1e-9, fx1 - fx0)
-        h = (y1 - y0) * max(1e-9, fy1 - fy0)
         xlo = x0 + (x1 - x0) * fx0
-        ylo = y0 + (y1 - y0) * fy0
-        for ax in self._plot_axes:
+        refs = self._y_references(xlo, xlo + w)
+        for ax, (y0, y1) in zip(self._plot_axes, refs):
+            h = (y1 - y0) * max(1e-9, fy1 - fy0)
             ax.set_xlim(xlo, xlo + w)
-            ax.set_ylim(ylo, ylo + h)
+            ax.set_ylim(y0 + (y1 - y0) * fy0, y0 + (y1 - y0) * fy0 + h)
         if hasattr(self, "xbar"):
             self.xbar.set(fx0, fx1)
             self.ybar.set(fy0, fy1)
+        self._show_scan_range(xlo, xlo + w)
         self.canvas.draw_idle()
+
+    def _show_scan_range(self, a, b):
+        """Mirror the visible scans in the range boxes (unless being typed in)."""
+        if not hasattr(self, "scan_from"):
+            return
+        try:
+            focus = self.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus in (getattr(self, "_scan_from_entry", None),
+                     getattr(self, "_scan_to_entry", None)):
+            return
+        self.scan_from.set(str(int(round(a))))
+        self.scan_to.set(str(int(round(b))))
 
     def _fmt_time(self, scan, _pos=None):
         """Scan number -> minutes:seconds label (whole seconds)."""
@@ -4637,6 +5162,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         what makes the two read as one view instead of two lists.
         """
         self._redraw_plots()
+        self._below_refresh()
         self._below_follow()
 
     def _redraw_plots(self):
@@ -4648,8 +5174,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._full_xlim = None
         self._full_ylim = None
         colors = self._theme_colors()
-        n = max(1, min(8, self.n_graphs.get()))
-        paths = self.selected[:n] if self.selected else []
+        n = self._graph_count()
+        groups = self._view_groups(n)
+        paths = [p for g in groups for p in g]
         if not paths:
             ax = self.fig.add_subplot(111)
             bg = self._background_image()
@@ -4666,6 +5193,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             ax.set_xlim(0, 1)
             ax.set_ylim(0, 1)
             ax.set_autoscale_on(False)
+            self._wrap_active = False
+            self._update_page_label([])
             self.canvas.draw_idle()
             self.seq_text.delete("1.0", tk.END)
             return
@@ -4673,6 +5202,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         settings = self._settings_from_ui()
         wrap = settings.view_mode == "wrap"
 
+        self._wrap_active = bool(wrap)
+        self._update_page_label(paths)
         if wrap:
             self._draw_wrap(paths, settings, colors)
             self.fig.tight_layout(rect=(0.045, 0, 1, 1), h_pad=0.3, w_pad=0.2, pad=0.4)
@@ -4683,13 +5214,22 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
 
         gx0 = gx1 = gy0 = gy1 = None
-        for i, path in enumerate(paths):
-            ax = self.fig.add_subplot(len(paths), 1, i + 1)
+        n_ax = len(groups)
+        for i, group in enumerate(groups):
+            ax = self.fig.add_subplot(n_ax, 1, i + 1)
+            path = group[0]
             try:
                 doc = self._ensure_doc(path)
             except Exception as e:
                 ax.text(0.5, 0.5, f"Load error: {e}", ha="center", transform=ax.transAxes)
                 continue
+            for k, other in enumerate(group[1:], start=1):
+                gy = self._overlay_run(ax, other, settings, RUN_STYLES[k % len(RUN_STYLES)])
+                if gy is not None:
+                    gy0 = gy[0] if gy0 is None else min(gy0, gy[0])
+                    gy1 = gy[1] if gy1 is None else max(gy1, gy[1])
+                    gx1 = gy[2] if gx1 is None else max(gx1, gy[2])
+                    gx0 = 0 if gx0 is None else min(gx0, 0)
             tr = display_trace(doc, settings)
             s0 = max(0, settings.signal_start)
             s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
@@ -4723,10 +5263,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 axc.tick_params(axis="y", labelcolor=CURRENT_COLOR, labelsize=6)
 
             ax.tick_params(labelsize=7)
-            ax.text(0.004, 0.995, f"{doc.path.parent.name}/{doc.path.name}",
+            if len(group) > 1:
+                names = "   ".join(
+                    f"{'━' if k == 0 else {'--': '╍', ':': '┈', '-.': '┄'}.get(RUN_STYLES[k % len(RUN_STYLES)], '━')} "
+                    f"{g.parent.name}" for k, g in enumerate(group))
+                label = f"{self._well_label(path)}    {names}"
+            else:
+                label = f"{doc.path.parent.name}/{doc.path.name}"
+            ax.text(0.004, 0.995, label,
                     transform=ax.transAxes, ha="left", va="top",
-                    fontsize=6, color="#333", zorder=6)
-            self._style_x_axis(ax, i == len(paths) - 1)
+                    fontsize=6 if len(group) == 1 else 7, color="#333", zorder=6)
+            self._style_x_axis(ax, i == n_ax - 1)
 
             if settings.view_mode == "esd":
                 self._draw_esd_peaks(
@@ -4759,6 +5306,59 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._apply_zoom()
         self.canvas.draw_idle()
         self._show_sequence()
+
+    def _well_label(self, path):
+        m = WELL_RE.search(Path(path).stem)
+        if not m:
+            return Path(path).stem
+        w = m.group(1).upper()
+        return f"{w[0]}{int(w[1:]):02d}"
+
+    @staticmethod
+    def _plate_of(path):
+        """The plate a run folder belongs to: its name without a trailing
+        run number, so ..._270910Run01 and ..._270910Run02 are one plate."""
+        return re.sub(r"[_\- ]?run\s*\d+$", "", Path(path).parent.name, flags=re.I)
+
+    def _view_groups(self, n):
+        """What the viewer draws: n graphs, one file each -- or, with
+        "Overlay runs", n wells, each holding every selected run of it."""
+        sel = list(self.selected or [])
+        if not (self.overlay_runs.get() and not getattr(self, "genotyping_active", False)):
+            return [[p] for p in sel[:n]]
+        groups, index = [], {}
+        for p in sel:
+            key = (self._plate_of(p), self._well_label(p))
+            if key in index:
+                groups[index[key]].append(p)
+            elif len(groups) < n:
+                index[key] = len(groups)
+                groups.append([p])
+        return groups
+
+    def _overlay_run(self, ax, path, settings, style):
+        """Another run of the same well on *ax*: channel traces only, in the
+        run's own line style.  Returns (ymin, ymax, scans) or None."""
+        try:
+            doc = self._ensure_doc(path)
+        except Exception:                                  # noqa: BLE001
+            return None
+        tr = display_trace(doc, settings)
+        s0 = max(0, settings.signal_start)
+        s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
+        s1 = min(tr.shape[0], s1)
+        x = np.arange(s0, s1)
+        lo = hi = None
+        for ci, base, col, color in self._channel_lines(settings):
+            if not self.chan_show[ci].get():
+                continue
+            seg = tr[s0:s1, col]
+            ax.plot(x, seg, color=color, lw=0.7, linestyle=style, alpha=0.85,
+                    label=f"Ch{ci + 1} {base} ({path.parent.name})")
+            if seg.size:
+                lo = float(np.nanmin(seg)) if lo is None else min(lo, float(np.nanmin(seg)))
+                hi = float(np.nanmax(seg)) if hi is None else max(hi, float(np.nanmax(seg)))
+        return None if lo is None else (lo, hi, s1)
 
     # ------------------------------------------------------------------ I/O
     def _docs_for_export(self):
@@ -4914,23 +5514,40 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "3. THE SAMPLES / FILES LIST\n"
             "  Each entry is one trace (shown as  run/file).\n"
             "  • Click to plot it; Ctrl/Shift-click to plot several side by side.\n"
-            "  • Set the  Graphs  spinner (bottom-left) to stack up to 8 plots.\n"
+            "  • Set  Graphs  (view bar, above the plots) to stack up to 12 plots;\n"
+            "    beside it the view bar says which wells are on screen, and warns\n"
+            "    when more are selected than fit.\n"
+            "  • Overlay runs  (view bar / View menu) draws one graph per well of\n"
+            "    a plate with every run of it on top of each other: Run01 solid,\n"
+            "    Run02 dashed, Run03 dotted … — runs of one plate are folders\n"
+            "    whose names differ only by their RunNN ending.\n"
             "  • Type in  Jump/well  to filter by well name, file name or run name.\n"
             "  • Sort:  View ▸ Sort files  (well row, column, name, run, …).\n"
             "  • Remove selected samples with  – Remove file(s)  or the Delete key.\n\n"
             "4. MOVING AROUND THE PLOT\n"
-            "  • Bottom bar = X (scan) axis, right bar = Y (signal) axis.\n"
-            "  • X tick numbers appear only under the bottom pane, so stacked\n"
-            "    plots keep their height. Tick  Time (min)  to read the X axis as\n"
-            "    minutes:seconds instead of scan numbers (1.75 scans/s,\n"
-            "    ~0.57 s/scan).\n"
-            "  • Grab a bar's thumb and slide to pan that axis.\n"
-            "  • Roll the mouse wheel over the X bar to zoom X; over the Y bar to\n"
-            "    zoom Y. Double-click a bar to reset that axis.\n"
-            "  • Both bars move every visible plot together, so comparisons stay\n"
-            "    aligned.\n"
-            "  • Lost in the zoom?  Right-click the plot or a bar, press Home, or\n"
-            "    use the  ⟲ Reset view  button (View ▸ Reset view) to start over.\n\n"
+            "  On the graphs:\n"
+            "  • Mouse wheel zooms X around the mouse;  Ctrl+wheel zooms Y;\n"
+            "    Shift+wheel pans left/right.\n"
+            "  • Drag with the left button to zoom to that range (a flat drag\n"
+            "    zooms X only, a box also zooms Y). While picking peaks or\n"
+            "    measuring areas the left button is the tool, so use Ctrl+drag.\n"
+            "  • Middle-drag pans.  Double-click, right-click or Home resets.\n"
+            "  The view bar above the plots:\n"
+            "  • Zoom  −/+  and  Scans [from]–[to]  (type a range, press Enter);\n"
+            "    the boxes always show the scans on screen.\n"
+            "  • Y scale  Shared — one height scale for all graphs, to compare\n"
+            "    wells;  Each graph — every graph scaled to its own peaks, so a\n"
+            "    weak well is not flattened by a strong one.\n"
+            "  • Fit Y to view — the height follows the scans on screen, so\n"
+            "    zooming into a region also scales up to its peaks.\n"
+            "  The bars still work too: bottom bar = X, right bar = Y; slide the\n"
+            "  thumb to pan, wheel over a bar to zoom that axis, double-click a\n"
+            "  bar to reset it. Every visible plot moves together.\n"
+            "  X tick numbers appear only under the bottom pane; tick  Time (min)\n"
+            "  to read minutes:seconds instead of scans (1.75 scans/s).\n"
+            "  The table under the graphs (genotyping calls, picked peaks, called\n"
+            "  sequence) sits on a divider you can drag; it disappears when the\n"
+            "  wells on screen have nothing for it (View ▸ Always show table…).\n\n"
 "5. VIEW MODES  (View menu)\n"
              "  • Raw traces            — detector signal as recorded.\n"
              "  • Processed (ACGT)      — colour-separated channels.\n"

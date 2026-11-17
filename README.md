@@ -9,7 +9,8 @@ wired to the plate-validated **best basecaller** configs.
 |---------|--------|
 | Multiple data folders | Yes — File → Add data folder |
 | Wells list (.rsd / .scf / .ab1 / text) | Yes — multi-select |
-| Number of graphs (1–8) | Yes — spinbox |
+| Number of graphs (1–12) | Yes — Graphs box in the view bar, with a page indicator |
+| Overlay runs of the same well | Yes — view bar / View menu (Run01 solid, Run02 dashed, …) |
 | Views: raw / processed / base-called / sequencing trace (ESD peaks) / wrap | Yes — View menu |
 | Basecaller versions | `mb1000_accuracy`, `mb1000_length`, `mb4000_accuracy`, `mb4000_length`, `pos_bonus07`, `pos_profile`, `hz_soften`, `raw_peaks` |
 | Advanced params (knobs) | Base calling → ⚙ Basecall settings… (dialog) |
@@ -17,7 +18,8 @@ wired to the plate-validated **best basecaller** configs.
 | Per-graph label (folder/file) | Yes — drawn in each plot's top-left |
 | X axis | Tick numbers only on the bottom pane; **Time (min)** toggle (1.75 Hz) |
 | Trace colors / dye sets | Combobox beside the channel toggles + View → Trace colors palette |
-| Pan/zoom | Axis bars: drag to pan, wheel to zoom; right-click/Home resets |
+| Pan/zoom | Wheel on the graphs zooms at the cursor (Ctrl: Y, Shift: pan), drag zooms a box, middle-drag pans; Zoom −/+ and a scan-range box; right-click/double-click/Home resets |
+| Y scaling | Shared or each graph its own; Fit Y to view |
 | Random background pictures | Yes — `Background*.jpg` / `BG*.jpg` beside the app |
 | Export FASTA / CSV / trace text | Yes |
 | Save graph image (PNG/PDF/SVG) | Yes — File → Save graph image… |
@@ -97,22 +99,36 @@ To try it immediately: **File → Add data folder** →
 ## Typical workflow
 
 1. **File → Add data folder** → select a directory of `.rsd` files (add more folders if needed).
-2. Select one or more wells in the list; set **Graphs to show**.
+2. Select one or more wells in the list; set **Graphs** in the view bar above the plots.
 3. Choose **View** (raw / processed / called / ESD peaks / wrap).
 4. Pick a **basecaller version**; rarely-needed tuning lives in **Base calling → ⚙ Basecall settings…** → *Apply + redraw* or *Basecall selected*. Ran the call on fragment/genotyping data by mistake? **Base calling → Clear base calls (undo)**.
 5. Inspect sequence pane; **File → Export sequence (FASTA)** for BLAST.
 
 ## Navigating the plot
 
-- The bottom bar is the **X (scan)** axis, the right bar is the **Y (signal)** axis.
-  Grab a bar's thumb and slide to pan that axis.
-- X tick numbers appear only under the **bottom pane**, so stacked plots keep
-  their height. Tick **Time (min)** to read the axis as minutes:seconds instead
-  of scans (1.75 scans/s, ~0.57 s/scan).
-- Roll the mouse wheel over a bar to zoom that axis; **double-click** a bar to
-  reset it. Both bars drive every visible plot together.
-- Lost in the zoom? **Right-click** the plot or a bar, press **Home**, or use the
-  **⟲ Reset view** button.
+- **On the graphs:** the mouse wheel zooms X around the mouse pointer,
+  **Ctrl+wheel** zooms Y and **Shift+wheel** pans. **Drag** to zoom to a range
+  (a flat drag zooms X only, a box zooms X and Y); while picking peaks or
+  measuring areas use **Ctrl+drag**, since the left button is the tool there.
+  **Middle-drag** pans; **double-click**, **right-click** or **Home** resets.
+- **View bar** (under the channel toggles): **Graphs** (1–12) with a page
+  indicator, **Zoom −/+**, a **Scans from–to** box (type a range, Enter; it
+  always shows the scans on screen), **Y scale** *Shared* / *Each graph*,
+  **Fit Y to view** and **Overlay runs**, plus **⟲ Reset view**.
+- **Y scale** *Shared* keeps one height scale so wells compare; *Each graph*
+  scales every graph to its own peaks so a weak well is readable. **Fit Y to
+  view** rescales the height to the scans on screen as you zoom.
+- **Overlay runs** draws one graph per well with every run of that plate on top
+  (Run01 solid, Run02 dashed, Run03 dotted); run folders of one plate are those
+  whose names differ only by a trailing `RunNN`.
+- The bars still work: bottom = X (scan), right = Y (signal); slide the thumb to
+  pan, wheel over a bar to zoom that axis, double-click a bar to reset it. Every
+  visible plot moves together.
+- X tick numbers appear only under the **bottom pane**; tick **Time (min)** to
+  read the axis as minutes:seconds (1.75 scans/s).
+- The table under the graphs (genotyping calls, picked peaks or the called
+  sequence) sits on a **draggable divider**; it is hidden when the wells on
+  screen have nothing for it (**View → Always show table under graphs** keeps it).
 - With no well selected, the empty plot area shows a randomly chosen picture
   from `Background*.jpg` / `BG*.jpg` in this folder (a new one each redraw).
 - **File → Save graph image…** writes the current plot area to PNG/PDF/SVG.

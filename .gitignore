@@ -16,3 +16,6 @@ library/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Claude Code agent worktrees
+.claude/

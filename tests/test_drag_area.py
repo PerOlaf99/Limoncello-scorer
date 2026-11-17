@@ -580,7 +580,8 @@ def _mode_stub():
     for name in ("enter_genotyping_picking", "enter_area_picking",
                  "exit_genotyping_picking", "toggle_genotyping_picking",
                  "toggle_area_picking", "_on_gen_pick", "_on_gen_motion",
-                 "_on_area_release", "_below_refresh"):
+                 "_on_area_release", "_below_refresh", "_below_target",
+                 "_set_below_visible"):
         setattr(s, name, getattr(sa.LimoncelloAnalyzerApp, name).__get__(s))
     return s
 
