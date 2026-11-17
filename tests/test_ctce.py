@@ -106,3 +106,36 @@ def test_four_peaks_give_a_mass_action_minor_fraction():
 
 def test_plate_of_strips_the_run_number():
     assert ctce.plate_of("040723_mt_nucl_#19_20_dil_curveRun02") == "040723_mt_nucl_#19_20_dil_curve"
+
+
+# ------------------------------------------------------------- user guidance
+def test_template_finds_the_clicked_pattern_shifted_in_another_well():
+    tpl = ctce.Template(offsets={54.0: [350.0, 368.0]}, n_wells=1)   # duplex + its partner
+    rt = run(54, 25)                      # this well's pattern sits 25 scans later
+    assert ctce._apply_template(rt, tpl.at(54)) == 2
+    labelled = sorted((p for p in rt.peaks if p.label), key=lambda p: p.pos)
+    assert [p.label for p in labelled] == ["P1", "P2"]
+    assert abs(labelled[0].raw_pos - (rt.anchor + 375)) <= 3
+
+
+def test_clicked_peaks_are_never_merged_as_a_satellite(monkeypatch):
+    tpl = ctce.Template(offsets={53.0: [350.0, 368.0], 54.0: [390.0, 408.0]}, n_wells=1)
+    runs = [run(53, 0), run(54, 40)]
+    it = iter(runs)
+    monkeypatch.setattr(ctce, "load_run_trace", lambda p, ch=None: next(it))
+    res = ctce.analyse_well(["a", "b"], template=tpl)
+    assert res.method == "template"
+    assert len(res.areas) == 2            # both clicked peaks measured on their own
+
+
+def test_one_temperature_uses_shape_and_replicates(monkeypatch):
+    runs = [run(55, 0), run(55, 0, scale=1.05)]
+    it = iter(runs)
+    monkeypatch.setattr(ctce, "load_run_trace", lambda p, ch=None: next(it))
+    res = ctce.analyse_well(["a", "b"])
+    assert res.method == "shape"
+    best = res.runs[res.best]
+    duplex = max((p for p in best.peaks if p.role == "melting"), key=lambda p: p.height)
+    assert duplex.asym >= ctce.DUPLEX_ASYM
+    assert all(p.role != "melting" for p in best.peaks if p.asym < ctce.SSDNA_ASYM)
+    assert res.fraction_sd and all(s < 0.01 for s in res.fraction_sd)   # identical replicates

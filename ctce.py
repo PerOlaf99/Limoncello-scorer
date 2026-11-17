@@ -63,6 +63,12 @@ ANCHOR_REL_HEIGHT = 0.25      # anchor = earliest peak above 25 % of the maximum
 SATELLITE_GAP = (6, 28)       # a satellite sits this many scans after its parent
 SATELLITE_MAX_RATIO = 0.9     # ... and is lower than it
 NO_PRODUCT_RATIO = 0.15       # melting signal below 15 % of the plate median: no product
+DUPLEX_ASYM = 1.3             # one temperature: tail/front >= this is a duplex ...
+SSDNA_ASYM = 1.2              # ... and below this a symmetric (static) peak
+TEMPLATE_SHIFT = (40, 0.15)   # a well's pattern may sit max(40 scans, 15 % of the offset) off ...
+TEMPLATE_TOL = (5, 0.02)      # ... but its peaks keep their spacing within max(5, 2 % of offset)
+SHAPE_MIN_HEIGHT = 0.15       # one temperature: duplex peaks at least 15 % of the maximum
+SAME_TEMPERATURE = 0.5        # runs within 0.5 °C count as the same temperature
 
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +85,8 @@ class Peak:
     tail: int                 # width after the apex
     role: str = "unassigned"  # melting / static / satellite / anchor / other
     parent: Optional[int] = None   # index of the parent peak, for a satellite
+    raw_pos: int = -1         # apex in the run's own scans (pos may be aligned)
+    label: str = ""           # template peak name (P1, P2, ...) when user-guided
 
     @property
     def asym(self) -> float:
@@ -113,6 +121,8 @@ class WellResult:
     best: Optional[int]                 # index of the measuring run
     areas: List[float] = field(default_factory=list)       # melting peaks at the best run
     fractions: List[float] = field(default_factory=list)
+    fraction_sd: List[float] = field(default_factory=list)  # over replicate runs (same temperature)
+    method: str = "change"              # change (temperatures) / shape (one temperature) / template
     minor_fraction: Optional[float] = None
     flags: List[str] = field(default_factory=list)
 
@@ -128,6 +138,8 @@ class WellResult:
             "n_peaks": len(self.areas),
             "areas": "/".join(f"{a:.0f}" for a in self.areas),
             "fractions": "/".join(f"{f:.3f}" for f in self.fractions),
+            "fraction_sd": "/".join(f"{s:.3f}" for s in self.fraction_sd),
+            "method": self.method,
             "minor_fraction": "" if self.minor_fraction is None else round(self.minor_fraction, 4),
             "flags": ",".join(self.flags),
         }
@@ -192,7 +204,8 @@ def detect_peaks(y: np.ndarray, min_rel_prominence: float = MIN_REL_PROMINENCE) 
         line = np.linspace(y[lo], y[hi], hi - lo + 1)
         area = float(np.clip(seg - line, 0, None).sum())
         out.append(Peak(pos=int(i), height=float(y[i]), left=lo, right=hi, area=area,
-                        front=_width(y, i, SHAPE_LEVEL, -1), tail=_width(y, i, SHAPE_LEVEL, +1)))
+                        front=_width(y, i, SHAPE_LEVEL, -1), tail=_width(y, i, SHAPE_LEVEL, +1),
+                        raw_pos=int(i)))
     return out
 
 
@@ -351,8 +364,8 @@ def _mark_satellites(peaks: List[Peak]) -> None:
     melt = sorted((k for k, p in enumerate(peaks) if p.role == "melting"),
                   key=lambda k: peaks[k].pos)
     for k, p in enumerate(peaks):
-        if p.role not in ("melting", "unassigned"):
-            continue
+        if p.role not in ("melting", "unassigned") or p.label:
+            continue                     # a clicked peak is a peak of interest
         for j in melt:
             q = peaks[j]
             if j == k or q.role != "melting":
@@ -365,11 +378,108 @@ def _mark_satellites(peaks: List[Peak]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# user guidance: a template from picked peaks
+# --------------------------------------------------------------------------- #
+@dataclass
+class Template:
+    """Peaks of interest the user clicked, as offsets from the early peak,
+    per run temperature: {temperature: [offset, ...]} in migration order."""
+    offsets: Dict[float, List[float]] = field(default_factory=dict)
+    n_wells: int = 0
+
+    def at(self, temperature: Optional[float]) -> Optional[List[float]]:
+        if temperature is None:
+            return None
+        for t, offs in self.offsets.items():
+            if abs(t - temperature) <= SAME_TEMPERATURE:
+                return offs
+        return None
+
+
+def template_from_picks(picks: Dict[str, Sequence[float]], channel: Optional[int] = None) -> Template:
+    """{trace path: [picked scans]} -> Template.  Each pick is taken relative
+    to its own run's early peak; wells picked at one temperature are pooled
+    by peak order (median offset), so a few clicked wells teach the plate."""
+    per_temp: Dict[float, List[List[float]]] = {}
+    for path, scans in picks.items():
+        scans = sorted(float(s) for s in scans)
+        if not scans:
+            continue
+        rt = load_run_trace(path, channel)
+        if rt.anchor is None or rt.temperature is None:
+            continue
+        key = next((t for t in per_temp if abs(t - rt.temperature) <= SAME_TEMPERATURE),
+                   rt.temperature)
+        per_temp.setdefault(key, []).append([s - rt.anchor for s in scans])
+    tpl = Template()
+    for temp, lists in per_temp.items():
+        n = max(len(x) for x in lists)
+        full = [x for x in lists if len(x) == n]          # wells with every peak clicked
+        tpl.offsets[temp] = [float(np.median([x[i] for x in full])) for i in range(n)]
+        tpl.n_wells += len(full)
+    return tpl
+
+
+def _apply_template(run: RunTrace, offsets: Sequence[float]) -> int:
+    """Mark the run's peaks matching the template as the peaks of interest
+    (P1, P2, ...); every other melting peak there is demoted.
+
+    The template is matched as a pattern: the whole set may sit somewhat off
+    in this well (one shift), but its peaks keep their spacing to each other.
+    Returns how many template peaks were found."""
+    if run.anchor is None or not offsets:
+        return 0
+    for p in run.peaks:
+        if p.role in ("melting", "satellite"):
+            p.role, p.parent = "other", None
+    pool = [p for p in run.peaks if p.role != "anchor" and p.raw_pos > run.anchor + 20]
+    first = run.anchor + offsets[0]
+    reach = max(TEMPLATE_SHIFT[0], TEMPLATE_SHIFT[1] * abs(offsets[0]))
+    best = (0, 0.0, 0.0, [])
+    for cand in pool:
+        s = cand.raw_pos - first
+        if abs(s) > reach:
+            continue
+        chosen, used = [], set()
+        for off in offsets:
+            target = run.anchor + off + s
+            tol = max(TEMPLATE_TOL[0], TEMPLATE_TOL[1] * abs(off))
+            near = [p for p in pool if id(p) not in used and abs(p.raw_pos - target) <= tol]
+            q = min(near, key=lambda q: (abs(q.raw_pos - target), -q.height)) if near else None
+            chosen.append(q)
+            if q is not None:
+                used.add(id(q))
+        n = sum(q is not None for q in chosen)
+        h = sum(q.height for q in chosen if q is not None)
+        score = (n, h, -abs(s))
+        if score > best[:3]:
+            best = (n, h, -abs(s), chosen)
+    for i, q in enumerate(best[3]):
+        if q is not None:
+            q.role, q.label = "melting", f"P{i + 1}"
+    return best[0]
+
+
+def _classify_by_shape(run: RunTrace, ymax: float) -> None:
+    """One temperature: a duplex has a sharp front and a tail, ssDNA is symmetric."""
+    for p in run.peaks:
+        if p.role != "unassigned" or p.height < SHAPE_MIN_HEIGHT * ymax:
+            continue
+        if run.anchor is not None and p.raw_pos <= run.anchor + 60:
+            continue
+        if p.asym >= DUPLEX_ASYM:
+            p.role = "melting"
+        elif p.asym < SSDNA_ASYM:
+            p.role = "static"
+
+
+# --------------------------------------------------------------------------- #
 # one well
 # --------------------------------------------------------------------------- #
 def analyse_well(paths: Sequence, channel: Optional[int] = None,
                  is_channel: Optional[int] = None,
-                 merge_satellites: bool = True) -> WellResult:
+                 merge_satellites: bool = True,
+                 template: Optional[Template] = None) -> WellResult:
     """CTCE analysis of one well over its runs at different temperatures."""
     runs = [load_run_trace(p, channel) for p in paths]
     # order by temperature (a hotter run done first must not flip the direction)
@@ -377,8 +487,12 @@ def analyse_well(paths: Sequence, channel: Optional[int] = None,
     res = WellResult(plate=runs[0].plate, well=runs[0].well, runs=runs,
                      shifts=[], regimes=[], best=None)
     temps = [r.temperature for r in runs]
-    if len(set(t for t in temps if t is not None)) < 2:
-        res.flags.append("one temperature: no shift to detect")
+    distinct = sorted({t for t in temps if t is not None})
+    one_temp = len(distinct) < 2 or (distinct[-1] - distinct[0]) <= SAME_TEMPERATURE
+    if one_temp:
+        res.method = "shape"
+        res.flags.append("one temperature: peaks classified by shape"
+                         + (f", {len(runs)} replicate runs" if len(runs) > 1 else ""))
     method = align_runs(runs, is_channel)
     if method == "none":
         res.flags.append("runs could not be lined up")
@@ -391,7 +505,7 @@ def analyse_well(paths: Sequence, channel: Optional[int] = None,
             if abs(p.pos - aligned) <= 2:
                 p.role = "anchor"
     # 4. static peaks and melting peaks between neighbouring temperatures
-    for k in range(len(runs) - 1):
+    for k in range(0 if one_temp else len(runs) - 1):
         pa = [p for p in runs[k].peaks if p.role != "anchor"]
         pb = [p for p in runs[k + 1].peaks if p.role != "anchor"]
         warmer = not (temps[k] is not None and temps[k + 1] is not None and temps[k + 1] < temps[k])
@@ -406,6 +520,22 @@ def analyse_well(paths: Sequence, channel: Optional[int] = None,
         res.shifts.append(float(np.median([b.pos - a.pos for a, b in melt])))
         for a, b in melt:
             a.role = b.role = "melting"
+    if one_temp:
+        res.shifts = [None] * max(0, len(runs) - 1)
+        for r in runs:
+            _classify_by_shape(r, ymax)
+    # user guidance wins where it applies: the clicked peaks, by position
+    if template is not None:
+        guided = 0
+        for r in runs:
+            offs = template.at(r.temperature)
+            if offs:
+                if _apply_template(r, offs) < len(offs):
+                    res.flags.append(f"template: {len(offs) - sum(p.label != '' for p in r.peaks)} "
+                                     f"peak(s) not found at {r.temperature:g} °C")
+                guided += 1
+        if guided:
+            res.method = "template"
     for r in runs:
         _mark_satellites(r.peaks)
     # 5. regime per run, and the measuring run
@@ -445,14 +575,63 @@ def analyse_well(paths: Sequence, channel: Optional[int] = None,
         hom1, hom2, het1, het2 = res.areas
         p = (hom1 + (het1 + het2) / 2.0) / total
         res.minor_fraction = min(p, 1.0 - p)
+    # replicates: runs at the measuring temperature with the same peaks
+    reps = [r for r in runs if r.temperature is not None and best.temperature is not None
+            and abs(r.temperature - best.temperature) <= SAME_TEMPERATURE]
+    if len(reps) > 1:
+        fr = []
+        for r in reps:
+            a = _run_areas(r, merge_satellites)
+            if len(a) == len(res.areas) and sum(a) > 0:
+                fr.append([x / sum(a) for x in a])
+        if len(fr) > 1:
+            arr = np.asarray(fr)
+            res.fractions = [float(x) for x in arr.mean(axis=0)]
+            res.fraction_sd = [float(x) for x in arr.std(axis=0, ddof=1)]
     if sat:
         res.flags.append(f"{len(sat)} satellite peak(s) {'added to' if merge_satellites else 'kept apart from'} their parent")
     return res
 
 
+def _run_areas(run: RunTrace, merge_satellites: bool) -> List[float]:
+    """Areas of a run's melting peaks in migration order (satellites merged)."""
+    core = sorted((p for p in run.peaks if p.role == "melting"), key=lambda p: p.pos)
+    areas = {id(p): p.area for p in core}
+    if merge_satellites:
+        for s in (p for p in run.peaks if p.role == "satellite"):
+            par = run.peaks[s.parent]
+            if id(par) in areas:
+                areas[id(par)] += s.area
+    return [areas[id(p)] for p in core]
+
+
 # --------------------------------------------------------------------------- #
 # a plate
 # --------------------------------------------------------------------------- #
+def flag_no_product(results: Sequence[WellResult]) -> None:
+    """Flag wells whose signal (anything but the early peak) is far below the
+    plate's typical melting signal."""
+    tops = [max((p.height for r in res.runs for p in r.peaks if p.role in ("melting", "satellite")),
+                default=0.0) for res in results]
+    good = [t for t in tops if t > 0]
+    if not good:
+        return
+    med = float(np.median(good))
+    for res in results:
+        prod = max((p.height for r in res.runs for p in r.peaks if p.role != "anchor"), default=0.0)
+        if prod < NO_PRODUCT_RATIO * med and "no product" not in res.flags:
+            res.flags.insert(0, "no product")
+
+
+def plate_wells(run_folders: Sequence) -> List[str]:
+    """Wells present in every one of the run folders."""
+    names = None
+    for f in run_folders:
+        stems = {p.stem for p in Path(f).glob("*.rsd")}
+        names = stems if names is None else names & stems
+    return sorted(names or [])
+
+
 def group_runs(folders: Sequence) -> Dict[str, List[Path]]:
     """Run folders -> {plate: [run folders]}, runs of one plate together."""
     out: Dict[str, List[Path]] = {}
@@ -464,26 +643,14 @@ def group_runs(folders: Sequence) -> Dict[str, List[Path]]:
 
 def analyse_plate(run_folders: Sequence, channel: Optional[int] = None,
                   is_channel: Optional[int] = None, merge_satellites: bool = True,
-                  wells: Optional[Sequence[str]] = None) -> List[WellResult]:
+                  wells: Optional[Sequence[str]] = None,
+                  template: Optional[Template] = None) -> List[WellResult]:
     """Every well present in all the given runs of one plate."""
     run_folders = [Path(f) for f in run_folders]
-    names = None
-    for f in run_folders:
-        stems = {p.stem for p in f.glob("*.rsd")}
-        names = stems if names is None else names & stems
-    names = sorted(names or [])
+    names = plate_wells(run_folders)
     if wells:
         names = [w for w in names if w in set(wells)]
     results = [analyse_well([f / f"{w}.rsd" for f in run_folders], channel, is_channel,
-                            merge_satellites) for w in names]
-    # no product: melting signal far below the plate's typical well
-    tops = [max((p.height for r in res.runs for p in r.peaks if p.role in ("melting", "satellite")),
-                default=0.0) for res in results]
-    good = [t for t in tops if t > 0]
-    if good:
-        med = float(np.median(good))
-        for res, t in zip(results, tops):
-            prod = max((p.height for r in res.runs for p in r.peaks if p.role != "anchor"), default=0.0)
-            if prod < NO_PRODUCT_RATIO * med:
-                res.flags.insert(0, "no product")
+                            merge_satellites, template) for w in names]
+    flag_no_product(results)
     return results
