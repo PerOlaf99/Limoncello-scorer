@@ -5458,6 +5458,25 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._view_y[:] = [0.0, 1.0]
         self._apply_zoom()
 
+    def _bar_cmd(self, axis, args):
+        """ttk scrollbar -> pan that axis (grab the thumb and slide)."""
+        if not args:
+            return
+        v = self._view_x if axis == "x" else self._view_y
+        lo, hi = v
+        width = hi - lo
+        cmd = args[0]
+        if cmd == "moveto" and len(args) > 1:
+            new_lo = min(max(0.0, float(args[1])), max(0.0, 1.0 - width))
+            v[:] = [new_lo, new_lo + width]
+        elif cmd == "scroll" and len(args) > 1:
+            n = float(args[1])
+            step = width * (0.1 if len(args) > 2 and args[2] == "units" else 1.0)
+            new_lo = min(max(0.0, lo + n * step), max(0.0, 1.0 - width))
+            v[:] = [new_lo, new_lo + width]
+        self._apply_zoom()
+
+
     def _apply_zoom(self, *_):
         """Push the X/Y view onto every visible graph + both bars."""
         if self._full_xlim is None or not self._plot_axes:

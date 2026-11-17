@@ -244,3 +244,26 @@ def test_picking_shows_a_banner_and_esc_leaves(app):
     app.update()
     assert not app.genotyping_active
     assert not app._mode_banner.winfo_ismapped()
+
+
+def test_scroll_bars_pan_a_zoomed_view(app):
+    """The scroll bars are wired to _bar_cmd; dragging the thumb sends
+    ("moveto", f) and the arrows/trough send ("scroll", n, units|pages)."""
+    _select(app, [0], 1)
+    ax = app._plot_axes[0]
+    app._zoom_to_scans(1000, 1500)
+    w0 = ax.get_xlim()[1] - ax.get_xlim()[0]
+    app.xbar.cget("command")                      # the bar has a command
+    app.tk.call(app.xbar.cget("command"), "moveto", "0.5")   # as Tk calls it
+    app.update()
+    lo, hi = ax.get_xlim()
+    assert abs((hi - lo) - w0) < 1e-6             # same zoom width …
+    assert lo > 1500                              # … slid to the middle
+    app.tk.call(app.xbar.cget("command"), "scroll", "-1", "pages")
+    app.update()
+    assert ax.get_xlim()[0] < lo                  # paged back
+    lo_y = ax.get_ylim()
+    app._wheel_zoom("y", 1)
+    app.tk.call(app.ybar.cget("command"), "moveto", "0.2")
+    app.update()
+    assert ax.get_ylim() != lo_y                  # the Y bar pans too
