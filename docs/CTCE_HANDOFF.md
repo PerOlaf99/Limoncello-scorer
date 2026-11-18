@@ -1,7 +1,15 @@
-# CTCE handoff (2026-11-18, evening)
+# CTCE handoff (2026-11-18, night, from the home PC)
 
-State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`)
-for continuing at home. Everything is on `main`.
+State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`).
+Everything is on `main`.
+
+**Latest (home, 2026-11-18 night):** open item 1 below was done at home, committed in `eb1ff7a`.
+- **First thing at work:** pull, then run the benchmark with `--plate "021123_mt_nucl_#19_20"`.
+- **Check 021123's colder Homo1** (the operator's drag at Run01 A01 is 2307–2375).
+- **Check the "temperatures disagree" flag:** see which wells it fires on, and whether those are the ones the operator had in mind.
+- **Home PC files:**
+  - The scratch scripts (plots, diagnostics) were saved to `/home/tv/limoncello_work/ctce/` before a restart.
+  - `/home/tv/limoncello_work/ctce_flat_links/` holds symlinks to the run folders, usable as `--data`.
 
 ## Where it stands
 The engine matches the hand drags on 16 marked runs: on average the engine
