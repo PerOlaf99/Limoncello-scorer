@@ -44,7 +44,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from analyzer_core import acgt_index_for_channel
+from analyzer_core import acgt_index_for_channel, channel_dye, physical_channel
 
 # numpy dropped ``trapz`` in 2.0 (renamed ``trapezoid``); accept both.
 _trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
@@ -214,6 +214,7 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
         "vendor": "Applied Biosystems",
         "color": "#ff7f0e",
+        "default_channel": 5,
         "notes": "9 fragments, 15-120 nt (denatured); for SNaPshot/SNP work.",
     },
     "genescan350_rox": {
@@ -245,6 +246,7 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
         "vendor": "Applied Biosystems",
         "color": "#ff7f0e",
+        "default_channel": 5,
         "notes": "16 fragments, 35-500 nt. The vendor says not to use 250 for sizing.",
     },
     "genescan600_liz": {
@@ -256,6 +258,7 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 'Size standards'; GeneScan 600 LIZ v2.0 product sheet (Pub. 4425787 Rev C)",
         "vendor": "Applied Biosystems",
         "color": "#ff7f0e",
+        "default_channel": 5,
         "notes": "36 fragments, 20-600 nt; v1 and v2.0 have the same peaks. A "
                  "primer peak can mask the smallest band.",
     },
@@ -271,6 +274,7 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
         "vendor": "Applied Biosystems",
         "color": "#ff7f0e",
+        "default_channel": 5,
         "notes": "68 fragments, 20-1200 nt (no 1140).",
     },
     "promega_ils600": {
@@ -927,25 +931,23 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                sample_height_frac: float = DEFAULT_SAMPLE_HEIGHT_FRAC) -> SizingResult:
     """Size every sample peak of one loaded trace against *ladder*.
 
-    ``ladder_channel`` / ``sample_channel`` are 1..4 *physical* channels in the
-    plate's dye order (see :func:`analyzer_core.acgt_index_for_channel`); the
-    default (ladder on Ch4, sample on Ch2) is the common MegaBACE ROX-ladder /
-    FAM-sample layout but is a property of the kit, so callers should say.
+    ``ladder_channel`` / ``sample_channel`` are *physical* channels, 1..N --
+    five on a LIZ-capable instrument (see
+    :func:`analyzer_core.physical_channel`).  The default (ladder on Ch4,
+    sample on Ch2) is one MegaBACE layout, but the pair is a property of the
+    kit, so callers should say.
     """
     if isinstance(ladder, str):
         ladder = load_ladder(ladder)
     order = (base_order or getattr(doc, "base_order", None) or DEFAULT_BASE_ORDER)
     warnings: List[str] = []
 
-    acgt = np.asarray(doc.acgt, dtype=float)
-    lad_idx = acgt_index_for_channel(order, ladder_channel)
-    sam_idx = acgt_index_for_channel(order, sample_channel)
     if ladder_channel == sample_channel:
         warnings.append("ladder and sample channel are the same; sizing will "
                         "match the sample's own peaks to the ladder")
 
-    ladder_trace = acgt[:, lad_idx]
-    sample_trace = acgt[:, sam_idx]
+    ladder_trace = physical_channel(doc, ladder_channel, order)
+    sample_trace = physical_channel(doc, sample_channel, order)
 
     ladder_peaks = detect_peaks(ladder_trace,
                                 min_prominence_frac=ladder_prominence_frac,
@@ -1014,7 +1016,9 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                                 min_prominence_frac=sample_prominence_frac,
                                 min_height_frac=sample_height_frac)
     areas = _peak_areas(sample_trace, sample_peaks)
-    base_letter = {"A": "A", "C": "C", "G": "G", "T": "T"}[order[sample_channel - 1]]
+    # the base letter only means something on the four dye-order channels
+    base_letter = order[sample_channel - 1] if sample_channel <= len(order) else ""
+    sample_dye = channel_dye(doc, sample_channel)
     well = getattr(doc, "well", "") or Path(str(getattr(doc, "path", ""))).stem
     file_name = Path(str(getattr(doc, "path", ""))).name
 
@@ -1035,6 +1039,7 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                 "well": well,
                 "channel": sample_channel,
                 "base": base_letter,
+                "dye": sample_dye,
                 "scan": peak.scan,
                 "length_bp": round(float(bp), 2),
                 "height": round(float(peak.height), 3),

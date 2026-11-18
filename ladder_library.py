@@ -41,6 +41,7 @@ import fragment_sizing as fs
 from fragment_sizing import Ladder
 
 MIN_BANDS = 4                     # fewer cannot carry a sizing curve
+MAX_CHANNELS = 8                  # detector channels a ladder may sit on
 
 # display colours for common ladder dyes (matplotlib tab10-ish)
 DYE_COLORS = {
@@ -103,8 +104,8 @@ def validate(ladder: Ladder) -> List[str]:
     if stray:
         problems.append("excluded bands not in the ladder: "
                         + ", ".join(f"{b:g}" for b in stray))
-    if ladder.default_channel is not None and not 1 <= ladder.default_channel <= 4:
-        problems.append("default channel must be 1-4")
+    if ladder.default_channel is not None and not 1 <= ladder.default_channel <= MAX_CHANNELS:
+        problems.append(f"default channel must be 1-{MAX_CHANNELS}")
     usable = len(ls) - len([b for b in ladder.exclude if b in ls])
     if len(ls) >= MIN_BANDS and usable < MIN_BANDS:
         problems.append(f"after exclusions fewer than {MIN_BANDS} bands remain")

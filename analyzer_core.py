@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import inspect
+import re
 import struct
 import sys
 import warnings
@@ -212,6 +213,17 @@ class TraceDocument:
     meta: str = ""       # free-form instrument/source info for exports
     footer_fields: dict = field(default_factory=dict)  # decoded RSD run fields
     run_params: dict = field(default_factory=dict)  # run conditions from Text/ export
+    # Every detector channel in PHYSICAL order (Ch1..ChN), however many the
+    # instrument has -- four on a MegaBACE, five on a LIZ-capable ABI or a
+    # five-dye instrument.  ``acgt`` stays the 4-column A,C,G,T view the base
+    # caller and genotyping use; ``channels`` is what fragment sizing and the
+    # viewer's extra channels read.  None: only ``acgt`` is known.
+    channels: Optional[np.ndarray] = None
+    dyes: List[str] = field(default_factory=list)   # dye per physical channel
+
+    @property
+    def n_channels(self) -> int:
+        return n_channels(self)
 
     @property
     def n_scans(self) -> int:
@@ -580,7 +592,7 @@ def run_params_summary(params: dict) -> List[Tuple[str, str]]:
 
 RFD_EXTS = (".rsd", ".RSD")
 SCF_EXTS = (".scf", ".SCF")
-ABI_EXTS = (".abi", ".ab1")
+ABI_EXTS = (".abi", ".ab1", ".fsa", ".FSA")
 TEXT_EXTS = (".txt", ".tsv", ".csv", ".dat")
 SUPPORTED_EXTS = RFD_EXTS + SCF_EXTS + ABI_EXTS + TEXT_EXTS
 # Only instrument trace formats are auto-discovered in folders; text/CSV
@@ -712,6 +724,39 @@ def acgt_index_for_channel(base_order: str, channel: int) -> int:
     return "ACGT".index(order[channel - 1])
 
 
+def n_channels(doc) -> int:
+    """How many detector channels *doc* carries (4 unless it says more)."""
+    ch = getattr(doc, "channels", None)
+    if ch is not None and np.ndim(ch) == 2:
+        return int(np.shape(ch)[1])
+    acgt = getattr(doc, "acgt", None)
+    return int(np.shape(acgt)[1]) if acgt is not None and np.ndim(acgt) == 2 else 4
+
+
+def physical_channel(doc, channel: int, base_order: Optional[str] = None) -> np.ndarray:
+    """The trace of physical *channel* (1-based) of *doc*.
+
+    Read straight from ``doc.channels`` when the loader kept them, so it is
+    the instrument's own channel whatever dye order is in use; otherwise from
+    ``doc.acgt`` through the dye order (*base_order*, else the document's).
+    """
+    n = n_channels(doc)
+    if not 1 <= int(channel) <= n:
+        raise ValueError(f"Channel must be 1..{n}, got {channel!r}")
+    ch = getattr(doc, "channels", None)
+    if ch is not None and np.ndim(ch) == 2:
+        return np.asarray(ch, float)[:, int(channel) - 1]
+    order = base_order or getattr(doc, "base_order", None) or "ACGT"
+    return np.asarray(doc.acgt, float)[:, acgt_index_for_channel(order, int(channel))]
+
+
+def channel_dye(doc, channel: int) -> str:
+    """The dye name the file gives for physical *channel*, or ""."""
+    dyes = list(getattr(doc, "dyes", None) or [])
+    return str(dyes[channel - 1]).strip() if 0 < channel <= len(dyes) else ""
+
+
+
 def _reorder(ch: np.ndarray, base_order: str) -> np.ndarray:
     """Reorder columns from instrument order string -> A,C,G,T."""
     order = base_order.upper()
@@ -731,7 +776,8 @@ def _abif_entries(raw: bytes) -> Dict[str, Tuple[int, int, int, int, int]]:
     """Parse an ABIF directory.  Standard ABI layout first, then the
     alternate .abd variant (numElements at 16:20), whichever yields records."""
     candidates = [
-        (6, 26),   # standard ABIF
+        (18, 26),  # standard ABIF: the "tdir" entry's numElements at 18
+        (6, 26),   # older reading of the same header (kept as a fallback)
         (16, 26),  # alternate .abd variant
     ]
     for num_off, dir_off in candidates:
@@ -752,9 +798,14 @@ def _abif_entries(raw: bytes) -> Dict[str, Tuple[int, int, int, int, int]]:
                 )
             except Exception:
                 break
-            if not name.isidentifier():
+            # tag names are four printable characters; some are not Python
+            # identifiers ("Dye#", "phAR"), so do not stop at those
+            if not re.fullmatch(r"[A-Za-z0-9_#]{4}", name):
                 break
-            if 0 <= d_off and d_off + dsize <= len(raw) and dsize > 0:
+            if 0 < dsize <= 4:
+                # four bytes or fewer live in the entry's own dataOffset field
+                entries[f"{name}{num}"] = (etype, esize, ne, dsize, off + 20)
+            elif 0 <= d_off and d_off + dsize <= len(raw) and dsize > 0:
                 entries[f"{name}{num}"] = (etype, esize, ne, dsize, d_off)
         if any(k.startswith("DATA") for k in entries):
             return entries
@@ -770,7 +821,44 @@ def _abif_payload(raw: bytes, rec: Tuple[int, int, int, int, int]) -> np.ndarray
     return np.frombuffer(buf, dtype=dtype).astype(np.float64)
 
 
+def _abif_text(raw: bytes, rec) -> str:
+    """An ABIF text item: pString (type 18, length byte first), cString (19)
+    or a char array (2)."""
+    etype, _esize, _ne, dsize, doff = rec
+    buf = bytes(raw[doff:doff + dsize])
+    if etype == 18 and buf:
+        buf = buf[1:1 + buf[0]]
+    return buf.split(b"\0")[0].decode("latin-1", "replace").strip()
+
+
+def _abif_channels(raw: bytes, entries, analyzed: bool):
+    """The dye channels of an ABIF file, physical order, any count.
+
+    Raw data are DATA1-4 with the fifth dye in DATA105; analyzed (baseline-
+    corrected, spectrally separated) data are DATA9-12 with the fifth in
+    DATA205.  DATA5-8 are not dyes (voltage, current, power, temperature).
+    Returns (array or None, "analyzed"/"raw")."""
+    sets = [("analyzed", [9, 10, 11, 12, 205]), ("raw", [1, 2, 3, 4, 105])]
+    if not analyzed:
+        sets.reverse()
+    for label, nums in sets:
+        cols = [_abif_payload(raw, entries[f"DATA{n}"]) for n in nums
+                if f"DATA{n}" in entries]
+        if len(cols) >= 4:
+            n = min(len(c) for c in cols)
+            return np.column_stack([c[:n] for c in cols]), label
+    return None, ""
+
+
 def load_ab1(path: Path, base_order: str = "ACGT") -> TraceDocument:
+    """ABIF: a sequencing ``.ab1`` or a fragment-analysis ``.fsa``.
+
+    ``acgt`` keeps the four dye channels mapped through the dye order (for the
+    base caller); ``channels`` keeps every dye channel in instrument order --
+    five on a LIZ-capable instrument -- with ``dyes`` naming them.  A ``.fsa``
+    uses the analyzed (spectrally separated) data when the file has them, the
+    way fragment-analysis software sizes; an ``.ab1`` keeps the raw channels.
+    """
     raw = path.read_bytes()
     if raw[:4] != b"ABIF":
         raise ValueError(f"{path.name}: not an ABIF file")
@@ -778,7 +866,11 @@ def load_ab1(path: Path, base_order: str = "ACGT") -> TraceDocument:
     if not any(k.startswith("DATA") for k in entries):
         raise ValueError(f"{path.name}: no ABIF DATA records found")
 
-    ch = np.column_stack([_abif_payload(raw, entries[f"DATA{i}"]) for i in range(1, 5)])
+    is_fsa = path.suffix.lower() == ".fsa"
+    chans, which = _abif_channels(raw, entries, analyzed=is_fsa)
+    if chans is None:
+        raise ValueError(f"{path.name}: fewer than four dye channels")
+    ch = chans[:, :4]
 
     # FWO_1 holds the run's dye/base-order string (channel c -> base).
     order = base_order.upper()
@@ -790,6 +882,11 @@ def load_ab1(path: Path, base_order: str = "ACGT") -> TraceDocument:
                 order = s.upper()
                 break
 
+    dyes = []
+    for k in range(1, chans.shape[1] + 1):
+        rec = entries.get(f"DyeN{k}")
+        dyes.append(_abif_text(raw, rec) if rec else "")
+
     # Peak locations + called bases (PBAS/PLOC).
     seq, peaks = "", []
     for pk_key, pb_key in (("PLOC_1", "PBAS_1"), ("PLOC_2", "PBAS_2")):
@@ -800,17 +897,30 @@ def load_ab1(path: Path, base_order: str = "ACGT") -> TraceDocument:
             peaks = list(p)
             break
 
+    well = path.stem
+    if is_fsa and "TUBE1" in entries:
+        # the instrument's own well id ("A1" -> "A01"), as for .rsd
+        tube = _abif_text(raw, entries["TUBE1"]).upper()
+        m = re.fullmatch(r"([A-P])0*(\d{1,2})", tube)
+        if m:
+            well = f"{m.group(1)}{int(m.group(2)):02d}"
+
     acgt = _reorder(ch, order)
+    kind = ".fsa (fragment analysis)" if is_fsa else ".ab1"
+    dye_txt = ", ".join(d or "?" for d in dyes) if any(dyes) else "unnamed"
     return TraceDocument(
         path=path,
-        well=path.stem,
+        well=well,
         raw=acgt.copy(),
         base_order=order,
         acgt=acgt,
         sequence=seq,
         peak_positions=peaks,
         source="abi",
-        meta=f"ABIF .ab1 (ABI/ThermoFisher), dye-order {order}",
+        meta=(f"ABIF {kind} (ABI/ThermoFisher), {chans.shape[1]} dye channels "
+              f"({dye_txt}), {which} data, dye-order {order}"),
+        channels=chans,
+        dyes=dyes,
     )
 
 
@@ -927,6 +1037,7 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
             current=None if cur is None else np.asarray(cur, float),
             source="rsd",
             meta="RSD",
+            channels=np.asarray(ch, float),
         )
 
     try:
@@ -961,7 +1072,18 @@ def load_rsd(path: Path, base_order: str = "TGCA") -> TraceDocument:
         meta=meta,
         footer_fields=fields,
         run_params=run_params,
+        channels=_rsd_physical(rsd),
+        dyes=[str(d).strip() for d in (fields.get("CHANNEL DYES") or [])][:4],
     )
+
+
+def _rsd_physical(rsd) -> Optional[np.ndarray]:
+    """The .rsd trace in its own channel order (Ch1..Ch4), or None."""
+    tr = getattr(rsd, "trace", None)
+    if tr is None:
+        return None
+    tr = np.asarray(tr, float)
+    return tr if tr.ndim == 2 else None
 
 
 def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocument:
@@ -1040,6 +1162,26 @@ def display_trace(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
         except Exception:                               # pragma: no cover
             return doc.acgt
     return doc.acgt
+
+
+def display_extra_channels(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
+    """Physical channels beyond the four A,C,G,T ones (Ch5.., e.g. LIZ), as an
+    (n, k) array treated like :func:`display_trace` for the view mode; (n, 0)
+    when the document has none."""
+    ch = getattr(doc, "channels", None)
+    if ch is None or np.ndim(ch) != 2 or np.shape(ch)[1] <= 4:
+        return np.zeros((doc.n_scans, 0))
+    extra = np.asarray(ch, float)[:, 4:]
+    if settings.view_mode == "baseline":
+        try:
+            from cimarron_basecaller.spacing_caller import smooth_trace
+            from cimarron_basecaller.simple_caller import robust_baseline_subtract
+            return robust_baseline_subtract(
+                smooth_trace(extra, settings.smooth_window),
+                window=settings.baseline_window)
+        except Exception:                               # pragma: no cover
+            return extra
+    return extra
 
 
 # ---------------------------------------------------------------------------

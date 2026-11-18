@@ -18,7 +18,7 @@ TITLE = "Limoncello CE Analyzer — user manual"
 
 SECTIONS = [
     ("Start here", """\
-Limoncello shows capillary-electrophoresis traces (.rsd, .scf, ABI .ab1 and text/CSV exports) and does three different jobs with them. They are kept apart on purpose — pick the one that matches your run:
+Limoncello shows capillary-electrophoresis traces (.rsd, .scf, ABI .ab1/.fsa — up to five dyes, e.g. LIZ on Ch5 — and text/CSV exports) and does three different jobs with them. They are kept apart on purpose — pick the one that matches your run:
 
 • **Base calling** — read the DNA sequence from a sequencing run. → Quick start: base calling.
 • **Genotyping (CTC-CE)** — call genotypes from duplex peaks against an internal standard, by clicking peaks or automatically for a whole plate. → Quick start: genotyping.

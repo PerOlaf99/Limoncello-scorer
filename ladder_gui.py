@@ -84,7 +84,8 @@ class LadderEditor(tk.Toplevel):
         row(3, "Colour", cf)
         row(4, "Default ladder channel",
             ttk.Combobox(frm, textvariable=self.channel, width=4,
-                         values=["", "1", "2", "3", "4"], state="readonly"))
+                         values=[""] + [str(k) for k in range(1, lib.MAX_CHANNELS + 1)],
+                         state="readonly"))
 
         lf = ttk.Frame(frm)
         self.lengths = tk.Text(lf, height=5, width=48, wrap="word")
@@ -325,9 +326,10 @@ class SizingSetup(tk.Toplevel):
     """Pick a ladder and the two physical channels.  ``result`` is
     ``{"key", "ladder", "ladder_channel", "sample_channel"}`` or None."""
 
-    def __init__(self, parent, last: Optional[dict] = None):
+    def __init__(self, parent, last: Optional[dict] = None, n_channels: int = 4):
         super().__init__(parent)
         self.title("Fragment-length sizing")
+        self.n_channels = max(2, int(n_channels or 4))
         self.result = None
         last = dict(last or {})
         frm = ttk.Frame(self, padding=10)
@@ -343,13 +345,14 @@ class SizingSetup(tk.Toplevel):
             row=1, column=3, padx=(6, 0))
         self.lch = tk.IntVar(value=int(last.get("ladder_channel") or 4))
         self.sch = tk.IntVar(value=int(last.get("sample_channel") or 2))
-        ttk.Label(frm, text="Ladder channel (1-4, physical):").grid(
+        top = self.n_channels
+        ttk.Label(frm, text=f"Ladder channel (1-{top}, physical):").grid(
             row=2, column=0, sticky="w")
-        ttk.Spinbox(frm, from_=1, to=4, width=4, textvariable=self.lch,
+        ttk.Spinbox(frm, from_=1, to=top, width=4, textvariable=self.lch,
                     state="readonly").grid(row=2, column=1, sticky="w")
-        ttk.Label(frm, text="Sample channel (1-4, physical):").grid(
+        ttk.Label(frm, text=f"Sample channel (1-{top}, physical):").grid(
             row=3, column=0, sticky="w")
-        ttk.Spinbox(frm, from_=1, to=4, width=4, textvariable=self.sch,
+        ttk.Spinbox(frm, from_=1, to=top, width=4, textvariable=self.sch,
                     state="readonly").grid(row=3, column=1, sticky="w")
         self.hint = ttk.Label(frm, text="", foreground="#666")
         self.hint.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -389,7 +392,8 @@ class SizingSetup(tk.Toplevel):
 
     def _ladder_changed(self, _e=None):
         row = self._row()
-        if row and row["ladder"].default_channel:
+        if row and row["ladder"].default_channel \
+                and row["ladder"].default_channel <= self.n_channels:
             self.lch.set(row["ladder"].default_channel)
         self._update_hint()
 
@@ -404,6 +408,11 @@ class SizingSetup(tk.Toplevel):
         row = self._row()
         if row is None:
             return
+        if not (1 <= self.lch.get() <= self.n_channels
+                and 1 <= self.sch.get() <= self.n_channels):
+            messagebox.showerror("Fragment sizing", "These files have channels "
+                                 f"1-{self.n_channels} only.", parent=self)
+            return
         if self.lch.get() == self.sch.get():
             messagebox.showerror("Fragment sizing", "The ladder and the sample "
                                  "must be on different channels.", parent=self)
@@ -414,8 +423,9 @@ class SizingSetup(tk.Toplevel):
         self.destroy()
 
 
-def ask_sizing_setup(parent, last: Optional[dict] = None) -> Optional[dict]:
-    dlg = SizingSetup(parent, last)
+def ask_sizing_setup(parent, last: Optional[dict] = None,
+                     n_channels: int = 4) -> Optional[dict]:
+    dlg = SizingSetup(parent, last, n_channels=n_channels)
     parent.wait_window(dlg)
     return dlg.result
 

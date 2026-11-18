@@ -75,7 +75,7 @@ def test_a_broken_file_does_not_break_the_library():
     (_lad(lengths=(50, 100, 100, 150, 200)), "duplicate"),
     (_lad(exclude=(75,)), "not in the ladder"),
     (_lad(lengths=(50, 100, 150, 200), exclude=(100,)), "fewer than 4"),
-    (_lad(default_channel=5), "1-4"),
+    (_lad(default_channel=9), "1-8"),
     (_lad(name=" "), "name"),
 ])
 def test_validation_names_the_problem(lad, expect):

@@ -91,7 +91,7 @@ def _patch_dialogs(monkeypatch, *, ladder="genescan500_rox",
     import ladder_gui
     calls = {"info": [], "error": [], "last": []}
 
-    def setup(parent, last=None):
+    def setup(parent, last=None, n_channels=4):
         calls["last"].append(dict(last or {}))
         if askstring_cancel:
             return None

@@ -11,7 +11,7 @@ The full user manual, with quick starts for each job, is in the app:
 | Feature | Status |
 |---------|--------|
 | Multiple data folders | Yes — File → Add data folder |
-| Wells list (.rsd / .scf / .ab1 / text) | Yes — multi-select |
+| Wells list (.rsd / .scf / .ab1 / .fsa / text) | Yes — multi-select |
 | Number of graphs (1–12) | Yes — Graphs box in the view bar, with a page indicator |
 | Overlay runs of the same well | Yes — view bar / View menu (Run01 solid, Run02 dashed, …) |
 | Views: raw / processed / base-called / sequencing trace (ESD peaks) / wrap | Yes — View menu |
@@ -726,6 +726,20 @@ the Genotyping Test Plate fragments (`CS_Ladder_info.tdb`: 13 fragments in
 FAM, TAMRA and HEX) are found in every sample well with a ladder (81–82 per
 dye) and come out within 0.15 bp of Genetic Profiler's sizes. `tests/test_sizing_gp22_demo.py` checks this when the demo
 data is present (`LIMONCELLO_GP22_DEMO`).
+
+### Five-dye runs (LIZ) and `.fsa` files
+
+ABI fragment-analysis files (`.fsa`, and `.ab1`) are read with **every dye
+channel** the file holds — five on a LIZ-capable instrument — and the dye
+names it records (e.g. 6-FAM, VIC, NED, PET, LIZ). A `.fsa` uses the analyzed
+(spectrally separated) data when present, as fragment-analysis software does.
+Channels beyond the first four appear as extra switches in the viewer's
+channel bar ("Ch5 LIZ"), and sizing takes any physical channel: the LIZ
+ladders default to Ch5.
+
+```bash
+python scorer.py size run/*.fsa --ladder genescan500_liz --sample-channel 1
+```
 
 **ET550-R and ET900-R are bundled too** (`et550r`, `et900r`): their band
 tables are the ones built into Genetic Profiler 2.2 (`gpcom.dll`), and MRC

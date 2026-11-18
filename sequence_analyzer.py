@@ -73,6 +73,16 @@ from analyzer_core import (
 )
 
 CHANNEL_ORDER = "ACGT"
+MAX_CHANNELS = 8      # detector channels the viewer can show (Ch5.. beyond A,C,G,T)
+
+
+def _dye_color(dye: str) -> str:
+    """Display colour for an extra channel's dye (LIZ orange, ...)."""
+    try:
+        import ladder_library
+        return ladder_library.default_color(dye) if dye else "#ff7f0e"
+    except Exception:                                      # noqa: BLE001
+        return "#ff7f0e"
 QUALITY_COLOR = "#C77B00"   # brownish (poor-quality colour, manual)
 QUALITY_GOOD = "#00998A"    # blue-green (good-quality colour, manual)
 CURRENT_COLOR = "#8C8C9E"
@@ -265,7 +275,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var = tk.StringVar(value="Ready — add a data folder to begin")
 
         # Visualization state
-        self.chan_show = [tk.BooleanVar(value=True) for _ in CHANNEL_ORDER]
+        # one switch per physical channel: Ch1-Ch4 always, Ch5.. (e.g. LIZ on
+        # a five-dye instrument) shown only when a loaded file has them
+        self.chan_show = [tk.BooleanVar(value=True) for _ in range(MAX_CHANNELS)]
         self.show_letters = tk.BooleanVar(value=True)
         self.show_qnum = tk.BooleanVar(value=False)
         self.show_qcurve = tk.BooleanVar(value=False)
@@ -813,6 +825,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 selectcolor="white")
             cb.pack(side=tk.LEFT, padx=2)
             self._chan_cbs.append(cb)
+        # Ch5.. switches: built now, packed only when a file has those channels
+        self._extra_cbs = []
+        for i in range(len(CHANNEL_ORDER), MAX_CHANNELS):
+            self._extra_cbs.append(tk.Checkbutton(
+                chan_bar, text=f"  Ch{i + 1}  ", variable=self.chan_show[i],
+                command=self._chan_changed, bg="#F2F4F7", fg="#000000",
+                activebackground="#F2F4F7", selectcolor="white"))
+        self._extra_shown = 0
         # the bar starts out indexed A,C,G,T; relabel to the run's dye order
         self._refresh_channel_labels()
         self.base_order_var.trace_add("write", self._on_base_order_changed)
@@ -2687,6 +2707,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 m1 = float(np.nanmax(seg))
                 gy0 = m0 if gy0 is None else min(gy0, m0)
                 gy1 = m1 if gy1 is None else max(gy1, m1)
+                plotted = True
+            for ci, dye, seg, color in self._extra_lines(
+                    doc, self._settings_for(doc, self._settings_from_ui())):
+                ax.plot(x, seg, color=color, lw=0.7,
+                        label=f"Ch{ci + 1} {dye}".strip())
+                if seg.size:
+                    gy0 = float(np.nanmin(seg)) if gy0 is None else min(gy0, float(np.nanmin(seg)))
+                    gy1 = float(np.nanmax(seg)) if gy1 is None else max(gy1, float(np.nanmax(seg)))
                 plotted = True
             if n:
                 gx0 = 0 if gx0 is None else 0
@@ -4616,7 +4644,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
             last = dict(mark_library.load_prefs().get("fragment_sizing", {}))
         except Exception:                                  # noqa: BLE001
             last = {}
-        setup = ladder_gui.ask_sizing_setup(self, last)
+        # how many channels the selection has: five on a LIZ instrument
+        n_ch = 4
+        try:
+            from analyzer_core import n_channels
+            n_ch = max(n_channels(self._ensure_doc(Path(p)))
+                       for p in list(self.selected)[:8])
+        except Exception:                                  # noqa: BLE001
+            pass
+        setup = ladder_gui.ask_sizing_setup(self, last, n_channels=n_ch)
         if setup is None:
             return
         ladder = setup["ladder"]
@@ -4987,6 +5023,57 @@ class LimoncelloAnalyzerApp(tk.Tk):
             lines.append((ci, base, col, color))
         return lines
 
+    def _extra_lines(self, doc, settings):
+        """Channels beyond the four A,C,G,T ones (Ch5.., e.g. LIZ):
+        (channel_idx, label, (n,) trace, colour) for each switched on."""
+        from analyzer_core import display_extra_channels, channel_dye
+        self._sync_extra_channel_buttons()
+        try:
+            extra = display_extra_channels(doc, settings)
+        except Exception:                                  # noqa: BLE001
+            return []
+        lines = []
+        for k in range(extra.shape[1]):
+            ci = len(CHANNEL_ORDER) + k
+            if ci >= MAX_CHANNELS or not self.chan_show[ci].get():
+                continue
+            dye = channel_dye(doc, ci + 1)
+            lines.append((ci, dye or "", extra[:, k], _dye_color(dye)))
+        return lines
+
+    def _sync_extra_channel_buttons(self):
+        """Show a Ch5.. switch for every extra channel a loaded file has,
+        labelled with its dye; hide the rest."""
+        from analyzer_core import n_channels, channel_dye
+        cbs = getattr(self, "_extra_cbs", [])
+        if not cbs:
+            return
+        n, dyes = len(CHANNEL_ORDER), {}
+        for doc in list(self.docs.values()):
+            try:
+                k = n_channels(doc)
+            except Exception:                              # noqa: BLE001
+                continue
+            n = max(n, k)
+            for ci in range(len(CHANNEL_ORDER) + 1, k + 1):
+                dyes.setdefault(ci, channel_dye(doc, ci))
+        want = max(0, min(n, MAX_CHANNELS) - len(CHANNEL_ORDER))
+        for j, cb in enumerate(cbs):
+            ci = len(CHANNEL_ORDER) + j + 1
+            if j < want:
+                dye = dyes.get(ci) or ""
+                cb.config(text=f"Ch{ci} {dye}".strip(),
+                          fg=_dye_color(dye) if dye else "#000000")
+                if j >= self._extra_shown:
+                    anchor = getattr(self, "_cur_btn", None)
+                    if anchor is not None:
+                        cb.pack(side=tk.LEFT, padx=2, before=anchor)
+                    else:
+                        cb.pack(side=tk.LEFT, padx=2)
+            elif j < self._extra_shown:
+                cb.pack_forget()
+        self._extra_shown = want
+
     def _refresh_channel_buttons(self):
         """Label/colour the Channel checkbuttons in the run's physical channel
         order (Ch1 = first tick, always shown first), using the colour of the
@@ -5067,6 +5154,14 @@ class LimoncelloAnalyzerApp(tk.Tk):
                             m0 = float(np.nanmin(y)); m1 = float(np.nanmax(y))
                             gy0 = m0 if gy0 is None else min(gy0, m0)
                             gy1 = m1 if gy1 is None else max(gy1, m1)
+                for ci, dye, full, color in self._extra_lines(doc, dset):
+                    y = full[sel]
+                    ax.plot(sel, y, color=color, lw=0.6,
+                            label=f"Ch{ci + 1} {dye}".strip() if r == 0 else None)
+                    if y.size:
+                        m0 = float(np.nanmin(y)); m1 = float(np.nanmax(y))
+                        gy0 = m0 if gy0 is None else min(gy0, m0)
+                        gy1 = m1 if gy1 is None else max(gy1, m1)
                 # current overlay (µA) in row 0 only
                 if self.show_current.get() and r == 0 and doc.current_ua is not None:
                     cu = doc.current_ua
@@ -6084,6 +6179,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     gy0 = m0 if gy0 is None else min(gy0, m0)
                     gy1 = m1 if gy1 is None else max(gy1, m1)
                 plotted = True
+            for ci, dye, full, color in self._extra_lines(doc, dset):
+                seg = full[s0:s1]
+                ax.plot(x[:seg.size], seg, color=color, lw=0.7,
+                        label=f"Ch{ci + 1} {dye}".strip())
+                if seg.size:
+                    m0 = float(np.nanmin(seg)); m1 = float(np.nanmax(seg))
+                    gy0 = m0 if gy0 is None else min(gy0, m0)
+                    gy1 = m1 if gy1 is None else max(gy1, m1)
+                plotted = True
             if s1 > s0:
                 gx0 = s0 if gx0 is None else min(gx0, s0)
                 gx1 = s1 if gx1 is None else max(gx1, s1)
@@ -6215,6 +6319,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             seg = tr[s0:s1, col]
             ax.plot(x, seg, color=color, lw=0.7, linestyle=style, alpha=0.85,
                     label=f"Ch{ci + 1} {base} ({path.parent.name})")
+            if seg.size:
+                lo = float(np.nanmin(seg)) if lo is None else min(lo, float(np.nanmin(seg)))
+                hi = float(np.nanmax(seg)) if hi is None else max(hi, float(np.nanmax(seg)))
+        for ci, dye, full, color in self._extra_lines(doc, dset):
+            seg = full[s0:s1]
+            ax.plot(x[:seg.size], seg, color=color, lw=0.7, linestyle=style, alpha=0.85,
+                    label=f"Ch{ci + 1} {dye} ({path.parent.name})".replace("  ", " "))
             if seg.size:
                 lo = float(np.nanmin(seg)) if lo is None else min(lo, float(np.nanmin(seg)))
                 hi = float(np.nanmax(seg)) if hi is None else max(hi, float(np.nanmax(seg)))
