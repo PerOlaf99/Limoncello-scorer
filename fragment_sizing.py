@@ -129,6 +129,9 @@ class SizingResult:
     well: str = ""
     file: str = ""
     warnings: List[str] = field(default_factory=list)
+    standards: List[dict] = field(default_factory=list)   # the ladder bands found
+    matrix: str = ""                                       # dye-overlap correction used
+    sample_channels: List[int] = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
@@ -323,6 +326,59 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "vendor": "Beckman Coulter",
         "color": "#9467bd",
         "notes": "33 fragments, 60-640 nt.",
+    },
+    "mapmarker400": {
+        "name": "MapMarker 400 (TAMRA)",
+        "dye": "TAMRA",
+        "lengths": [70, 80, 90, 100, 120, 140, 160, 180, 190, 200, 220, 240,
+                    260, 280, 300, 320, 340, 360, 380, 400],
+        "source": "Eurogentec technical data sheet MapMarker 400 "
+                  "(GRE-MW-0190-80-0719-V2); BioVentures MM-TMR product page",
+        "vendor": "BioVentures / Eurogentec",
+        "color": "#7f7f7f",
+        "notes": "20 fragments, 70-400 nt. Sold labelled with TAMRA (MW-0190-80TMR, "
+                 "MM-TMR), ROX, FAM or DY-632 -- duplicate and change the dye. "
+                 "Coffalyser.Net leaves 70-90 out of its sizing curve; the vendor "
+                 "flags none.",
+    },
+    "mapmarker1000": {
+        "name": "MapMarker 1000 (TAMRA)",
+        "dye": "TAMRA",
+        "lengths": [50, 75, 100, 125, 150, 200, 250, 300, 350, 400, 450, 475,
+                    500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000],
+        "source": "Eurogentec technical data sheet MapMarker 1000 "
+                  "(GRE-MW-0195-80-0719-V2); BioVentures MM-TMR 1000 product page",
+        "vendor": "BioVentures / Eurogentec",
+        "color": "#7f7f7f",
+        "notes": "23 fragments, 50-1000 nt. Sold labelled with TAMRA "
+                 "(MW-0195-80TMR, MM-TMR 1000), ROX, FAM, Cy5 or DY-632. "
+                 "Coffalyser.Net leaves 50 out of its sizing curve; the vendor "
+                 "flags none.",
+    },
+    "mapmarker500": {
+        "name": "MapMarker 500 / BV500 (35-500)",
+        "dye": "ROX",
+        "lengths": [35, 50, 75, 100, 139, 150, 160, 200, 250, 300, 340, 350,
+                    400, 450, 490, 500],
+        "source": "Eurogentec technical data sheet MapMarker 500 "
+                  "(GRE-MW-0191-80-0719-V2); BioVentures MM-BV500 product page",
+        "vendor": "BioVentures / Eurogentec",
+        "color": "#d62728",
+        "notes": "16 fragments, 35-500 nt, made to match GeneScan 500's sizes. "
+                 "Eurogentec lists 139 (as GeneScan 500); BioVentures' page says "
+                 "130, most likely a typo. Sold with ROX or DY-632; no TAMRA version.",
+    },
+    "mapmarker1500": {
+        "name": "MapMarker 1500 (ROX)",
+        "dye": "ROX",
+        "lengths": [50, 75, 100, 125, 150, 200, 250, 300, 350, 400, 450, 475,
+                    500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000,
+                    1100, 1200, 1300, 1400, 1500],
+        "source": "BioVentures MM-1500-ROX / MM-1500-632 product pages; "
+                  "Eurogentec MapMarker product page",
+        "vendor": "BioVentures / Eurogentec",
+        "color": "#d62728",
+        "notes": "28 fragments, 50-1500 nt. Sold with ROX or DY-632; no TAMRA version.",
     },
     "et400r": {
         "name": "MegaBACE ET400-R",
@@ -923,68 +979,200 @@ def ladder_fit_quality(scans: Sequence[int],
 # --------------------------------------------------------------------------- #
 # top-level sizing
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# sample peaks: detection, shape and a quality score
+# --------------------------------------------------------------------------- #
+DEFAULT_MIN_PEAK_HEIGHT = 50.0   # signal units above the baseline (GP 2.2 lists ~50 RFU up)
+SAMPLE_SMOOTH = 9                # Savitzky-Golay window after a 3-point median
+BASELINE_WINDOW = 201            # scans: running-minimum baseline
+PULLUP_RATIO = 3.0               # another dye this many times taller at the same scan
+
+
+def baseline_corrected(y: np.ndarray) -> np.ndarray:
+    """Smoothed trace minus a running-minimum baseline (itself smoothed):
+    the baseline correction every sizing height and area is measured on."""
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    from scipy.signal import medfilt, savgol_filter
+    y = np.asarray(y, float)
+    if y.size >= SAMPLE_SMOOTH + 2:
+        y = savgol_filter(medfilt(y, 3), SAMPLE_SMOOTH, 2, mode="interp")
+    w = min(BASELINE_WINDOW, max(3, y.size // 2 * 2 - 1))
+    return y - uniform_filter1d(minimum_filter1d(y, w), w)
+
+
+def _noise_sd(z: np.ndarray) -> float:
+    """Robust noise SD of a baseline-corrected trace (MAD of its quiet part)."""
+    z = np.asarray(z, float)
+    q = z[np.abs(z) <= np.percentile(np.abs(z), 80)]
+    if q.size < 10:
+        return 0.0
+    return float(1.4826 * np.median(np.abs(q - np.median(q))))
+
+
+def detect_sample_peaks(y, min_height: float = DEFAULT_MIN_PEAK_HEIGHT,
+                        distance: int = 3) -> Tuple[List[dict], np.ndarray, float]:
+    """Peaks of one (dye-corrected) channel: (peaks, baseline-corrected
+    trace, noise SD).
+
+    A peak must stand ``min_height`` above the running baseline (and five
+    noise SDs), with a prominence of at least 80 % of that -- the kind of peak
+    list Genetic Profiler 2.2 reports.  Each peak carries height, full width
+    at half maximum (scans) and area above the baseline."""
+    from scipy.signal import find_peaks, peak_widths
+    z = baseline_corrected(y)
+    noise = _noise_sd(z)
+    thr = max(float(min_height), 5.0 * noise)
+    idx, _ = find_peaks(z, height=thr, prominence=0.8 * thr, distance=distance)
+    if not len(idx):
+        return [], z, noise
+    import warnings as _w
+    with _w.catch_warnings():
+        _w.simplefilter("ignore")
+        half = peak_widths(z, idx, rel_height=0.5)
+        foot = peak_widths(z, idx, rel_height=0.95)
+    peaks = []
+    for k, i in enumerate(idx):
+        lo, hi = int(np.floor(foot[2][k])), int(np.ceil(foot[3][k])) + 1
+        peaks.append({"scan": int(i), "height": float(z[i]),
+                      "width": float(half[0][k]),
+                      "area": float(np.clip(z[lo:hi], 0, None).sum())})
+    return peaks, z, noise
+
+
+def _flat_top(raw: np.ndarray, scan: int) -> bool:
+    """Four or more scans pinned at the channel's maximum around *scan*:
+    the detector clipped, so height and area are only lower bounds."""
+    seg = raw[max(0, scan - 4):scan + 5]
+    if not seg.size:
+        return False
+    top = float(raw.max())
+    return top > 0 and float(seg.max()) >= 0.995 * top and \
+        int(np.sum(seg >= 0.995 * top)) >= 4
+
+
+def peak_quality(*, snr: float, width_ratio: Optional[float], pullup_ratio: float,
+                 in_range: bool, flat: bool, ladder_rel: Optional[float]):
+    """A 0-100 quality score for one sized peak, and the reasons it is not 100.
+
+    The product of: the ladder fit (relative to the band spacing), signal to
+    noise, shape (width against the ladder's at that position), dye pull-up,
+    position inside the ladder, and clipping."""
+    q, flags = 1.0, []
+    if ladder_rel is None:
+        q *= 0.5
+        flags.append("ladder fit unknown")
+    else:
+        q *= float(np.clip(1.0 - ladder_rel / MAX_LADDER_RMS_SPACING, 0.0, 1.0))
+        if ladder_rel > MAX_LADDER_RMS_SPACING:
+            flags.append("poor ladder")
+    q *= float(np.clip(np.log(max(snr, 1e-9) / 3.0) / np.log(50.0 / 3.0), 0.05, 1.0))
+    if snr < 10:
+        flags.append("weak")
+    if width_ratio is not None:
+        if width_ratio > 2.0:
+            q *= 0.5
+            flags.append("broad")
+        elif width_ratio < 0.4:
+            q *= 0.4
+            flags.append("spike")
+    if pullup_ratio >= PULLUP_RATIO:
+        q *= 0.3
+        flags.append("possible pull-up")
+    if not in_range:
+        q *= 0.6
+        flags.append("outside ladder")
+    if flat:
+        q *= 0.7
+        flags.append("flat top (saturated)")
+    return int(round(100 * q)), flags
+
+
+def _channels_for_sizing(doc, order: str, matrix):
+    """(raw, dye-corrected) arrays of every physical channel of *doc*."""
+    from analyzer_core import n_channels
+    n = n_channels(doc)
+    raw = np.column_stack([physical_channel(doc, c, order) for c in range(1, n + 1)])
+    if matrix is not None and not matrix.is_identity() and raw.shape[1] >= matrix.n:
+        return raw, matrix.correct(raw)
+    return raw, raw
+
+
 def size_trace(doc, ladder, *, ladder_channel: int = 4,
                sample_channel: int = 2, base_order: Optional[str] = None,
                ladder_prominence_frac: float = DEFAULT_LADDER_PROMINENCE_FRAC,
                ladder_height_frac: float = DEFAULT_LADDER_HEIGHT_FRAC,
                sample_prominence_frac: float = DEFAULT_SAMPLE_PROMINENCE_FRAC,
-               sample_height_frac: float = DEFAULT_SAMPLE_HEIGHT_FRAC) -> SizingResult:
-    """Size every sample peak of one loaded trace against *ladder*.
+               sample_height_frac: float = DEFAULT_SAMPLE_HEIGHT_FRAC,
+               matrix=None, sample_channels: Optional[Sequence[int]] = None,
+               min_height: float = DEFAULT_MIN_PEAK_HEIGHT,
+               min_bp: Optional[float] = None) -> SizingResult:
+    """Size the sample peaks of one loaded trace against *ladder*.
 
     ``ladder_channel`` / ``sample_channel`` are *physical* channels, 1..N --
     five on a LIZ-capable instrument (see
-    :func:`analyzer_core.physical_channel`).  The default (ladder on Ch4,
-    sample on Ch2) is one MegaBACE layout, but the pair is a property of the
-    kit, so callers should say.
+    :func:`analyzer_core.physical_channel`); ``sample_channels`` sizes several
+    dyes at once (every channel but the ladder's, as Genetic Profiler does).
+    ``matrix`` (:class:`spectral.SpectralMatrix`) removes dye overlap first,
+    so a strong peak in one dye is not sized again as pull-up in the others.
+    Every channel is baseline-corrected (:func:`baseline_corrected`) before
+    peaks are found and measured.  Sample peaks below ``min_bp`` (default:
+    half the smallest band -- the primer/dye blob ahead of the ladder) are
+    left out.
+
+    Besides the sized sample rows the result lists the ladder bands it found
+    (``standards``: band, scan, height, and how well the curve through the
+    other bands predicts each), and every sample row carries width,
+    signal-to-noise, a 0-100 ``quality`` and the ``flags`` behind it.
     """
     if isinstance(ladder, str):
         ladder = load_ladder(ladder)
     order = (base_order or getattr(doc, "base_order", None) or DEFAULT_BASE_ORDER)
     warnings: List[str] = []
+    chans = [int(c) for c in (sample_channels or [sample_channel])]
+    if ladder_channel in chans:
+        if len(chans) == 1:
+            warnings.append("ladder and sample channel are the same; sizing will "
+                            "match the sample's own peaks to the ladder")
+        else:
+            chans = [c for c in chans if c != ladder_channel]
+    well = getattr(doc, "well", "") or Path(str(getattr(doc, "path", ""))).stem
+    file_name = Path(str(getattr(doc, "path", ""))).name
+    mname = "" if matrix is None or matrix.is_identity() else matrix.name
 
-    if ladder_channel == sample_channel:
-        warnings.append("ladder and sample channel are the same; sizing will "
-                        "match the sample's own peaks to the ladder")
+    raw, corr = _channels_for_sizing(doc, order, matrix)
+    for c in [ladder_channel] + chans:
+        if not 1 <= c <= raw.shape[1]:
+            raise ValueError(f"Channel must be 1..{raw.shape[1]}, got {c!r}")
+    ladder_trace = corr[:, ladder_channel - 1]
 
-    ladder_trace = physical_channel(doc, ladder_channel, order)
-    sample_trace = physical_channel(doc, sample_channel, order)
+    def empty(why):
+        warnings.append(why)
+        return SizingResult(ladder=ladder, ladder_channel=ladder_channel,
+                            sample_channel=chans[0], base_order=order,
+                            anchors=[], quality=ladder_fit_quality([], []),
+                            rows=[], well=str(well), file=file_name,
+                            warnings=warnings, matrix=mname, sample_channels=chans)
 
     ladder_peaks = detect_peaks(ladder_trace,
                                 min_prominence_frac=ladder_prominence_frac,
                                 min_height_frac=ladder_height_frac)
-
     # Every threshold in ``detect_peaks`` is a fraction of the largest sample in
-    # its own channel, which is right for picking peaks out of a busy trace but
-    # leaves nothing to say "this channel holds no ladder".  A channel of bare
-    # noise still has a largest sample, so it still yields peaks, and a run with
-    # no size standard would be aligned against those and given confident
-    # lengths.  On this machine's own traces the injection-region baseline noise
-    # is ~6-21 units against bands of 800-2100, so require the largest ladder
-    # band to clear the baseline noise by a wide, measured margin.
+    # its own channel, which leaves nothing to say "this channel holds no
+    # ladder": require the largest band to clear the baseline noise by a wide,
+    # measured margin (MegaBACE: noise ~6-21 against bands of 800-2100).
     noise = _baseline_noise(ladder_trace)
     strongest = max((p.height for p in ladder_peaks), default=0.0)
     if not ladder_peaks or noise <= 0.0 or strongest < MIN_LADDER_SNR * noise:
         top = f"{strongest:.0f}" if noise > 0 else "n/a"
-        warnings.append(
-            f"no size standard in the ladder channel (largest peak {top} "
-            f"against noise {noise:.1f}, needs {MIN_LADDER_SNR:g}x); no lengths "
-            "were sized")
-        return SizingResult(ladder=ladder, ladder_channel=ladder_channel,
-                            sample_channel=sample_channel, base_order=order,
-                            anchors=[], quality=ladder_fit_quality([], []),
-                            rows=[], well=str(getattr(doc, "well", "")),
-                            file=Path(str(getattr(doc, "path", ""))).name,
-                            warnings=warnings)
+        return empty(f"no size standard in the ladder channel (largest peak {top} "
+                     f"against noise {noise:.1f}, needs {MIN_LADDER_SNR:g}x); no "
+                     "lengths were sized")
 
     ladder_peaks = ladder_candidates(ladder_peaks, len(ladder.lengths))
-    anchors = align_peaks([p.scan for p in ladder_peaks], ladder.lengths)
-    if ladder.exclude:
-        # aligned with every band (they are in the lane), but the curve is
-        # built without the ones known to migrate anomalously
-        anchors = [(s, b) for s, b in anchors
-                   if not any(abs(b - x) < 1e-6 for x in ladder.exclude)]
-    quality = ladder_fit_quality([s for s, _ in anchors],
-                                 [b for _, b in anchors])
+    matched = align_peaks([p.scan for p in ladder_peaks], ladder.lengths)
+    excluded = lambda b: any(abs(b - x) < 1e-6 for x in ladder.exclude)  # noqa: E731
+    anchors = [(sc, b) for sc, b in matched if not excluded(b)]
+    quality = ladder_fit_quality([sc for sc, _ in anchors], [b for _, b in anchors])
 
     if len(anchors) < MIN_LADDER_ANCHORS:
         warnings.append(
@@ -994,8 +1182,7 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
     if ladder_peaks and anchors:
         # bands of the table found, not peaks of the channel matched: primer
         # and dye peaks ahead of the ladder are expected and harmless
-        found = len(anchors) / float(len(ladder.lengths))
-        if found < 0.6:
+        if len(anchors) / float(len(ladder.lengths)) < 0.6:
             warnings.append(
                 f"only {len(anchors)} of the {len(ladder.lengths)} ladder bands "
                 "were found; check the ladder channel and the fragment lengths")
@@ -1008,48 +1195,186 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
 
     curve = None
     if len(anchors) >= 2:
-        curve = SizeCurve([s for s, _ in anchors], [b for _, b in anchors])
+        curve = SizeCurve([sc for sc, _ in anchors], [b for _, b in anchors])
     elif anchors:
         warnings.append("not enough anchors to build a sizing curve")
 
-    sample_peaks = detect_peaks(sample_trace,
-                                min_prominence_frac=sample_prominence_frac,
-                                min_height_frac=sample_height_frac)
-    areas = _peak_areas(sample_trace, sample_peaks)
-    # the base letter only means something on the four dye-order channels
-    base_letter = order[sample_channel - 1] if sample_channel <= len(order) else ""
-    sample_dye = channel_dye(doc, sample_channel)
-    well = getattr(doc, "well", "") or Path(str(getattr(doc, "path", ""))).stem
-    file_name = Path(str(getattr(doc, "path", ""))).name
+    # the ladder bands: position, height, and the curve through the others
+    lz = baseline_corrected(ladder_trace)
+    std_rows, widths = [], []
+    if matched:
+        from scipy.signal import peak_widths
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")     # a clipped band can have no half-width
+            w_all = peak_widths(lz, [sc for sc, _ in matched], rel_height=0.5)[0]
+        for (sc, b), wd in zip(matched, w_all):
+            used = not excluded(b)
+            others = [(s2, b2) for s2, b2 in anchors if s2 != sc]
+            pred = None
+            if len(others) >= 2:
+                pred = float(SizeCurve([o[0] for o in others],
+                                       [o[1] for o in others]).bp([sc])[0])
+            std_rows.append({
+                "file": file_name, "well": well, "kind": "standard",
+                "channel": ladder_channel,
+                "dye": channel_dye(doc, ladder_channel) or ladder.dye,
+                "band_bp": b, "scan": int(sc), "height": round(float(lz[sc]), 1),
+                "width": round(float(wd), 2),
+                "predicted_bp": None if pred is None else round(pred, 2),
+                "residual_bp": None if pred is None else round(pred - b, 2),
+                "used_in_curve": used})
+            if used:
+                widths.append((sc, float(wd)))
 
-    # Every row carries its well's ladder verdict, so a table opened on its
-    # own still shows which lengths stand on a usable ladder: a well without
-    # a size standard (a spectral-matrix well) can still produce rows.
+    def expected_width(scan):
+        if len(widths) >= 3:
+            k = np.polyfit([w[0] for w in widths], [w[1] for w in widths], 1)
+            return max(float(np.polyval(k, scan)), 1.0)
+        return float(np.median([w[1] for w in widths])) if widths else None
+
+    if min_bp is None:
+        min_bp = 0.5 * float(ladder.lengths[0])
     rms = quality.get("rms_error_bp")
     ladder_rms = None if rms is None else round(float(rms), 3)
     ladder_ok = not warnings
+    zall = {c: baseline_corrected(corr[:, c - 1]) for c in range(1, corr.shape[1] + 1)}
     rows: List[dict] = []
-    if curve is not None and sample_peaks:
-        scans = [p.scan for p in sample_peaks]
+    for ch in chans:
+        if curve is None:
+            break
+        peaks, z, nz = detect_sample_peaks(corr[:, ch - 1], min_height=min_height)
+        if not peaks:
+            continue
+        base_letter = order[ch - 1] if ch <= len(order) else ""
+        dye = channel_dye(doc, ch)
+        scans = [p["scan"] for p in peaks]
         lengths_bp = curve.bp(scans)
         in_range = curve.in_range(scans)
-        for peak, area, bp, rng in zip(sample_peaks, areas, lengths_bp, in_range):
+        for pk, bp, rng in zip(peaks, lengths_bp, in_range):
+            if bp < min_bp:
+                continue                      # the primer / dye blob
+            sc = pk["scan"]
+            other = max((float(zall[k][max(0, sc - 2):sc + 3].max())
+                         for k in zall if k != ch), default=0.0)
+            ew = expected_width(sc)
+            snr = pk["height"] / nz if nz > 0 else float("inf")
+            score, flags = peak_quality(
+                snr=snr, width_ratio=None if ew is None else pk["width"] / ew,
+                pullup_ratio=other / max(pk["height"], 1e-9), in_range=bool(rng),
+                flat=_flat_top(raw[:, ch - 1], sc), ladder_rel=rel)
             rows.append({
                 "file": file_name,
                 "well": well,
-                "channel": sample_channel,
+                "kind": "sample",
+                "channel": ch,
                 "base": base_letter,
-                "dye": sample_dye,
-                "scan": peak.scan,
+                "dye": dye,
+                "scan": sc,
                 "length_bp": round(float(bp), 2),
-                "height": round(float(peak.height), 3),
-                "area": round(float(area), 3),
+                "height": round(pk["height"], 1),
+                "width": round(pk["width"], 2),
+                "area": round(pk["area"], 1),
+                "snr": round(min(snr, 9999.0), 1),
+                "quality": score,
+                "flags": "; ".join(flags),
                 "in_range": bool(rng),
                 "ladder_rms_bp": ladder_rms,
                 "ladder_ok": ladder_ok,
             })
 
     return SizingResult(ladder=ladder, ladder_channel=ladder_channel,
-                        sample_channel=sample_channel, base_order=order,
+                        sample_channel=chans[0], base_order=order,
                         anchors=anchors, quality=quality, rows=rows,
-                        well=str(well), file=file_name, warnings=warnings)
+                        well=str(well), file=file_name, warnings=warnings,
+                        standards=std_rows, matrix=mname, sample_channels=chans)
+
+
+def table_rows(results: Sequence[SizingResult]) -> List[dict]:
+    """One table for a set of sized wells: per well its ladder bands
+    (``kind`` = standard: band, scan, height, predicted bp, residual), then
+    its sized sample peaks (``kind`` = sample: channel, dye, scan, size,
+    height, width, area, S/N, quality 0-100, flags)."""
+    out: List[dict] = []
+    for res in results:
+        lad = res.ladder.name
+        for r in res.standards:
+            out.append({"ladder": lad, "matrix": res.matrix, **r})
+        for r in res.rows:
+            out.append({"ladder": lad, "matrix": res.matrix, **r})
+    return out
+
+
+def plate_matrix_for(paths, base_order: Optional[str] = None, prefer: str = "auto",
+                     cache: Optional[dict] = None):
+    """The dye-overlap matrix for the run folder of *paths* (see
+    :func:`spectral.plate_matrix`): a run's own Genetic Profiler calibration,
+    else measured from the single-dye wells of the whole folder."""
+    import spectral
+    from analyzer_core import SUPPORTED_EXTS, load_trace
+    if prefer == "none":
+        return spectral.identity()
+    folder = Path(paths[0]).parent
+    key = (str(folder.resolve()), prefer, base_order)
+    if cache is not None and key in cache:
+        return cache[key]
+    chans = {}
+    if prefer in ("auto", "plate"):
+        for f in sorted(folder.iterdir()):
+            if f.suffix in SUPPORTED_EXTS and f.is_file():
+                try:
+                    d = load_trace(f, base_order=base_order) if base_order else load_trace(f)
+                except Exception:                          # noqa: BLE001
+                    continue
+                if getattr(d, "channels", None) is not None:
+                    chans[f.stem] = np.asarray(d.channels, float)
+    m = spectral.plate_matrix(folder, chans, prefer=prefer)
+    if cache is not None:
+        cache[key] = m
+    return m
+
+
+def size_files(paths, ladder, *, ladder_channel: Optional[int] = None,
+               sample_channels: Optional[Sequence[int]] = None,
+               base_order: Optional[str] = None, matrix="auto",
+               min_height: float = DEFAULT_MIN_PEAK_HEIGHT, load=None,
+               on_error=None) -> List[SizingResult]:
+    """Size many files, run folder by run folder, each run with its own
+    dye-overlap matrix (*matrix*: "auto" / "run" / "plate" / "none", or a
+    :class:`spectral.SpectralMatrix`).  *sample_channels* None sizes every
+    channel but the ladder's.  *load* (path -> document) defaults to
+    :func:`analyzer_core.load_trace`."""
+    from analyzer_core import load_trace, n_channels
+    if isinstance(ladder, str):
+        ladder = load_ladder(ladder)
+    lch = ladder_channel or ladder.default_channel or 4
+    if load is None:
+        def load(p):
+            return load_trace(Path(p), base_order=base_order) if base_order \
+                else load_trace(Path(p))
+    groups: Dict[str, list] = {}
+    for p in paths:
+        groups.setdefault(str(Path(p).parent), []).append(Path(p))
+    cache: dict = {}
+    out: List[SizingResult] = []
+    for folder, ps in groups.items():
+        if isinstance(matrix, str):
+            try:
+                m = plate_matrix_for(ps, base_order=base_order, prefer=matrix,
+                                     cache=cache)
+            except Exception:                              # noqa: BLE001
+                m = None
+        else:
+            m = matrix
+        for p in ps:
+            try:
+                doc = load(p)
+                chans = list(sample_channels) if sample_channels else \
+                    [c for c in range(1, n_channels(doc) + 1) if c != lch]
+                out.append(size_trace(doc, ladder, ladder_channel=lch,
+                                      sample_channels=chans, base_order=base_order,
+                                      matrix=m, min_height=min_height))
+            except Exception as exc:                       # noqa: BLE001
+                if on_error:
+                    on_error(p, exc)
+    return out

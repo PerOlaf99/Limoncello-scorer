@@ -9,6 +9,7 @@ import pytest
 import user_manual
 
 TOP = ("File", "View", "Base calling", "Manual genotyping", "Auto genotyping",
+       "Fragment analysis",
        "Comments", "Help")
 
 

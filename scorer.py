@@ -679,8 +679,10 @@ def sizing_html(results, title: str = "Limoncello fragment sizing report") -> st
         err_txt = "n/a (need >=4 anchors)" if err is None else f"{err:.2f} bp"
         fit = [
             ["Ladder", f"{res.ladder.name} ({res.ladder.dye})"],
-            ["Channels", f"ladder Ch{res.ladder_channel}, sample Ch{res.sample_channel}"
-                         f" (order {res.base_order})"],
+            ["Channels", f"ladder Ch{res.ladder_channel}, sample Ch"
+                         + ", Ch".join(str(c) for c in (getattr(res, "sample_channels", None)
+                                                        or [res.sample_channel]))
+                         + f" (order {res.base_order})"],
             ["Ladder anchors matched", len(res.anchors)],
             ["Leave-one-out RMS error", err_txt],
             ["Sample peaks", len(res.rows)],
@@ -688,12 +690,27 @@ def sizing_html(results, title: str = "Limoncello fragment sizing report") -> st
         parts.append(_table(["field", "value"], fit))
         for warning in res.warnings:
             parts.append(f"<p class='warn'>! {html.escape(warning)}</p>")
-        headers = ["scan", "length_bp", "height", "area", "in_range"]
+        if getattr(res, "matrix", ""):
+            parts.append(f"<p class='note'>dye-overlap correction: "
+                         f"{html.escape(res.matrix)}</p>")
+        std = getattr(res, "standards", [])
+        if std:
+            parts.append("<p><b>Size standard</b></p>")
+            sh = ["band_bp", "scan", "height", "width", "predicted_bp",
+                  "residual_bp", "used_in_curve"]
+            parts.append(_table(sh, [[r.get(h) for h in sh] for r in std]))
+        parts.append("<p><b>Sized peaks</b></p>")
+        headers = ["channel", "dye", "scan", "length_bp", "height", "width",
+                   "area", "snr", "quality", "flags"]
         parts.append(_table(
             headers,
             [[r.get(h) for h in headers] for r in res.rows]))
-    parts.append("<p class='note'>length_bp outside the ladder span is "
-                 "extrapolated (in_range = False) and less trustworthy.</p>")
+    parts.append("<p class='note'>predicted_bp: each band read from the curve "
+                 "through the other bands (residual = predicted - band). quality "
+                 "0-100: ladder fit, signal/noise, peak shape, dye pull-up, "
+                 "position inside the ladder and clipping; flags say which "
+                 "lowered it. Lengths outside the ladder span are extrapolated "
+                 "and less trustworthy.</p>")
     parts.append("</body></html>")
     return "\n".join(parts)
 
@@ -847,38 +864,36 @@ def _cmd_ladders(args) -> int:
 
 
 def _cmd_size(args) -> int:
-    from analyzer_core import load_trace
-    from fragment_sizing import load_ladder, size_trace
+    from fragment_sizing import load_ladder, size_files, table_rows
     try:
         ladder = load_ladder(args.lengths or args.ladder)
     except (ValueError, OSError, json.JSONDecodeError) as exc:  # noqa: BLE001
         print(f"ladder: {exc}", file=sys.stderr)
         return 2
 
-    results = []
-    for path in args.inputs:
-        try:
-            doc = load_trace(Path(path), base_order=args.base_order)
-            res = size_trace(doc, ladder,
-                             ladder_channel=(args.ladder_channel
-                                             or ladder.default_channel or 4),
-                             sample_channel=args.sample_channel,
-                             base_order=args.base_order)
-        except Exception as exc:                            # noqa: BLE001
-            print(f"{path}: {exc}", file=sys.stderr)
-            continue
-        results.append(res)
+    results = size_files(
+        args.inputs, ladder, ladder_channel=args.ladder_channel,
+        sample_channels=[args.sample_channel] if args.sample_channel else None,
+        base_order=args.base_order, matrix=args.matrix,
+        min_height=args.min_height,
+        on_error=lambda p, e: print(f"{p}: {e}", file=sys.stderr))
+    shown = set()
+    for res in results:
+        if res.matrix and res.matrix not in shown:
+            shown.add(res.matrix)
+            print(f"dye-overlap correction: {res.matrix}")
         err = res.quality.get("rms_error_bp")
         err_txt = "n/a" if err is None else f"{err:.2f} bp"
-        print(f"{res.well or res.file:<10} {len(res.rows):>3} peak(s)  "
-              f"anchors {len(res.anchors):>2}  LOO RMS {err_txt}")
+        good = sum(1 for r in res.rows if r["quality"] >= 50)
+        print(f"{res.well or res.file:<10} {len(res.rows):>3} peak(s) ({good} with "
+              f"quality >= 50)  anchors {len(res.anchors):>2}  LOO RMS {err_txt}")
         for warning in res.warnings:
             print(f"    ! {warning}", file=sys.stderr)
 
-    rows = [r for res in results for r in res.rows]
+    rows = table_rows(results)
     if args.out:
         write_rows(args.out, rows)
-        print(f"wrote {args.out} ({len(rows)} row(s))")
+        print(f"wrote {args.out} ({len(rows)} row(s): standards and sized peaks)")
     if args.report:
         Path(args.report).write_text(sizing_html(results), encoding="utf-8")
         print(f"wrote {args.report}")
@@ -915,8 +930,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--ladder-channel", type=int, default=None,
                    help="ladder channel 1..4 (default: the ladder's usual "
                         "channel, else 4)")
-    s.add_argument("--sample-channel", type=int, default=2,
-                   help="sample channel 1..4 (default 2)")
+    s.add_argument("--sample-channel", type=int, default=None,
+                   help="size only this sample channel (default: every channel "
+                        "but the ladder's)")
+    s.add_argument("--matrix", default="auto",
+                   choices=["auto", "run", "plate", "none"],
+                   help="dye-overlap correction: the run's Genetic Profiler "
+                        "calibration, else measured from the plate's single-dye "
+                        "wells (auto); only one of them; or none")
+    s.add_argument("--min-height", type=float, default=50.0,
+                   help="smallest sample peak above the baseline (default 50)")
     s.add_argument("--base-order", default="ACTG",
                    help="plate dye order, e.g. ACTG (default)")
     s.add_argument("--out", help="write sized peak rows here (.csv or .json)")

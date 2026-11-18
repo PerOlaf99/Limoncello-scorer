@@ -39,7 +39,7 @@ limoncello-basecall = "basecall:main"
 
 [tool.setuptools]
 # Flat layout: the app modules live at the repository root.
-py-modules = ["analyzer_core", "fragment_sizing", "genotyping", "mark_library", "scorer", "sequence_analyzer", "configs", "basecall", "user_manual", "ctce", "ladder_library", "ladder_gui"]
+py-modules = ["analyzer_core", "fragment_sizing", "genotyping", "mark_library", "scorer", "sequence_analyzer", "configs", "basecall", "user_manual", "ctce", "ladder_library", "ladder_gui", "spectral"]
 
 [tool.setuptools.packages.find]
 include = ["cimarron_basecaller*"]

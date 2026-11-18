@@ -640,8 +640,8 @@ How it works, and what to watch:
   channel, a wrong length table, or a well with no size standard (e.g. a
   spectral-matrix well). Every sized row also carries its well's
   `ladder_rms_bp` and `ladder_ok`, so a table opened on its own still shows
-  which lengths stand on a usable ladder. The GUI (Manual genotyping →
-  Fragment-length sizing) remembers the last ladder and channels used.
+  which lengths stand on a usable ladder. The GUI (Fragment analysis →
+  Size selected wells…) remembers the last ladder and channels used.
 - **Out-of-range peaks are flagged.** A peak whose scan falls outside the
   ladder's span is extrapolated linearly and written with `in_range = False`;
   those bp values are the least trustworthy.
@@ -650,8 +650,8 @@ How it works, and what to watch:
 
 Every ladder lives in one library: **bundled** commercial standards, and
 **your own** (custom or imported) ladders, kept as one JSON file each in
-`library/ladders/` next to the marks and preferences. In the GUI, **Manual
-genotyping → Size-standard ladders…** (or *Manage ladders…* in the sizing
+`library/ladders/` next to the marks and preferences. In the GUI, **Fragment
+analysis → Size-standard ladders…** (or *Manage ladders…* in the sizing
 dialog) lists them all and can make a **New** ladder, **Import** one,
 **Edit**, **Duplicate** (bundled ladders are read-only; duplicate to change
 one), **Delete** and **Export** (send the JSON to a colleague). The sizing
@@ -675,6 +675,8 @@ from the curve:
 | Promega WEN / CC5 ILS 500 | WEN | 21 | 60–500 | Promega TMD039 |
 | Beckman CEQ Size Standard 400 / 600 | WellRED D1 | 22 / 33 | 60–420 / 640 | Beckman PN A32350 |
 | Geneflo 1000 ROX | ROX | 25 | 400–1000 | ChimerX insert |
+| MapMarker 400 / 1000 (TAMRA; also ROX, FAM, Cy5, DY-632) | TAMRA | 20 / 23 | 70–400 / 50–1000 | Eurogentec data sheets |
+| MapMarker 500 (BV500) / 1500 | ROX | 16 / 28 | 35–500 / 50–1500 | Eurogentec / BioVentures |
 
 A ladder file looks like this; only `lengths` matters to sizing, `exclude`
 lists bands that are in the lane but must not anchor the curve, `color` is for
@@ -740,6 +742,35 @@ ladders default to Ch5.
 ```bash
 python scorer.py size run/*.fsa --ladder genescan500_liz --sample-channel 1
 ```
+
+### Dye overlap, baseline, peak table (matching Genetic Profiler 2.2)
+
+Every dye also shows up in its neighbours' channels; on the MegaBACE
+genotyping plates HEX reads at 56–109 % in the NED channel and the ET-ROX
+ladder at 8–14 % in FAM and NED. Uncorrected, every strong peak leaves
+"pull-up" copies that get sized as fragments. Sizing therefore first removes
+the overlap with a spectral matrix (`spectral.py`): the run's own Genetic
+Profiler calibration (`<run>/xtm/xtalk.tdb`), else one measured from the
+plate's single-dye matrix-standard wells, which are found automatically
+(`--matrix auto|run|plate|none`). Measured from GP20's own matrix wells it
+reproduces GP's "Demo" calibration to within 0.012 in every entry. Each
+channel is then baseline-corrected (running minimum), and sample peaks are
+found 50 units above the baseline (`--min-height`), like GP's peak list.
+
+The table (`--out`, or the GUI's save) has one row per ladder band
+(`kind = standard`: band, scan, height, width, the size the curve through the
+other bands predicts for it, residual) and one per sized peak
+(`kind = sample`: channel, dye, scan, size, height, width, area, S/N,
+quality 0–100, flags such as *possible pull-up*, *broad*, *outside ladder*,
+*flat top (saturated)*). In the GUI the bands and sizes are labelled on the
+traces (**Fragment analysis** menu).
+
+Checked against Genetic Profiler 2.2 itself (run under Wine on its demo
+plate GP20, ET400-R, Local 3rd Order sizing): the same ladder band to within
+one scan in 99.4 % of 1 800 bands; at GP's own peak positions our sizes
+differ by a median −0.01 bp (95 % within 0.10 bp), with no dye-specific
+offset (GP 2.2 applies no dye-mobility shift). On the ScoreCard test plate
+97.7 % of the expected test fragments are found, 95 % within 0.17 bp.
 
 **ET550-R and ET900-R are bundled too** (`et550r`, `et900r`): their band
 tables are the ones built into Genetic Profiler 2.2 (`gpcom.dll`), and MRC

@@ -72,9 +72,10 @@ By hand: Manual genotyping ▸ Manual peak picking…, click each peak, then Man
     ("Quick start: fragment sizing", """\
 Only for runs with a real multi-fragment size ladder in its own channel.
 1. Select the wells.
-2. Manual genotyping ▸ Fragment-length sizing (ladder)….
-3. Pick the ladder from the list (Manage ladders… adds or imports one), check the ladder channel and the sample channel, and press Size. The dialog remembers your last choice.
-4. Read the fit quality before trusting the lengths: rows from a well whose ladder did not fit carry ladder_ok = False, and a channel without a ladder gives a warning and no lengths.
+2. Fragment analysis ▸ Size selected wells….
+3. Pick the ladder from the list (Manage ladders… adds or imports one), its channel, the sample channels (all but the ladder's, or one) and the dye-overlap correction, and press Size. The dialog remembers your last choice.
+4. The table (CSV/JSON) lists every ladder band (scan, height, predicted bp) and every sized peak (channel, dye, scan, size, height, width, area, S/N, quality 0–100, flags). The sizes are also labelled on the traces.
+5. Read the quality before trusting a length: rows from a well whose ladder did not fit carry ladder_ok = False, and a channel without a ladder gives a warning and no lengths.
 Do NOT size CTC-CE runs this way: their internal standard is four conformers of one fragment, not a ladder — see Fragment-length sizing."""),
 
     ("Data folders and the samples list", """\
@@ -285,15 +286,20 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
 """),
 
     ("Fragment-length sizing", """\
-Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peaks in bp against a ladder run in its own channel. It is a different analysis from peak picking and CTC-CE genotyping.
-• Ladder: picked from the ladder library — bundled commercial standards (MegaBACE ET400-R/ET550-R/ET900-R, GeneScan 120/350/400HD/500/600/1200, Promega ILS 600 and WEN/CC5 ILS 500, Beckman CEQ 400/600, Geneflo 1000) and your own.
-• Manual genotyping ▸ Size-standard ladders… manages the library: New, Import (a ladder JSON, a list/CSV of lengths, or a Genetic Profiler .tdb), Edit, Duplicate, Delete, Export. Bundled ladders are read-only; duplicate one to change it. Your ladders are kept in library/ladders/.
+Fragment analysis ▸ Size selected wells… sizes the sample's peaks in bp against a ladder run in its own channel, as Genetic Profiler does. It is a different analysis from peak picking and CTC-CE genotyping.
+• Dye overlap: every dye also shows up in its neighbours' channels (on MegaBACE plates HEX reads at 56–109 % in the NED channel), which leaves pull-up copies of strong peaks. Sizing removes it first with a spectral overlap matrix — the run's own Genetic Profiler calibration (xtm/xtalk.tdb) or one measured from the plate's single-dye matrix-standard wells, found automatically. Choose with Fragment analysis ▸ Dye-overlap correction; Fragment analysis ▸ Dye-overlap matrix of this run… shows the matrix, where it came from and the dye on each channel.
+• Every channel is baseline-corrected before peaks are found; a peak must stand 50 units above the baseline. Peaks below half the smallest ladder band (the primer/dye blob) are left out.
+• Each sized peak gets a quality score 0–100 from the ladder fit, signal/noise, peak shape, dye pull-up, position inside the ladder and clipping; the flags column says which lowered it.
+• Fragment analysis ▸ Show fragment sizes on traces labels the ladder bands (bp) and the sized peaks (green: quality ≥ 80, orange: lower); Fragment analysis ▸ Label peaks with quality ≥ sets the cut-off and Fragment analysis ▸ Dye-corrected traces shows the channels with the overlap removed.
+• Ladder: picked from the ladder library — bundled commercial standards (MegaBACE ET400-R/ET550-R/ET900-R, GeneScan 120/350/400HD/500/600/1200, Promega ILS 600 and WEN/CC5 ILS 500, Beckman CEQ 400/600, MapMarker 400/500/1000/1500 (Eurogentec/BioVentures), Geneflo 1000) and your own.
+• Fragment analysis ▸ Size-standard ladders… manages the library (Fragment analysis ▸ Import ladder… and Fragment analysis ▸ New custom ladder… go straight there): New, Import (a ladder JSON, a list/CSV of lengths, or a Genetic Profiler .tdb), Edit, Duplicate, Delete, Export. Bundled ladders are read-only; duplicate one to change it. Your ladders are kept in library/ladders/.
 • A ladder can list bands to exclude from the fit (the vendor's “do not use for sizing” bands are already excluded), a display colour, and its usual channel.
-• Channels are physical (1–4 in the run's dye order). On a MegaBACE genotyping plate the ET-ROX ladder is usually Ch1 (Run info shows the dye per channel).
+• Channels are physical (1–4, or 5 on a LIZ instrument). On a MegaBACE genotyping plate the ET-ROX ladder is usually Ch1 (Run info shows the dye per channel).
 • The fit is reported as leave-one-out error (rms / max, in bp) — an honest number, since a fitted curve always passes its own points.
 • No ladder found, or only one fragment matched: you get a warning and NO lengths. Treat that as “not measured”.
 • **Never size CTC-CE runs this way.** Their internal standard is a few same-length conformers, not a ladder, and it can line up with a GeneScan table convincingly enough to give believable but meaningless numbers. Use peak picking and MF instead.
-• Results: a CSV/JSON table or an HTML report."""),
+• Results: a CSV/JSON table or an HTML report; Fragment analysis ▸ Save the last sizing table… saves it again.
+• Checked against Genetic Profiler 2.2 on its own demo plates: the same ladder bands in 99.4 % of cases, sizes within 0.1 bp for 95 % of peaks, no dye-specific offset."""),
 
     ("Comments and run info", """\
 • Comments ▸ Dye order of this run… — fix the dye order for the run of the selected well (Automatic = what its files declare, else the general setting). Its traces are reloaded at once.

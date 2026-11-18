@@ -178,6 +178,10 @@ def test_excluded_bands_are_matched_but_do_not_anchor_the_curve():
     ("beckman_ss400", 22, 60, 420, []),     # Beckman PN A32350
     ("beckman_ss600", 33, 60, 640, []),
     ("geneflo1000_rox", 25, 400, 1000, []),
+    ("mapmarker400", 20, 70, 400, []),      # Eurogentec TDS GRE-MW-0190-80
+    ("mapmarker1000", 23, 50, 1000, []),    # Eurogentec TDS GRE-MW-0195-80
+    ("mapmarker500", 16, 35, 500, []),      # Eurogentec TDS GRE-MW-0191-80
+    ("mapmarker1500", 28, 50, 1500, []),    # BioVentures product pages
 ])
 def test_bundled_tables_match_their_sources(key, n, first, last, exclude):
     lad = fs.load_ladder(key)
@@ -192,5 +196,6 @@ def test_every_bundled_ladder_is_pinned():
               "genescan400hd_rox", "genescan500_rox", "genescan500_liz",
               "genescan600_liz", "genescan1200_liz", "promega_ils600",
               "promega_ils500", "beckman_ss400", "beckman_ss600",
-              "geneflo1000_rox"}
+              "geneflo1000_rox", "mapmarker400", "mapmarker1000",
+              "mapmarker500", "mapmarker1500"}
     assert set(fs.BUILTIN_LADDERS) == pinned

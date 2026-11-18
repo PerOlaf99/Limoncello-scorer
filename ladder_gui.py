@@ -323,8 +323,10 @@ class LadderManager(tk.Toplevel):
 # the sizing set-up
 # --------------------------------------------------------------------------- #
 class SizingSetup(tk.Toplevel):
-    """Pick a ladder and the two physical channels.  ``result`` is
-    ``{"key", "ladder", "ladder_channel", "sample_channel"}`` or None."""
+    """Pick a ladder, its channel, the sample channels and the dye-overlap
+    correction.  ``result`` is ``{"key", "ladder", "ladder_channel",
+    "sample_channel" (None: every channel but the ladder's), "matrix"}``
+    or None."""
 
     def __init__(self, parent, last: Optional[dict] = None, n_channels: int = 4):
         super().__init__(parent)
@@ -344,20 +346,33 @@ class SizingSetup(tk.Toplevel):
         ttk.Button(frm, text="Manage ladders…", command=self._manage).grid(
             row=1, column=3, padx=(6, 0))
         self.lch = tk.IntVar(value=int(last.get("ladder_channel") or 4))
-        self.sch = tk.IntVar(value=int(last.get("sample_channel") or 2))
         top = self.n_channels
         ttk.Label(frm, text=f"Ladder channel (1-{top}, physical):").grid(
             row=2, column=0, sticky="w")
         ttk.Spinbox(frm, from_=1, to=top, width=4, textvariable=self.lch,
                     state="readonly").grid(row=2, column=1, sticky="w")
-        ttk.Label(frm, text=f"Sample channel (1-{top}, physical):").grid(
-            row=3, column=0, sticky="w")
-        ttk.Spinbox(frm, from_=1, to=top, width=4, textvariable=self.sch,
-                    state="readonly").grid(row=3, column=1, sticky="w")
+        ttk.Label(frm, text="Sample channels:").grid(row=3, column=0, sticky="w")
+        self.ALL = "all but the ladder's"
+        sval = last.get("sample_channel")
+        self.sch = tk.StringVar(value=self.ALL if not sval else str(sval))
+        ttk.Combobox(frm, textvariable=self.sch, width=18, state="readonly",
+                     values=[self.ALL] + [str(k) for k in range(1, top + 1)]
+                     ).grid(row=3, column=1, columnspan=2, sticky="w")
+        ttk.Label(frm, text="Dye-overlap correction:").grid(row=4, column=0, sticky="w")
+        self.MATRIX = {"automatic (run calibration, else matrix wells)": "auto",
+                       "the run's Genetic Profiler calibration": "run",
+                       "measured from the plate's single-dye wells": "plate",
+                       "none (raw channels)": "none"}
+        mval = last.get("matrix") or "auto"
+        self.mat = tk.StringVar(value=next(k for k, v in self.MATRIX.items()
+                                           if v == mval))
+        ttk.Combobox(frm, textvariable=self.mat, width=44, state="readonly",
+                     values=list(self.MATRIX)).grid(row=4, column=1, columnspan=3,
+                                                    sticky="w")
         self.hint = ttk.Label(frm, text="", foreground="#666")
-        self.hint.grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        self.hint.grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
         btn = ttk.Frame(frm)
-        btn.grid(row=5, column=0, columnspan=4, sticky="e", pady=(10, 0))
+        btn.grid(row=6, column=0, columnspan=4, sticky="e", pady=(10, 0))
         ttk.Button(btn, text="Size", command=self._ok).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
         self.bind("<Return>", lambda e: self._ok())
@@ -408,18 +423,20 @@ class SizingSetup(tk.Toplevel):
         row = self._row()
         if row is None:
             return
+        sch = None if self.sch.get() == self.ALL else int(self.sch.get())
         if not (1 <= self.lch.get() <= self.n_channels
-                and 1 <= self.sch.get() <= self.n_channels):
+                and (sch is None or 1 <= sch <= self.n_channels)):
             messagebox.showerror("Fragment sizing", "These files have channels "
                                  f"1-{self.n_channels} only.", parent=self)
             return
-        if self.lch.get() == self.sch.get():
+        if sch is not None and self.lch.get() == sch:
             messagebox.showerror("Fragment sizing", "The ladder and the sample "
                                  "must be on different channels.", parent=self)
             return
         self.result = {"key": row["key"], "ladder": row["ladder"],
                        "ladder_channel": int(self.lch.get()),
-                       "sample_channel": int(self.sch.get())}
+                       "sample_channel": sch,
+                       "matrix": self.MATRIX.get(self.mat.get(), "auto")}
         self.destroy()
 
 
@@ -430,5 +447,11 @@ def ask_sizing_setup(parent, last: Optional[dict] = None,
     return dlg.result
 
 
-def open_manager(parent) -> None:
-    parent.wait_window(LadderManager(parent))
+def open_manager(parent, action: Optional[str] = None) -> None:
+    """The ladder manager; *action* "import" / "new" starts that at once."""
+    m = LadderManager(parent)
+    if action == "import":
+        m.after_idle(m.import_file)
+    elif action == "new":
+        m.after_idle(m.new)
+    parent.wait_window(m)

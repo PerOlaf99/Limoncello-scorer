@@ -60,6 +60,14 @@ class StubApp:
         self._docs = {str(Path(p)): FakeDoc(p) for p in docs}
         self.base_order_var = _Var("ACTG")
         self.status_var = _Var("")
+        self.show_sizes = _Var(False)
+        self._sizing = {}
+
+    def update_idletasks(self):
+        pass
+
+    def redraw(self):
+        pass
 
     def _ensure_doc(self, path):
         return self._docs[str(Path(path))]
@@ -96,7 +104,8 @@ def _patch_dialogs(monkeypatch, *, ladder="genescan500_rox",
         if askstring_cancel:
             return None
         return {"key": ladder, "ladder": fs.load_ladder(ladder),
-                "ladder_channel": channels[0], "sample_channel": channels[1]}
+                "ladder_channel": channels[0], "sample_channel": channels[1],
+                "matrix": "auto"}
     monkeypatch.setattr(ladder_gui, "ask_sizing_setup", setup)
     monkeypatch.setattr(sa.filedialog, "asksaveasfilename",
                         lambda *a, **k: "" if file_cancel else out)
@@ -168,4 +177,4 @@ def test_the_last_ladder_and_channels_are_offered_next_time(monkeypatch, stub_ap
     again = _patch_dialogs(monkeypatch, ladder="et400r", channels=(1, 3), out=out)
     sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
     assert again["last"] == [{"ladder": "et400r", "ladder_channel": 1,
-                              "sample_channel": 3}]
+                              "sample_channel": 3, "matrix": "auto"}]

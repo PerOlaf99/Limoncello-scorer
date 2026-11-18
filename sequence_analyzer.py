@@ -282,6 +282,18 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.show_qnum = tk.BooleanVar(value=False)
         self.show_qcurve = tk.BooleanVar(value=False)
         self.show_current = tk.BooleanVar(value=True)
+        # fragment sizing marks: ladder bands and sized peaks on the traces
+        self.show_sizes = tk.BooleanVar(value=True)
+        self.dye_corrected = tk.BooleanVar(value=False)
+        self.size_min_quality = 50
+        self.size_quality_var = tk.IntVar(value=50)
+        self._sizing: dict = {}
+        self._last_sizing = []
+        try:
+            _fsp = mark_library.load_prefs().get("fragment_sizing", {})
+        except Exception:                                  # noqa: BLE001
+            _fsp = {}
+        self.matrix_pref = tk.StringVar(value=_fsp.get("matrix") or "auto")
         self.x_time = tk.BooleanVar(value=False)  # x axis: scans (off) vs time (on)
         self.theme = tk.StringVar(value="Classic")
         self.wrap_rows = tk.IntVar(value=5)
@@ -655,10 +667,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m.add_command(label="Tag duplex species for MF…",
                                  command=self._gen_mark_duplex)
         genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
-        genotyping_m.add_command(label="Fragment-length sizing (ladder)…",
-                                 command=self.size_selected_fragments)
-        genotyping_m.add_command(label="Size-standard ladders…",
-                                 command=self.manage_ladders)
         genotyping_m.add_separator()
         genotyping_m.add_cascade(label="Picking options…", menu=self._build_picking_opts(genotyping_m))
         genotyping_m.add_separator()
@@ -702,10 +710,48 @@ class LimoncelloAnalyzerApp(tk.Tk):
         comments_m.add_command(label="Run comments…", command=self.edit_comments)
         comments_m.add_command(label="Run info…", command=self.show_run_info)
 
+        # Fragment analysis (sizing against a ladder) is its own job, apart
+        # from SNP / duplex genotyping: its own menu, with the ladder library,
+        # the dye-overlap correction and how the sizes are shown.
+        fragment_m = tk.Menu(self, tearoff=0)
+        fragment_m.add_command(label="Size selected wells…",
+                               command=self.size_selected_fragments)
+        fragment_m.add_command(label="Save the last sizing table…",
+                               command=self.save_last_sizing)
+        fragment_m.add_separator()
+        fragment_m.add_command(label="Size-standard ladders…",
+                               command=self.manage_ladders)
+        fragment_m.add_command(label="Import ladder…",
+                               command=lambda: self.manage_ladders("import"))
+        fragment_m.add_command(label="New custom ladder…",
+                               command=lambda: self.manage_ladders("new"))
+        fragment_m.add_separator()
+        matrix_m = tk.Menu(fragment_m, tearoff=0)
+        for label, value in (("Automatic (run calibration, else single-dye wells)", "auto"),
+                             ("The run's Genetic Profiler calibration", "run"),
+                             ("Measured from the plate's single-dye wells", "plate"),
+                             ("None (raw channels)", "none")):
+            matrix_m.add_radiobutton(label=label, variable=self.matrix_pref,
+                                     value=value, command=self._matrix_pref_changed)
+        fragment_m.add_cascade(label="Dye-overlap correction", menu=matrix_m)
+        fragment_m.add_command(label="Dye-overlap matrix of this run…",
+                               command=self.show_dye_matrix)
+        fragment_m.add_separator()
+        fragment_m.add_checkbutton(label="Show fragment sizes on traces",
+                                   variable=self.show_sizes, command=self.redraw)
+        fragment_m.add_checkbutton(label="Dye-corrected traces",
+                                   variable=self.dye_corrected, command=self.redraw)
+        quality_m = tk.Menu(fragment_m, tearoff=0)
+        for q in (0, 30, 50, 70, 80):
+            quality_m.add_radiobutton(label=f"{q}", variable=self.size_quality_var,
+                                      value=q, command=self._size_quality_changed)
+        fragment_m.add_cascade(label="Label peaks with quality ≥", menu=quality_m)
+
         self._menus = {"File": file_m, "View": view_m,
                        "Base calling": basecall_m,
                        "Manual genotyping": genotyping_m,
                        "Auto genotyping": auto_m,
+                       "Fragment analysis": fragment_m,
                        "Comments": comments_m, "Help": help_m}
 
     def _build_picking_opts(self, parent):
@@ -4682,11 +4728,93 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"Saved {len(rows)} {unit} rows ({len(wells)} well"
                             f"{'s' if len(wells) != 1 else ''}) to {path}")
 
-    def manage_ladders(self):
+    def manage_ladders(self, action=None):
         """The ladder library: bundled size standards and the user's own
-        (new, import, edit, duplicate, delete, export)."""
+        (new, import, edit, duplicate, delete, export).  *action* "import" /
+        "new" opens straight into that."""
         import ladder_gui
-        ladder_gui.open_manager(self)
+        ladder_gui.open_manager(self, action=action)
+
+    def _matrix_pref_changed(self):
+        """Fragment analysis ▸ Dye-overlap correction: remembered, used by the
+        next sizing (as its default) and by the dye-corrected view."""
+        try:
+            prefs = mark_library.load_prefs()
+            fsp = dict(prefs.get("fragment_sizing", {}))
+            fsp["matrix"] = self.matrix_pref.get()
+            prefs["fragment_sizing"] = fsp
+            mark_library.save_prefs(prefs)
+        except Exception:                                  # noqa: BLE001
+            pass
+        self.redraw()
+
+    def _size_quality_changed(self):
+        self.size_min_quality = int(self.size_quality_var.get())
+        self.redraw()
+
+    def show_dye_matrix(self):
+        """The dye-overlap matrix for the selected well's run: where it comes
+        from, the dye on each channel, and how much of each dye every
+        channel sees."""
+        if not self.selected:
+            messagebox.showinfo("Dye-overlap matrix", "Select a well first.")
+            return
+        path = Path(self.selected[0])
+        self.status_var.set("Finding the dye-overlap correction…")
+        self.update_idletasks()
+        m = self._matrix_for(path)
+        try:
+            from analyzer_core import channel_dye
+            doc = self._ensure_doc(path)
+            dyes = [channel_dye(doc, c) or f"Ch{c}" for c in range(1, (m.n if m else 4) + 1)]
+        except Exception:                                  # noqa: BLE001
+            dyes = []
+        if m is None or m.is_identity():
+            text = (f"Run {path.parent.name}: no dye-overlap correction.\n\n"
+                    "Neither a Genetic Profiler calibration (xtm/xtalk.tdb) nor "
+                    "single-dye matrix-standard wells were found, or correction "
+                    "is switched off (Fragment analysis ▸ Dye-overlap correction).")
+        else:
+            head = "channel \\ dye   " + "  ".join(f"{d[:7]:>7}" for d in dyes)
+            lines = [head]
+            for c in range(m.n):
+                lines.append(f"Ch{c + 1} {dyes[c][:9] if c < len(dyes) else '':<10}  "
+                             + "  ".join(f"{m.m[c, d]:7.3f}" for d in range(m.n)))
+            text = (f"Run {path.parent.name}\nMatrix: {m.name}\nFrom: {m.source}\n\n"
+                    "How much of each dye (column) every channel (row) sees; the "
+                    "dye's own channel is 1.  Sizing removes this overlap.\n\n"
+                    + "\n".join(lines))
+        self.status_var.set("Ready")
+        win = tk.Toplevel(self)
+        win.title("Dye-overlap matrix")
+        t = tk.Text(win, width=78, height=16, font=("DejaVu Sans Mono", 10))
+        t.insert("1.0", text)
+        t.configure(state="disabled")
+        t.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=(0, 8))
+
+    def save_last_sizing(self):
+        """Save the last sizing again (CSV / JSON table, or an HTML report)."""
+        if not self._last_sizing:
+            messagebox.showinfo("Fragment sizing", "Nothing has been sized yet.")
+            return
+        out = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv",
+            filetypes=[("CSV (standards + sized peaks)", "*.csv"),
+                       ("JSON", "*.json"), ("HTML report", "*.html")])
+        if not out:
+            return
+        from scorer import sizing_html, write_rows
+        from fragment_sizing import table_rows
+        try:
+            if out.lower().endswith((".html", ".htm")):
+                Path(out).write_text(sizing_html(self._last_sizing), encoding="utf-8")
+            else:
+                write_rows(out, table_rows(self._last_sizing))
+        except Exception as e:                              # noqa: BLE001
+            messagebox.showerror("Fragment sizing", f"Could not write file:\n{e}")
+            return
+        self.status_var.set(f"Saved the sizing of {len(self._last_sizing)} well(s) → {out}")
 
     def size_selected_fragments(self):
         """Size the selected wells against a size-standard ladder.
@@ -4725,31 +4853,45 @@ class LimoncelloAnalyzerApp(tk.Tk):
         ladder = setup["ladder"]
         ladder_channel = setup["ladder_channel"]
         sample_channel = setup["sample_channel"]
+        matrix_pref = setup.get("matrix", "auto")
         try:
             prefs = mark_library.load_prefs()
             prefs["fragment_sizing"] = {"ladder": setup["key"],
                                         "ladder_channel": ladder_channel,
-                                        "sample_channel": sample_channel}
+                                        "sample_channel": sample_channel,
+                                        "matrix": matrix_pref}
             mark_library.save_prefs(prefs)
         except Exception:                                  # noqa: BLE001
             pass
         out = filedialog.asksaveasfilename(
             parent=self, defaultextension=".csv",
-            filetypes=[("CSV (sized peaks)", "*.csv"), ("JSON", "*.json"),
+            filetypes=[("CSV (standards + sized peaks)", "*.csv"), ("JSON", "*.json"),
                        ("HTML report", "*.html")])
         if not out:
             return
 
         from scorer import sizing_html, write_rows
+        from fragment_sizing import plate_matrix_for, table_rows
+        from analyzer_core import n_channels
 
         results, failures = [], []
+        if not hasattr(self, "_matrix_cache"):
+            self._matrix_cache = {}
+        self.status_var.set("Sizing… (finding the dye-overlap correction)")
+        self.update_idletasks()
         for path in list(self.selected):
             try:
-                doc = self._ensure_doc(Path(path))
-                results.append(size_trace(
-                    doc, ladder, ladder_channel=ladder_channel,
-                    sample_channel=sample_channel,
-                    base_order=self._doc_order(doc)))
+                path = Path(path)
+                matrix = plate_matrix_for([path], prefer=matrix_pref,
+                                          cache=self._matrix_cache)
+                doc = self._ensure_doc(path)
+                chans = [sample_channel] if sample_channel else \
+                    [c for c in range(1, n_channels(doc) + 1) if c != ladder_channel]
+                res = size_trace(doc, ladder, ladder_channel=ladder_channel,
+                                 sample_channels=chans, matrix=matrix,
+                                 base_order=self._doc_order(doc))
+                results.append(res)
+                self._sizing[str(path.resolve())] = res
             except Exception as e:                          # noqa: BLE001
                 failures.append(f"{Path(path).name}: {e}")
         if not results:
@@ -4762,13 +4904,18 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if out.lower().endswith((".html", ".htm")):
                 Path(out).write_text(sizing_html(results), encoding="utf-8")
             else:
-                write_rows(out, [r for res in results for r in res.rows])
+                write_rows(out, table_rows(results))
         except Exception as e:                              # noqa: BLE001
             messagebox.showerror("Fragment sizing",
                                  f"Could not write file:\n{e}")
             return
 
+        self._last_sizing = list(results)
         n_peaks = sum(len(res.rows) for res in results)
+        n_good = sum(1 for res in results for r in res.rows if r["quality"] >= 50)
+        mats = sorted({res.matrix for res in results if res.matrix})
+        self.show_sizes.set(True)
+        self.redraw()
         n_warn = sum(len(res.warnings) for res in results)
         warned = [res.well or res.file for res in results if res.warnings]
         if len(warned) > 12:
@@ -4778,7 +4925,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         messagebox.showinfo(
             "Fragment sizing",
             f"Sized {n_peaks} peak(s) across {len(results)} well(s) "
-            f"against {ladder.name}.\n" +
+            f"against {ladder.name} ({n_good} with quality >= 50).\n"
+            f"Dye-overlap correction: {', '.join(mats) or 'none'}.\n"
+            "The sizes are now marked on the traces (Fragment analysis ▸ "
+            "Show fragment sizes on traces).\n" +
             (f"{n_warn} warning(s) in well(s) {', '.join(warned)} — their "
              "rows have ladder_ok = False; open the report or run the "
              "sizing CLI for details.\n" if n_warn else "") +
@@ -5089,6 +5239,84 @@ class LimoncelloAnalyzerApp(tk.Tk):
             color = colors[CHANNEL_ORDER[ci]] if mode == "channel" else colors.get(base, "#000000")
             lines.append((ci, base, col, color))
         return lines
+
+    def _matrix_for(self, path):
+        """The dye-overlap matrix for *path*'s run, as sizing chose it
+        (the run's GP calibration, else the plate's single-dye wells)."""
+        from fragment_sizing import plate_matrix_for
+        if not hasattr(self, "_matrix_cache"):
+            self._matrix_cache = {}
+        try:
+            pref = mark_library.load_prefs().get("fragment_sizing", {}).get("matrix", "auto")
+        except Exception:                                  # noqa: BLE001
+            pref = "auto"
+        try:
+            return plate_matrix_for([Path(path)], prefer=pref or "auto",
+                                    cache=self._matrix_cache)
+        except Exception:                                  # noqa: BLE001
+            return None
+
+    def _dye_corrected_view(self, path, doc, dset, tr):
+        """*tr* with the four dye channels spectrally separated, when the
+        View option is on and the file keeps its physical channels."""
+        if not self.dye_corrected.get() or dset.view_mode not in ("raw", "processed", "called"):
+            return tr
+        chans = getattr(doc, "channels", None)
+        m = self._matrix_for(path) if chans is not None else None
+        if m is None or m.is_identity() or np.shape(chans)[1] < m.n:
+            return tr
+        from analyzer_core import acgt_index_for_channel
+        corr = m.correct(np.asarray(chans, float))
+        out = np.array(tr, float, copy=True)
+        order = (dset.base_order or "ACTG").upper()
+        for c in range(1, min(4, m.n) + 1):
+            out[:, acgt_index_for_channel(order, c)] = corr[:, c - 1]
+        return out
+
+    def _draw_size_marks(self, ax, path, doc, dset, tr, s0, s1, xmap=None):
+        """Label the ladder bands (bp) and the sized peaks (size, coloured by
+        quality) of a sized well on its traces."""
+        res = self._sizing.get(str(Path(path).resolve()))
+        if res is None or not self.show_sizes.get():
+            return
+        from analyzer_core import acgt_index_for_channel, display_extra_channels
+        order = (dset.base_order or "ACTG").upper()
+        extra = None
+
+        def y_at(ch, scan):
+            nonlocal extra
+            if ch <= 4:
+                return float(tr[scan, acgt_index_for_channel(order, ch)])
+            if extra is None:
+                extra = display_extra_channels(doc, dset)
+            k = ch - 5
+            return float(extra[scan, k]) if 0 <= k < extra.shape[1] else 0.0
+
+        xm = xmap or (lambda v: v)
+        kw = dict(textcoords="offset points", ha="center", va="bottom",
+                  fontsize=6, rotation=90, clip_on=True, zorder=8)
+        ch = res.ladder_channel
+        if 0 < ch <= len(self.chan_show) and self.chan_show[ch - 1].get():
+            for r in res.standards:
+                sc = r["scan"]
+                if not s0 <= sc < s1:
+                    continue
+                y = y_at(ch, sc)
+                col = "#7a1f1f" if r["used_in_curve"] else "#999999"
+                ax.plot([xm(sc)], [y], marker="v", ms=3, color=col, zorder=8)
+                ax.annotate(f"{r['band_bp']:g}", (xm(sc), y), xytext=(0, 4),
+                            color=col, **kw)
+        for r in res.rows:
+            sc, ch = r["scan"], r["channel"]
+            if r["quality"] < self.size_min_quality or not s0 <= sc < s1:
+                continue
+            if not (0 < ch <= len(self.chan_show) and self.chan_show[ch - 1].get()):
+                continue
+            y = y_at(ch, sc)
+            col = "#1b7f3a" if r["quality"] >= 80 else "#c46a00"
+            ax.plot([xm(sc)], [y], marker="o", ms=2.5, mfc="none", mec=col, zorder=8)
+            ax.annotate(f"{r['length_bp']:.1f}", (xm(sc), y), xytext=(0, 4),
+                        color=col, **kw)
 
     def _extra_lines(self, doc, settings):
         """Channels beyond the four A,C,G,T ones (Ch5.., e.g. LIZ):
@@ -6230,7 +6458,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     gx1 = gy[2] if gx1 is None else max(gx1, gy[2])
                     gx0 = 0 if gx0 is None else min(gx0, 0)
             dset = self._settings_for(doc, settings)
-            tr = display_trace(doc, dset)
+            tr = self._dye_corrected_view(path, doc, dset, display_trace(doc, dset))
             s0 = max(0, settings.signal_start)
             s1 = settings.signal_end if settings.signal_end > 0 else tr.shape[0]
             s1 = min(tr.shape[0], s1)
@@ -6255,6 +6483,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
                     gy0 = m0 if gy0 is None else min(gy0, m0)
                     gy1 = m1 if gy1 is None else max(gy1, m1)
                 plotted = True
+            try:
+                self._draw_size_marks(ax, path, doc, dset, tr, s0, s1)
+            except Exception:                              # noqa: BLE001
+                pass
             if s1 > s0:
                 gx0 = s0 if gx0 is None else min(gx0, s0)
                 gx1 = s1 if gx1 is None else max(gx1, s1)
