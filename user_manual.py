@@ -277,14 +277,17 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
                     strong wells share, then up to two heteroduplexes
   never a species = peaks seen not to move between temperatures, and
                     peaks at the same ratio to the early peak in most
-                    wells without a stutter (ssDNA)
+                    wells without a stutter (ssDNA) -- except a peak far
+                    taller than anything else there: that is Homo1 sitting
+                    where the other run had a peak
   temperature     = the one where most wells resolve all four species
                     (ties: the warmer); reruns there are replicates
 ```
   The minor-variant fraction is p = (A_Homo2 + ½ A_het) / A_total. Checked against hand-integrated areas of 96 wells (#19_20, 55 °C): Homo1 and Homo2 within 1–3 %, minor fraction within 0.03 in 85 % of wells. On another fragment (#8) the agreement is weaker (within 0.05 in about 70 %): check a new fragment against wells you have integrated yourself. Picked peaks (template) take precedence over the pattern.
 • **Out-of-scale peaks** — when the sample channel clips (flat top at the 16-bit limit), the clipped stretch is rebuilt from the strongest other channel that carries the same dye's crosstalk, scaled by the gain fitted on the unclipped part of the same well. The well is flagged "clipped peak measured in channel …".
+• **Peaks moving over one another** — as the temperature changes the species move and other peaks do not, so a peak resolved at one temperature can hide under a species block at another and inflate it; a big one changes the minor fraction. Every well is therefore also measured at the plate's other temperatures (where they resolve the same species), each compared with its plate's median there, and a well whose fraction moves differently from the plate is flagged "temperatures disagree …", naming the species whose share moved most — look there, at both temperatures.
 • **Add stutter to its parent peak** — (without the block measurement) a smaller peak a few scans behind a duplex peak (Taq stutter / +A) is reported and, ticked, counted with its parent. Peaks you picked are never merged.
-• The table: per well the temperatures, method, peaks of interest per run, the run measured, the species (Homo1/Homo2/Hetero1/Hetero2), the fractions (± SD over replicates), the minor-variant fraction and flags (one temperature, merged again at the top temperature, clipped peak, species not found, no product). **Save table…** writes it as CSV.
+• The table: per well the temperatures, method, peaks of interest per run, the run measured, the species (Homo1/Homo2/Hetero1/Hetero2), the fractions (± SD over replicates), the minor-variant fraction and flags (one temperature, merged again at the top temperature, clipped peak, species not found, temperatures disagree, below detection, no product). **Save table…** writes it as CSV.
 • **Double-click a well** (or Show well): its runs are overlaid, lined up as the analysis did, with the peaks marked — red ▼ species / peaks of interest (Homo1 … or P1, P2 … when picked), orange ▽ the rest of the block (stutter), grey ○ static.
 """),
 

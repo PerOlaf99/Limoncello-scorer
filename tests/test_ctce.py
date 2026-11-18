@@ -201,3 +201,23 @@ def test_a_clipped_peak_is_measured_in_another_channel():
     assert abs(big - 1.5e6) / 1.5e6 < 0.03
     clipped = ctce.species_areas(ctce.channel_trace(raw, "ACGT", 3, ctce.SPECIES_BASELINE), [2400])[0]
     assert clipped < 0.8 * 1.5e6                                      # what clipping would have cost
+
+
+def test_homo1_marked_static_by_the_other_temperature_is_still_homo1():
+    # between close temperatures Homo1 barely moves and the runs pair it
+    # with itself as "static"; a far bigger peak is still Homo1, not the
+    # small peak before it
+    rt, pos, _truth = _species_well(1)
+    y = rt.y + gauss(np.arange(N, dtype=float), pos[0] - 18, 2.5, 6.0e3)   # a small peak just before
+    m = ctce.find_species(y, rt.anchor, static_scans=[pos[0], pos[0] + 16])
+    assert m is not None and abs(m[0] - pos[0]) <= 3
+
+
+def test_a_bump_on_the_rise_of_homo2_is_not_homo2():
+    rt, pos, _truth = _species_well(2)
+    x = np.arange(N, dtype=float)
+    bump = pos[1] - 11
+    y = rt.y + gauss(x, bump, 2.0, 1.5e3)                                    # a small bump before Homo2
+    # ... where the plate expects Homo2: its footprint borrows Homo2's area
+    m = ctce.find_species(y, rt.anchor, ctce.SpeciesPattern(r3=bump / pos[0]))
+    assert m is not None and abs(m[1] - pos[1]) <= 3

@@ -129,6 +129,7 @@ class WellResult:
     method: str = "change"              # change / shape / template / species
     minor_fraction: Optional[float] = None
     species: List[str] = field(default_factory=list)       # names of the areas (species mode)
+    mf_by_temperature: Dict[float, float] = field(default_factory=dict)  # the check runs' MF
     flags: List[str] = field(default_factory=list)
 
     def summary(self) -> Dict:
@@ -642,7 +643,9 @@ MERGED_VALLEY = 0.5           # blocks share one baseline only if the valley sta
 SPECIES_MAX_WIDTH = 4.0       # a species' main peak is at most 4 x Homo1's width ...
 SPECIES_MAX_WIDTH_SCANS = 20  # ... or 20 scans at half height: broad bumps are not species
 MERGED_HET_WIDTH = 1.0        # a lone heteroduplex block at least Homo1's width is both, merged
+TEMPS_DISAGREE = 1.3          # MF at another temperature off by > x1.3: a peak may hide
 RUNS_DISAGREE = 0.5           # runs of one well differing by > 50 % of the mean are flagged
+HOMO1_OVER_STATIC = 3.0       # a "static" candidate is still Homo1 if >= 3x as tall as the best other one
 SPECIES_BAND = 0.06           # Homo1 / early peak within +-0.06 of the plate's typical value
 STATIC_SHARE = 0.6            # static: at one ratio to the early peak in >= 60 % of wells ...
 STATIC_CHANGE_SHARE = 0.25    # ... or seen static between temperatures in >= 25 % of them
@@ -757,24 +760,37 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
     nz = noise_level(y)
     idx = [j for j in _species_peaks(y, anchor, nz) if j > anchor * 1.1]
 
-    def allowed(c):
-        if any(abs(c - s) <= 4 for s in static_scans):
+    def allowed(c, use_static=True):
+        if use_static and any(abs(c - s) <= 4 for s in static_scans):
             return False
         r = c / anchor
         if any(abs(r - s) <= 0.012 for s in pattern.static):
             return False
         return pattern.band is None or pattern.band[0] <= r <= pattern.band[1]
-    h2 = None
-    for c in sorted(idx, key=lambda j: -_foot(y, j)):
-        if not allowed(c):
-            continue
-        lead = _lead(idx, y, c)
-        if any(lead + SPECIES_MIN_GAP <= j <= lead * SPECIES_MAX_R3 and y[j] < y[c] for j in idx):
-            h2 = lead
-            break
+    def first_homo1(use_static):
+        for c in sorted(idx, key=lambda j: -_foot(y, j)):
+            if not allowed(c, use_static):
+                continue
+            lead = _lead(idx, y, c)
+            if any(lead + SPECIES_MIN_GAP <= j <= lead * SPECIES_MAX_R3 and y[j] < y[c] for j in idx):
+                return lead
+        return None
+    h2 = first_homo1(True)
+    # Peaks move over one another between temperatures: Homo1 can sit where
+    # the other run had a peak and be paired with it as "static".  A
+    # candidate far bigger than anything left is still Homo1 (a static peak
+    # that big would have been learnt plate-wide).
+    loose = first_homo1(False)
+    if loose is not None and loose != h2 and (
+            h2 is None or y[loose] >= HOMO1_OVER_STATIC * y[h2]):
+        h2 = loose
     if h2 is None:
         return None
     c3 = [j for j in idx if h2 + SPECIES_MIN_GAP <= j <= h2 * SPECIES_MAX_R3]
+    # a bump on the rise of a much taller peak is not Homo2: its footprint
+    # (10 before to 30 after) borrows that peak's area (a 234-high bump beat
+    # a 7433-high Homo2 11 scans after it); a stutter is never twice its main
+    c3 = [j for j in c3 if not y[j + 1:j + SPECIES_WINDOW[1] + 1].max(initial=0) > 2 * y[j]] or c3
     if pattern.r3 is None:
         score = lambda j: _foot(y, j)                                   # noqa: E731
     else:
@@ -788,6 +804,9 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
     # with Crick of the other, and the reverse) -- equal amounts in theory,
     # so they are chosen as the pair with the most similar, largest blocks
     st = stutter_of(y, h2, pattern.stutter)
+    # the heteroduplexes' stutter sits closer than Homo1's (040723 A01: Homo1
+    # +24, Homo2 +17, heteroduplexes +16 / +13): take Homo2's, the nearest kin
+    st = stutter_of(y, h3, st) if y[h3] > 0 else st
     d = h3 - h2
     lo4 = max(h3 + SPECIES_MIN_GAP, h2 + SPECIES_HET_FROM * d)
     het_end = h2 + SPECIES_HET_TO * d
@@ -821,7 +840,9 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
                               for p in clusters if p is not c and p[-1] < c[0])
         if not stutter_of_prev:
             keep.append(c)
-    lead = {id(c): c[0] for c in keep}
+    # a cluster's main peak: its first big peak (a small bump just before
+    # the main one is not it -- 040723 A01 Hetero2 at 2865, not 2854)
+    lead = {id(c): next(j for j in c if y[j] > 0.4 * top[id(c)]) for c in keep}
     area = {id(c): float(np.clip(y[max(0, c[0] - 6):c[-1] + 7], 0, None).sum()) for c in keep}
     best, best_s = [], 0.0
     for i, a in enumerate(keep):
@@ -1165,6 +1186,86 @@ def _label_species(run: RunTrace, mains: Sequence[int], stutter: float = SPECIES
                 p.role, p.parent = "satellite", k
 
 
+def _measure_run(run: RunTrace, pat: SpeciesPattern):
+    """(names, areas) of one run's species, measured with *pat*, or None."""
+    ys = species_trace(run)
+    mains = find_species(ys, run.anchor, pat, _static_scans(run))
+    if not mains:
+        return None
+    names, kept = present_species(ys, mains)
+    st = stutter_of(ys, kept[0], pat.stutter)
+    yq = quant_trace(run)
+    blocks = species_blocks(yq, kept, st)
+    return merged_heteroduplex(names, blocks), [block_area(yq, *bl) for bl in blocks]
+
+
+def _measure_other_temperatures(res: WellResult, t_meas, runs_at, temps, pats, names, areas) -> None:
+    """Measure the well at every other temperature too (first run there),
+    kept only where that temperature resolves the same species clearly
+    (each >= 1 % of the total) -- too cold they have not separated, too hot
+    they merged again.  Stored for the plate-level check."""
+    res._temp_check = {}
+    if res.minor_fraction is None or not temps or len(temps) < 2 or sum(areas) <= 0:
+        return
+    for t in temps:
+        if t_meas is not None and abs(t - t_meas) <= SAME_TEMPERATURE:
+            continue
+        for run in [x for x in runs_at(res, t) if x.anchor][:1]:
+            got = _measure_run(run, pats[t])
+            if not got:
+                continue
+            n2, a2 = got
+            mf2 = minor_fraction_named(dict(zip(n2, a2)))
+            if (mf2 is None or sorted(n2) != sorted(names)
+                    or min(a2) < 0.01 * sum(a2) or min(areas) < 0.01 * sum(areas)):
+                continue
+            res.mf_by_temperature[t] = mf2
+            res._temp_check[t] = dict(zip(n2, (a / sum(a2) for a in a2)))
+
+
+def _flag_temperature_disagreement(todo: Sequence[WellResult], t_meas) -> None:
+    """Peaks move over one another as the temperature changes: a peak
+    resolved at one temperature can hide under a species block at another
+    and inflate it -- a big one changes the fraction.  The same DNA must give
+    the same fraction at every temperature *relative to the plate* (a
+    temperature can shift the whole plate, e.g. a broad peak sitting under
+    Homo2 on every well at 53 deg C), so a well is flagged when its fraction
+    relative to the plate median differs between temperatures by more than
+    TEMPS_DISAGREE; the species whose share moved most is named."""
+    meas = [r.minor_fraction for r in todo if r.minor_fraction is not None]
+    if not meas:
+        return
+    med = {None: float(np.median(meas))}
+    temps = sorted({t for r in todo for t in r.mf_by_temperature})
+    for t in temps:
+        v = [r.mf_by_temperature[t] for r in todo if t in r.mf_by_temperature]
+        if len(v) >= 5:
+            med[t] = float(np.median(v))
+    for res in todo:
+        if res.minor_fraction is None or not getattr(res, "_temp_check", None):
+            continue
+        rel = res.minor_fraction / med[None]
+        share = dict(zip(res.species, (a / sum(res.areas) for a in res.areas)))
+        notes = []
+        for t, mf2 in res.mf_by_temperature.items():
+            if t not in med or med[t] <= 0:
+                continue
+            rel2 = mf2 / med[t]
+            if max(rel, rel2) / max(min(rel, rel2), 1e-9) <= TEMPS_DISAGREE:
+                continue
+            s2 = res._temp_check[t]
+            # the species that moved most, after the plate-wide shift
+            common = [n for n in share if n in s2 and min(share[n], s2[n]) > 0]
+            moved = max(common, key=lambda n: abs(np.log(share[n] / s2[n])), default=None)
+            where = f", {moved} {share[moved]:.3f} vs {s2[moved]:.3f} of the total" if moved else ""
+            notes.append(f"{t:g} °C gives {mf2:.3f} (plate {med[t]:.3f}){where}")
+        if notes:
+            tm = f"{t_meas:g} °C" if t_meas is not None else "the measured run"
+            res.flags.append(f"temperatures disagree (MF {res.minor_fraction:.3f} at {tm}, plate "
+                             f"{med[None]:.3f}; " + "; ".join(notes)
+                             + "): a peak may hide under a species at one of them")
+
+
 def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
     """Plate level: find Homo1 / Homo2 / heteroduplexes in every well as a
     pattern the plate teaches itself, and measure them as blocks (main peak
@@ -1271,6 +1372,7 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
                 spread = (max(mfs) - min(mfs)) / max(res.minor_fraction, 1e-9)
                 if spread > RUNS_DISAGREE:
                     res.flags.append(f"runs disagree: minor fraction {', '.join(f'{p:.3f}' for p in mfs)}")
+        _measure_other_temperatures(res, t_meas, runs_at, temps, pats, names, areas)
         if "Homo2" not in names and res.minor_fraction is not None:
             res.flags.append("Homo2 not seen (low minor fraction): fraction from the heteroduplexes")
         clipped = [x for x, *_ in found if getattr(x, "_desat", None)]
@@ -1279,6 +1381,7 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
             res.flags.append(f"clipped peak measured in channel {ch} (x{gain:.1f})")
         elif any(getattr(x, "_clipped", 0) for x, *_ in found):
             res.flags.append("clipped peak (no clean channel to measure it in)")
+    _flag_temperature_disagreement(todo, t_meas)
     return pattern
 
 
