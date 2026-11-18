@@ -626,10 +626,15 @@ def _run_areas(run: RunTrace, merge_satellites: bool) -> List[float]:
 # 85 % of the wells.
 SPECIES_BASELINE = 1601       # quantify on a near-flat floor (wide running minimum)
 SPECIES_WINDOW = (10, 30)     # a species block: 10 scans before its main peak, 30 after
+SPECIES_HUMP = 101            # hump baseline: opening this wide (scans), under the species
+SPECIES_STUTTER = 15          # Taq stutter: scans after its main peak (the plate learns its own)
 SPECIES_PROMINENCE = 10       # peaks: prominence >= 10 x the noise
 SPECIES_MIN_GAP = 40          # Hom3 lies beyond Hom2's own cluster (stutter, shoulders)
 SPECIES_MAX_R3 = 1.075        # ... and before 1.075 x Hom2's migration time
 SPECIES_R3_SIGMA = 0.015      # spread of Hom3 / Hom2 between capillaries
+SPECIES_HET_FROM = 1.5        # hets lie 1.5 to 4 Hom2->Hom3 distances after Hom2
+SPECIES_HET_TO = 4.0
+SPECIES_HET_EQUAL = 0.7       # the two hets' areas should agree (log-ratio sigma ~x2)
 SPECIES_HET_MIN = 25          # heteroduplex main peak >= 25 x the noise
 SPECIES_BAND = 0.06           # Hom2 / early peak within +-0.06 of the plate's typical value
 STATIC_SHARE = 0.6            # static: at one ratio to the early peak in >= 60 % of wells ...
@@ -644,6 +649,7 @@ class SpeciesPattern:
     static: List[float] = field(default_factory=list)   # static peaks / early peak
     band: Optional[tuple] = None                        # Hom2 / early peak range
     r3: Optional[float] = None                          # Hom3 / Hom2
+    stutter: float = SPECIES_STUTTER                    # stutter offset (scans); block = 2x
     temperature: Optional[float] = None
 
 
@@ -696,6 +702,29 @@ def quant_trace(rt: RunTrace) -> np.ndarray:
     return y
 
 
+def species_trace(rt: RunTrace) -> np.ndarray:
+    """The trace species are found and ranked on: the measuring trace with
+    the broad hump under the species taken off, so a bump riding on Hom2's
+    tail does not look like a block of its own."""
+    cached = getattr(rt, "_ys", None)
+    if cached is None:
+        y = quant_trace(rt)
+        cached = rt._ys = y - hump_baseline(y)
+    return cached
+
+
+def hump_baseline(y: np.ndarray, width: int = SPECIES_HUMP) -> np.ndarray:
+    """The broad hump under the species (unresolved material, Hom2's long
+    tail): a morphological opening as wide as several species blocks,
+    smoothed, never above the trace.  Taken off before peaks are found and
+    ranked; the blocks themselves are measured above a line joining their
+    ends, which also follows a tail sloping under them."""
+    from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
+    y = np.asarray(y, float)
+    base = uniform_filter1d(maximum_filter1d(minimum_filter1d(y, width), width), width // 2)
+    return np.minimum(base, y)
+
+
 def _species_peaks(y: np.ndarray, anchor: float, nz: float) -> List[int]:
     idx, _ = find_peaks(y, prominence=SPECIES_PROMINENCE * nz, distance=3)
     return [int(i) for i in idx if i > anchor * 1.05]
@@ -706,10 +735,10 @@ def _foot(y: np.ndarray, c: int) -> float:
     return float(np.clip(y[max(0, c - lo):c + hi + 1], 0, None).sum())
 
 
-def _lead(idx: Sequence[int], y: np.ndarray, c: int) -> int:
+def _lead(idx: Sequence[int], y: np.ndarray, c: int, span: int = 25) -> int:
     """The first big peak of the cluster that ends at *c* (a species' main
     peak can be lower than its shoulder or stutter)."""
-    return min([j for j in idx if c - 25 <= j <= c and y[j] > 0.4 * y[c]], default=c)
+    return min([j for j in idx if c - span <= j <= c and y[j] > 0.4 * y[c]], default=c)
 
 
 def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern] = None,
@@ -748,32 +777,156 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
     lead3 = _lead(idx, y, h3)
     if lead3 >= h2 + SPECIES_MIN_GAP:
         h3 = lead3
-    hets: List[int] = []
-    het_end = h2 * (1 + 4 * (h3 / h2 - 1))
-    c4 = [j for j in idx if h3 + SPECIES_MIN_GAP <= j <= het_end and y[j] > SPECIES_HET_MIN * nz]
-    for j in sorted(c4, key=lambda j: -_foot(y, j)):
-        j = _lead(idx, y, j)
-        if all(abs(j - k) > 18 for k in hets):
-            hets.append(j)
-        if len(hets) == 2:
-            break
+    # heteroduplexes: the two crossed strand pairings (Watson of one variant
+    # with Crick of the other, and the reverse) -- equal amounts in theory,
+    # so they are chosen as the pair with the most similar, largest blocks
+    st = stutter_of(y, h2, pattern.stutter)
+    d = h3 - h2
+    lo4 = max(h3 + SPECIES_MIN_GAP, h2 + SPECIES_HET_FROM * d)
+    het_end = h2 + SPECIES_HET_TO * d
+    c4 = [j for j in idx if lo4 <= j <= het_end and y[j] > SPECIES_HET_MIN * nz]
+    # a peak just after a comparable one is that one's stutter, not a het
+    c4 = [j for j in c4 if not any(8 <= j - k <= st + 6 and y[k] > 0.7 * y[j] for k in idx)]
+    c4 = [_lead(idx, y, j, span=10) for j in c4]           # a shoulder can lead
+    c4 = sorted(set(c4))
+    area = {j: _single_area(y, j, st) for j in c4}
+    near = st + 4                                           # a het's own stutter is not a het
+    best, best_s = [], 0.0
+    for i, j4 in enumerate(c4):
+        for j5 in c4[i + 1:]:
+            if j5 - j4 <= near or min(area[j4], area[j5]) <= 0:
+                continue
+            q = np.log(area[j5] / area[j4])
+            sc = (area[j4] + area[j5]) * np.exp(-0.5 * (q / SPECIES_HET_EQUAL) ** 2)
+            if sc > best_s:
+                best, best_s = [j4, j5], sc
+    if not best and c4:                                     # one het (the other merged / lost)
+        best = [max(c4, key=lambda j: area[j])]
+    hets = best
     return [h2, h3] + sorted(hets)
 
 
-def species_areas(y: np.ndarray, mains: Sequence[int]) -> List[float]:
-    """Block area of each species: from 10 scans before its main peak to 30
-    after (taking in the stutter).  Neighbours whose blocks would overlap
-    share one boundary: the valley after the first one's stutter."""
-    lo_w, hi_w = SPECIES_WINDOW
-    bounds = [[c - lo_w, c + hi_w] for c in mains]
+def _front(ys: np.ndarray, c: int) -> int:
+    """Foot of a main peak's sharp front (hump-free trace), at most 10 scans
+    back: walking down the (smoothed) front until it is flat (below 1 % of
+    the peak) or turns up again (the valley after a peak before it)."""
+    sm = np.convolve(ys, np.ones(5) / 5, mode="same")
+    top = ys[max(0, c - 2):c + 3].max()
+    k = c
+    while k > max(1, c - SPECIES_WINDOW[0] - 4) and sm[k] >= 0.01 * top and sm[k - 1] <= sm[k]:
+        k -= 1
+    return k
+
+
+def _back(ys: np.ndarray, c: int, stutter: float) -> int:
+    """End of a species block: past its stutter -- the first peak 8 to
+    stutter+6 scans on (a bump beyond it is not the species') -- and down
+    the stutter's tail until flat (below 1 % of the main peak) or turning up
+    again; at most twice the stutter offset."""
+    top = ys[max(0, c - 2):c + 3].max()
+    cap = min(len(ys) - 2, c + int(round(2 * stutter)))
+    sm = np.convolve(ys, np.ones(3) / 3, mode="same")
+    lo, hi = c + 8, min(len(sm) - 2, c + int(round(stutter)) + 6)
+    tops = [i for i in range(lo, hi + 1)
+            if sm[i] >= sm[i - 1] and sm[i] >= sm[i + 1] and sm[i] > 0.1 * top]
+    k = tops[0] if tops else (lo + int(np.argmax(sm[lo:hi + 1])) if hi >= lo else c)
+    while k < cap and sm[k] >= 0.01 * top and sm[k + 1] <= sm[k]:
+        k += 1
+    return k
+
+
+def _single_area(ys: np.ndarray, c: int, stutter: float) -> float:
+    """Block area of one species on its own (hump-free trace, line baseline)."""
+    lo, hi = _front(ys, c), _back(ys, c, stutter)
+    return block_area(ys, lo, hi)
+
+
+def species_blocks(y: np.ndarray, mains: Sequence[int],
+                   stutter: float = SPECIES_STUTTER) -> List[tuple]:
+    """(start, stop, base at start, base at stop) of each species block.
+
+    A block runs from the foot of its main peak's front to the end of its
+    stutter's tail (at most twice the stutter offset), and is measured above
+    a straight line -- as a drag between two points would be.  Neighbours
+    that would overlap split at the valley after the first one's stutter:
+    if that valley is back near the floor each keeps its own line (a bump
+    between them is neither's); if they truly overlap they share one line
+    from the first's start to the last's end, split by a drop at the valley."""
+    y = np.asarray(y, float)
+    ys = y - hump_baseline(y)
+    hi_w = int(round(2 * stutter))
+    bounds = [[_front(ys, c), _back(ys, c, stutter)] for c in mains]
+    joined = [False] * len(mains)
+    lo_w = SPECIES_WINDOW[0]
     for k in range(len(mains) - 1):
         c, n = mains[k], mains[k + 1]
         if n - c >= lo_w + hi_w or n - c < 6:
             continue
-        a = c + min(20, int(0.6 * (n - c)))
+        a = c + min(int(round(stutter)) + 5, int(0.6 * (n - c)))
         v = int(a + np.argmin(y[a:n - 1])) if n - 1 > a else (c + n) // 2
-        bounds[k][1], bounds[k + 1][0] = v, v + 1
-    return [float(np.clip(y[max(0, lo):hi + 1], 0, None).sum()) for lo, hi in bounds]
+        low = min(ys[max(0, c - 2):c + 3].max(), ys[max(0, n - 2):n + 3].max())
+        bounds[k][1] = v
+        if ys[v] > 0.05 * low:                         # truly overlapping: one line
+            joined[k] = True
+            bounds[k + 1][0] = v + 1
+        else:
+            bounds[k + 1][0] = max(v + 1, bounds[k + 1][0])
+    out: List[tuple] = []
+    k = 0
+    while k < len(mains):
+        g = k
+        while g < len(mains) - 1 and joined[g]:
+            g += 1
+        lo, hi = bounds[k][0], bounds[g][1]
+        a, b = _block_ends(y, lo, hi)
+        line = lambda x: a + (b - a) * (x - lo) / max(hi - lo, 1)   # noqa: E731
+        for j in range(k, g + 1):
+            out.append((bounds[j][0], bounds[j][1], line(bounds[j][0]), line(bounds[j][1])))
+        k = g + 1
+    return out
+
+
+def species_bounds(y: np.ndarray, mains: Sequence[int],
+                   stutter: float = SPECIES_STUTTER) -> List[List[int]]:
+    """[start, stop] of each species block (see species_blocks)."""
+    return [[lo, hi] for lo, hi, _a, _b in species_blocks(y, mains, stutter)]
+
+
+def stutter_of(ys: np.ndarray, h2: int, default: float = SPECIES_STUTTER) -> float:
+    """This well's stutter offset: the tallest peak 8-35 scans after Hom2
+    (hump-free trace), else the plate's value."""
+    seg = ys[h2 + 8:h2 + 36]
+    if len(seg) and seg.max() > 0.1 * ys[h2]:
+        k = int(np.argmax(seg))
+        if 0 < k < len(seg) - 1:
+            return float(np.clip(k + 8, 10, 30))
+    return default
+
+
+def _block_ends(y: np.ndarray, lo: int, hi: int) -> tuple:
+    """Baseline levels at a block's two ends (each the mean of 3 scans)."""
+    return (float(np.mean(y[max(0, lo - 1):lo + 2])), float(np.mean(y[max(0, hi - 1):hi + 2])))
+
+
+def block_area(y: np.ndarray, lo: int, hi: int, a: Optional[float] = None,
+               b: Optional[float] = None) -> float:
+    """Area of y[lo..hi] above the straight line from level *a* at its start
+    to *b* at its end (default: the trace's own ends, each the mean of 3
+    scans) -- what a drag between two points measures, so a broad hump
+    under the species is left out."""
+    seg = np.asarray(y[lo:hi + 1], float)
+    if len(seg) < 3:
+        return 0.0
+    if a is None or b is None:
+        a, b = _block_ends(y, lo, hi)
+    return float(np.clip(seg - np.linspace(a, b, len(seg)), 0, None).sum())
+
+
+def species_areas(y: np.ndarray, mains: Sequence[int],
+                  stutter: float = SPECIES_STUTTER) -> List[float]:
+    """Block area of each species (main peak + shoulder + stutter) above its
+    baseline line (see species_blocks)."""
+    return [block_area(y, lo, hi, a, b) for lo, hi, a, b in species_blocks(y, mains, stutter)]
 
 
 def species_minor_fraction(areas: Sequence[float]) -> Optional[float]:
@@ -789,7 +942,7 @@ def species_minor_fraction(areas: Sequence[float]) -> Optional[float]:
 def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
     """Teach the plate its pattern from one run per well (same temperature):
     the static peaks, Hom2's band, and Hom3's ratio to Hom2."""
-    traces = [(r, quant_trace(r)) for r in runs if r.anchor]
+    traces = [(r, species_trace(r)) for r in runs if r.anchor]
     pat = SpeciesPattern(temperature=next((r.temperature for r in runs), None))
     if not traces:
         return pat
@@ -839,16 +992,24 @@ def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
     strong = first[:max(5, len(first) // 3)]
     mid = float(np.median([h2 / r.anchor for _f, h2, r, _y in strong]))
     pat.band = (mid - SPECIES_BAND, mid + SPECIES_BAND)
-    rb = np.arange(1.01, 1.08, 0.002)
-    rh = np.zeros(len(rb))
+    # Hom3: the dominant block after Hom2's own cluster, in each strong well
+    r3s, stut = [], []
     for _f, h2, r, y in strong:
         ip = _species_peaks(y, r.anchor, noise_level(y))
-        rr = np.array([j / h2 for j in ip if h2 + SPECIES_MIN_GAP <= j <= h2 * 1.08
-                       and y[j] > 0.03 * y[h2]])
-        if len(rr):
-            rh += np.array([(np.abs(rr - c) <= 0.004).any() for c in rb])
-    if rh.any():
-        pat.r3 = round(float(rb[int(np.argmax(np.convolve(rh, np.ones(5) / 5, mode="same")))]), 4)
+        cand = [j for j in ip if h2 + SPECIES_MIN_GAP <= j <= h2 * SPECIES_MAX_R3
+                and y[j] > 0.03 * y[h2]
+                and not any(abs(j / r.anchor - s) <= 0.012 for s in pat.static)]
+        if cand:
+            j = max(cand, key=lambda j: _foot(y, j))
+            r3s.append(_lead(ip, y, j) / h2)
+        # the stutter: the tallest peak 8-35 scans after Hom2
+        after = [j for j in ip if h2 + 8 <= j <= h2 + 35 and y[j] > 0.1 * y[h2]]
+        if after:
+            stut.append(max(after, key=lambda j: y[j]) - h2)
+    if r3s:
+        pat.r3 = round(float(np.median(r3s)), 4)
+    if len(stut) >= 3:
+        pat.stutter = float(np.clip(np.median(stut), 10, 30))
     return pat
 
 
@@ -857,13 +1018,13 @@ def _static_scans(run: RunTrace) -> List[float]:
     return list(getattr(run, "_static_scans", ()) or ())
 
 
-def _label_species(run: RunTrace, mains: Sequence[int]) -> None:
+def _label_species(run: RunTrace, mains: Sequence[int], stutter: float = SPECIES_STUTTER) -> None:
     """Mark the species on the run's peaks for display: the main peak red and
     labelled, the rest of its block as its satellites."""
     for p in run.peaks:
         if p.role in ("melting", "satellite"):
             p.role, p.parent = "other", None
-    lo_w, hi_w = SPECIES_WINDOW
+    lo_w, hi_w = SPECIES_WINDOW[0], int(round(2 * stutter))
     for name, c in zip(SPECIES_NAMES, mains):
         near = [k for k, p in enumerate(run.peaks) if abs(p.raw_pos - c) <= 3]
         if near:
@@ -907,7 +1068,7 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
         firsts = [rr[0] for rr in (runs_at(r, t) for r in todo) if rr]
         pat = learn_species_pattern(firsts)
         n = sum(1 for x in firsts if x.anchor and len(
-            find_species(quant_trace(x), x.anchor, pat, _static_scans(x)) or []) == 4)
+            find_species(species_trace(x), x.anchor, pat, _static_scans(x)) or []) == 4)
         if n >= best_n:                  # ties: the warmer run
             best_t, best_n, pattern = t, n, pat
     t_meas = best_t
@@ -917,17 +1078,23 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
         reps = [x for x in runs_at(res, t_meas) if x.anchor]
         found = []
         for run in reps:
-            y = quant_trace(run)
-            mains = find_species(y, run.anchor, pattern, _static_scans(run))
+            ys = species_trace(run)
+            mains = find_species(ys, run.anchor, pattern, _static_scans(run))
             if mains:
-                found.append((run, mains, species_areas(y, mains)))
+                st = stutter_of(ys, mains[0], pattern.stutter)
+                yq = quant_trace(run)
+                blocks = species_blocks(yq, mains, st)
+                run._species_overlay = {
+                    "channel": run.channel, "yq": yq, "hump": yq - ys,
+                    "blocks": [(n,) + tuple(bl) for n, bl in zip(SPECIES_NAMES, blocks)]}
+                found.append((run, mains, [block_area(yq, *bl) for bl in blocks]))
         res.flags = [f for f in res.flags if not f.startswith(("no melting", "satellite"))
                      and "satellite peak(s)" not in f]
         if not found:
             res.flags.append("species: Hom2/Hom3 not found")
             continue
         run, mains, areas = found[0]
-        _label_species(run, mains)
+        _label_species(run, mains, pattern.stutter)
         for x, m, _a in found:
             k = res.runs.index(x)
             if k < len(res.regimes):

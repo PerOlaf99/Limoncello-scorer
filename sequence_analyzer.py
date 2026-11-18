@@ -1007,6 +1007,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._mode_banner_hint.pack(side=tk.LEFT, padx=4)
         ttk.Button(ban, text="Exit (Esc)",
                    command=self.exit_genotyping_picking).pack(side=tk.RIGHT, padx=6, pady=2)
+        ttk.Button(ban, text="Clear shown wells",
+                   command=self._gen_clear_shown).pack(side=tk.RIGHT, padx=2, pady=2)
         self._mode_banner_is = ttk.Button(ban, text="Mark IS in shown wells",
                                           command=self._gen_mark_std_batch)
         self._mode_banner_is.pack(side=tk.RIGHT, padx=2, pady=2)
@@ -2706,6 +2708,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._area_cursors.append(self._make_area_markers(ax))
             else:
                 pk.plot_overlay(ax)
+            self._draw_ctce_marks(ax, path)          # CTCE species, hump, block baselines
             ax.tick_params(labelsize=7)
             base_title = self._graph_title(path, doc.path.parent.name)
             self._axes_titles.append((ax.text(
@@ -2823,6 +2826,23 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self._gen_active_path = None
             self.status_var.set("Measurements cleared." if self.area_mode
                                 else "Picks cleared.")
+        self.redraw()
+        self._sync_pick_table()
+
+    def _gen_clear_shown(self):
+        """Remove the picks / measurements of the wells on screen only, so a
+        well can be picked or dragged again from scratch (the menu's Clear
+        removes them everywhere)."""
+        if not self._require_picking("Clear shown wells"):
+            return
+        store = self._area_pickers if self.area_mode else self._gen_pickers
+        n = 0
+        for path in self._gen_paths():
+            pk = store.pop(str(Path(path).resolve()), None)
+            n += len(getattr(pk, "records", []) or []) if pk is not None else 0
+        self._gen_active_path = None
+        what = "measurement(s)" if self.area_mode else "pick(s)"
+        self.status_var.set(f"Cleared {n} {what} in the shown wells.")
         self.redraw()
         self._sync_pick_table()
 
@@ -6213,6 +6233,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         lines = [ln for ln in ax.get_lines() if str(ln.get_label()).startswith("Ch")
                  and ((run is not None and f"({run})" in str(ln.get_label()))
                       or (run is None and "(" not in str(ln.get_label())))]
+        ov = (getattr(self, "_ctce_overlay", None) or {}).get(self._akey(path))
+        if ov and xmap is None:
+            self._draw_ctce_overlay(ax, ov, lines)
         for raw, role, label in marks:
             style = self.CTCE_STYLE.get(role)
             if style is None:
@@ -6227,6 +6250,55 @@ class LimoncelloAnalyzerApp(tk.Tk):
             if label:
                 ax.annotate(label, (x, y), xytext=(0, 7), textcoords="offset points",
                             ha="center", fontsize=7, color=col, zorder=9)
+
+    def _draw_ctce_overlay(self, ax, ov, lines):
+        """What the species measurement took away and kept, on the sample
+        channel's own trace: the hump under the species (blue, not counted),
+        and each block's straight baseline (red) -- its area is what lies
+        between that line and the trace."""
+        ch = ov.get("channel")
+        ln = next((ln for ln in lines if str(ln.get_label()).startswith(f"Ch{ch} ")), None)
+        blocks = ov.get("blocks") or []
+        if ln is None or not blocks:
+            return
+        xd = np.asarray(ln.get_xdata(), float)
+        yd = np.asarray(ln.get_ydata(), float)
+        yq, hump = np.asarray(ov["yq"], float), np.asarray(ov["hump"], float)
+        lo = max(0, int(blocks[0][1]) - 60)
+        hi = min(len(yq) - 1, int(blocks[-1][2]) + 60)
+        x = np.arange(lo, hi + 1)
+        disp = np.interp(x, xd, yd)
+        q = yq[lo:hi + 1]
+        # the display may carry its own baseline / scale: fit display = k*yq + floor
+        dd, dq = np.diff(disp), np.diff(q)
+        ok = (q[1:] < 0.9 * q.max()) & (q[:-1] < 0.9 * q.max())   # not the clipped tops
+        k = float((dd[ok] * dq[ok]).sum() / max((dq[ok] ** 2).sum(), 1e-9)) if ok.any() else 1.0
+        if not 0.5 < k < 2.0:
+            k = 1.0
+        floor = disp - k * q
+        good = q < 0.9 * q.max()
+        if good.sum() > 5:                                 # bridge clipped stretches
+            floor = np.interp(x, x[good], floor[good])
+        from scipy.ndimage import median_filter
+        floor = median_filter(floor, size=9)
+        top = floor + k * hump[lo:hi + 1]
+        ax.fill_between(x, floor, top, color="#1E88E5", alpha=0.28, lw=0, zorder=3,
+                        label="_ctce_hump")
+        ax.plot(x, top, color="#1E88E5", lw=0.9, ls="--", zorder=4, label="_ctce_hump")
+        ax.annotate("hump (not counted)", (x[0], top[0]), xytext=(2, 4), textcoords="offset points",
+                    fontsize=7, color="#1E88E5", zorder=9)
+        for name, b0, b1, a, b in blocks:
+            b0, b1 = int(b0), int(b1)
+            xs = np.arange(b0, b1 + 1)
+            fl = np.interp(xs, x, floor)
+            base = fl + k * np.linspace(a, b, len(xs))
+            tr = np.interp(xs, xd, yd)
+            ax.fill_between(xs, base, np.maximum(tr, base), color="#C62828", alpha=0.12,
+                            lw=0, zorder=3, label="_ctce_block")
+            ax.plot([b0, b1], [base[0], base[-1]], color="#C62828", lw=1.1, zorder=5,
+                    label="_ctce_block")
+            ax.plot([b0, b0], [base[0], tr[0]], color="#C62828", lw=0.6, zorder=5, label="_ctce_block")
+            ax.plot([b1, b1], [base[-1], tr[-1]], color="#C62828", lw=0.6, zorder=5, label="_ctce_block")
 
     def _ctce_plates(self):
         """{plate: [run folders]} for the runs in the file list."""
@@ -6370,6 +6442,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 for run in r.runs:
                     marks[self._akey(run.path)] = [(p.raw_pos, p.role, p.label) for p in run.peaks]
             self._ctce_marks = marks
+            self._ctce_overlay = {self._akey(run.path): run._species_overlay
+                                  for r in results for run in r.runs
+                                  if getattr(run, "_species_overlay", None)}
             for r in results:
                 s = r.summary()
                 tree.insert("", tk.END, iid=r.well, values=[s[c] for c in cols])
