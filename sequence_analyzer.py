@@ -437,12 +437,74 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.destroy()
 
     def _popup_menu(self, menu, mb):
-        """Open a top menu bar dropdown (stock Menubutton posting fails here)."""
+        """Open a top menu bar dropdown (stock Menubutton posting fails here).
+
+        The menu is posted without keeping a pointer grab (under this WM a
+        grabbed menu misbehaves), so nothing would close it on its own: the
+        handlers below give it menu-bar manners instead -- hovering another
+        title switches to that menu, and moving clearly away from the open
+        menu, or clicking elsewhere, closes it."""
+        self._close_open_menu()
         try:
             menu.tk_popup(mb.winfo_rootx(), mb.winfo_rooty() + mb.winfo_height())
         finally:
             menu.grab_release()
+        self._open_menu = (menu, mb)
         return "break"
+
+    # how far (px) the pointer may stray from an open menu before it closes
+    MENU_CLOSE_MARGIN = 40
+
+    def _close_open_menu(self):
+        open_ = getattr(self, "_open_menu", None)
+        self._open_menu = None
+        if open_ is not None:
+            try:
+                open_[0].unpost()
+            except tk.TclError:
+                pass
+
+    def _menu_is_open(self) -> bool:
+        open_ = getattr(self, "_open_menu", None)
+        if open_ is None:
+            return False
+        try:
+            if open_[0].winfo_ismapped():
+                return True
+        except tk.TclError:
+            pass
+        self._open_menu = None             # closed by a pick or Escape
+        return False
+
+    def _menu_title_enter(self, menu, mb):
+        """Hovering another menu-bar title while a menu is open switches."""
+        if self._menu_is_open() and self._open_menu[0] is not menu:
+            self._popup_menu(menu, mb)
+
+    def _menu_pointer_moved(self, event):
+        """Close the open menu once the pointer is clearly away from it and
+        from its title (submenus are menus too, so they never count)."""
+        if not self._menu_is_open():
+            return
+        if isinstance(event.widget, (tk.Menu, tk.Menubutton)):
+            return
+        menu, mb = self._open_menu
+        try:
+            x, y = event.x_root, event.y_root
+            m = self.MENU_CLOSE_MARGIN
+            boxes = [(menu.winfo_rootx(), menu.winfo_rooty(),
+                      menu.winfo_width(), menu.winfo_height()),
+                     (mb.winfo_rootx(), mb.winfo_rooty(),
+                      mb.winfo_width(), mb.winfo_height())]
+        except tk.TclError:
+            return
+        if not any(bx - m <= x <= bx + bw + m and by - m <= y <= by + bh + m
+                   for bx, by, bw, bh in boxes):
+            self._close_open_menu()
+
+    def _menu_click_elsewhere(self, event):
+        if self._menu_is_open() and not isinstance(event.widget, (tk.Menu, tk.Menubutton)):
+            self._close_open_menu()
 
     def _on_escape(self, event=None):
         if self._busy:
@@ -707,6 +769,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
             mb.bind("<ButtonPress-1>", lambda e: "break")
             mb.bind("<ButtonRelease-1>",
                     lambda e, m=menu, b=mb: self._popup_menu(m, b))
+            mb.bind("<Enter>",
+                    lambda e, m=menu, b=mb: self._menu_title_enter(m, b), add="+")
+        self._open_menu = None
+        self.bind_all("<Motion>", self._menu_pointer_moved, add="+")
+        self.bind_all("<ButtonPress>", self._menu_click_elsewhere, add="+")
 
         # Status bar
         ttk.Label(self, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).pack(
