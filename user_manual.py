@@ -264,7 +264,7 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
                              same pattern is found in every well (it may sit
                              a little earlier or later in each well)
 ```
-• **Measure Hom2 / Hom3 / heteroduplex blocks** (on by default) — the quantification step for the whole plate:
+• **Measure Homo1 / Homo2 / heteroduplex blocks** (on by default) — the quantification step for the whole plate:
 ```
   a species       = its main peak + shoulder + Taq stutter (~15 scans
                     later), measured together as one block: 10 scans
@@ -272,8 +272,8 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
                     baseline; touching blocks share the valley after
                     the first one's stutter
   the pattern     = learnt by the plate itself, as migration-time ratios
-                    (stable from capillary to capillary): Hom2 the largest
-                    species, Hom3 beyond Hom2's cluster at the ratio the
+                    (stable from capillary to capillary): Homo1 the largest
+                    species, Homo2 beyond Homo1's cluster at the ratio the
                     strong wells share, then up to two heteroduplexes
   never a species = peaks seen not to move between temperatures, and
                     peaks at the same ratio to the early peak in most
@@ -281,11 +281,11 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
   temperature     = the one where most wells resolve all four species
                     (ties: the warmer); reruns there are replicates
 ```
-  The minor-variant fraction is p = (A_Hom3 + ½ A_het) / A_total. Checked against hand-integrated areas of 96 wells (#19_20, 55 °C): Hom2 and Hom3 within 1–3 %, minor fraction within 0.03 in 85 % of wells. On another fragment (#8) the agreement is weaker (within 0.05 in about 70 %): check a new fragment against wells you have integrated yourself. Picked peaks (template) take precedence over the pattern.
+  The minor-variant fraction is p = (A_Homo2 + ½ A_het) / A_total. Checked against hand-integrated areas of 96 wells (#19_20, 55 °C): Homo1 and Homo2 within 1–3 %, minor fraction within 0.03 in 85 % of wells. On another fragment (#8) the agreement is weaker (within 0.05 in about 70 %): check a new fragment against wells you have integrated yourself. Picked peaks (template) take precedence over the pattern.
 • **Out-of-scale peaks** — when the sample channel clips (flat top at the 16-bit limit), the clipped stretch is rebuilt from the strongest other channel that carries the same dye's crosstalk, scaled by the gain fitted on the unclipped part of the same well. The well is flagged "clipped peak measured in channel …".
 • **Add stutter to its parent peak** — (without the block measurement) a smaller peak a few scans behind a duplex peak (Taq stutter / +A) is reported and, ticked, counted with its parent. Peaks you picked are never merged.
-• The table: per well the temperatures, method, peaks of interest per run, the run measured, the species (Hom2/Hom3/Het4/Het5), the fractions (± SD over replicates), the minor-variant fraction and flags (one temperature, merged again at the top temperature, clipped peak, species not found, no product). **Save table…** writes it as CSV.
-• **Double-click a well** (or Show well): its runs are overlaid, lined up as the analysis did, with the peaks marked — red ▼ species / peaks of interest (Hom2 … or P1, P2 … when picked), orange ▽ the rest of the block (stutter), grey ○ static.
+• The table: per well the temperatures, method, peaks of interest per run, the run measured, the species (Homo1/Homo2/Hetero1/Hetero2), the fractions (± SD over replicates), the minor-variant fraction and flags (one temperature, merged again at the top temperature, clipped peak, species not found, no product). **Save table…** writes it as CSV.
+• **Double-click a well** (or Show well): its runs are overlaid, lined up as the analysis did, with the peaks marked — red ▼ species / peaks of interest (Homo1 … or P1, P2 … when picked), orange ▽ the rest of the block (stutter), grey ○ static.
 """),
 
     ("Fragment-length sizing", """\

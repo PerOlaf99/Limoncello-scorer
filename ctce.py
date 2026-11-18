@@ -36,7 +36,7 @@ temperatures (read from each .rsd, never assumed from the run number):
    homoduplexes, then two heteroduplexes, in migration order) the minor
    variant fraction by mass action, p = (A_hom + A_het / 2) / A_total;
 7. plate level (quantify_species): each species measured as a block (main
-   peak + Taq stutter) on a near-flat baseline, Hom2 / Hom3 / heteroduplexes
+   peak + Taq stutter) on a near-flat baseline, Homo1 / Homo2 / heteroduplexes
    found as a pattern the plate learns in migration-time ratios, clipped
    peaks rebuilt from another channel's crosstalk.
 
@@ -617,38 +617,43 @@ def _run_areas(run: RunTrace, merge_satellites: bool) -> List[float]:
 # Each duplex species is a cluster: the main peak, often a shoulder, and its
 # Taq stutter about 15 scans later.  The species are found as a pattern the
 # plate teaches itself, in migration-time ratios (stable from capillary to
-# capillary, unlike scan offsets): Hom2 the largest species, Hom3 after
-# Hom2's cluster at a ratio the strong wells share, then up to two
+# capillary, unlike scan offsets): Homo1 the largest species, Homo2 after
+# Homo1's cluster at a ratio the strong wells share, then up to two
 # heteroduplexes.  Peaks that sit at the same ratio to the early peak in most
 # wells, without a stutter, are static (ssDNA) and never a species.
 # Validated against hand-integrated areas of 010823 #19_20 (94 wells):
-# Hom2 and Hom3 areas within 2-3 % (median), minor fraction within 0.03 in
+# Homo1 and Homo2 areas within 2-3 % (median), minor fraction within 0.03 in
 # 85 % of the wells.
 SPECIES_BASELINE = 1601       # quantify on a near-flat floor (wide running minimum)
 SPECIES_WINDOW = (10, 30)     # a species block: 10 scans before its main peak, 30 after
 SPECIES_HUMP = 101            # hump baseline: opening this wide (scans), under the species
 SPECIES_STUTTER = 15          # Taq stutter: scans after its main peak (the plate learns its own)
 SPECIES_PROMINENCE = 10       # peaks: prominence >= 10 x the noise
-SPECIES_MIN_GAP = 40          # Hom3 lies beyond Hom2's own cluster (stutter, shoulders)
-SPECIES_MAX_R3 = 1.075        # ... and before 1.075 x Hom2's migration time
-SPECIES_R3_SIGMA = 0.015      # spread of Hom3 / Hom2 between capillaries
-SPECIES_HET_FROM = 1.5        # hets lie 1.5 to 4 Hom2->Hom3 distances after Hom2
+SPECIES_MIN_GAP = 40          # Homo2 lies beyond Homo1's own cluster (stutter, shoulders)
+SPECIES_MAX_R3 = 1.075        # ... and before 1.075 x Homo1's migration time
+SPECIES_R3_SIGMA = 0.015      # spread of Homo2 / Homo1 between capillaries
+SPECIES_HET_FROM = 1.5        # hets lie 1.5 to 4 Homo1->Homo2 distances after Homo1
 SPECIES_HET_TO = 4.0
 SPECIES_HET_EQUAL = 0.7       # the two hets' areas should agree (log-ratio sigma ~x2)
 SPECIES_HET_MIN = 25          # heteroduplex main peak >= 25 x the noise
-SPECIES_BAND = 0.06           # Hom2 / early peak within +-0.06 of the plate's typical value
+HET_CLUSTER_GAP = 12          # heteroduplex peaks this close (scans) are one doublet
+MERGED_VALLEY = 0.5           # blocks share one baseline only if the valley stays above this
+SPECIES_MAX_WIDTH = 4.0       # a species' main peak is at most 4 x Homo1's width ...
+SPECIES_MAX_WIDTH_SCANS = 20  # ... or 20 scans at half height: broad bumps are not species
+RUNS_DISAGREE = 0.5           # runs of one well differing by > 50 % of the mean are flagged
+SPECIES_BAND = 0.06           # Homo1 / early peak within +-0.06 of the plate's typical value
 STATIC_SHARE = 0.6            # static: at one ratio to the early peak in >= 60 % of wells ...
 STATIC_CHANGE_SHARE = 0.25    # ... or seen static between temperatures in >= 25 % of them
 CLIP_LEVEL = 65000            # raw counts at or above this are clipped (16-bit ADC)
-SPECIES_NAMES = ("Hom2", "Hom3", "Het4", "Het5")
+SPECIES_NAMES = ("Homo1", "Homo2", "Hetero1", "Hetero2")
 
 
 @dataclass
 class SpeciesPattern:
     """What a plate taught itself about where its species sit."""
     static: List[float] = field(default_factory=list)   # static peaks / early peak
-    band: Optional[tuple] = None                        # Hom2 / early peak range
-    r3: Optional[float] = None                          # Hom3 / Hom2
+    band: Optional[tuple] = None                        # Homo1 / early peak range
+    r3: Optional[float] = None                          # Homo2 / Homo1
     stutter: float = SPECIES_STUTTER                    # stutter offset (scans); block = 2x
     temperature: Optional[float] = None
 
@@ -704,7 +709,7 @@ def quant_trace(rt: RunTrace) -> np.ndarray:
 
 def species_trace(rt: RunTrace) -> np.ndarray:
     """The trace species are found and ranked on: the measuring trace with
-    the broad hump under the species taken off, so a bump riding on Hom2's
+    the broad hump under the species taken off, so a bump riding on Homo1's
     tail does not look like a block of its own."""
     cached = getattr(rt, "_ys", None)
     if cached is None:
@@ -714,7 +719,7 @@ def species_trace(rt: RunTrace) -> np.ndarray:
 
 
 def hump_baseline(y: np.ndarray, width: int = SPECIES_HUMP) -> np.ndarray:
-    """The broad hump under the species (unresolved material, Hom2's long
+    """The broad hump under the species (unresolved material, Homo1's long
     tail): a morphological opening as wide as several species blocks,
     smoothed, never above the trace.  Taken off before peaks are found and
     ranked; the blocks themselves are measured above a line joining their
@@ -743,7 +748,7 @@ def _lead(idx: Sequence[int], y: np.ndarray, c: int, span: int = 25) -> int:
 
 def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern] = None,
                  static_scans: Sequence[float] = ()) -> Optional[List[int]]:
-    """Main-peak scans of [Hom2, Hom3, Het4?, Het5?] in one trace, or None.
+    """Main-peak scans of [Homo1, Homo2, Hetero1?, Hetero2?] in one trace, or None.
     *static_scans*: peaks seen not to move between temperatures -- never a
     species."""
     pattern = pattern or SpeciesPattern()
@@ -784,24 +789,38 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
     d = h3 - h2
     lo4 = max(h3 + SPECIES_MIN_GAP, h2 + SPECIES_HET_FROM * d)
     het_end = h2 + SPECIES_HET_TO * d
-    c4 = [j for j in idx if lo4 <= j <= het_end and y[j] > SPECIES_HET_MIN * nz]
-    # a peak just after a comparable one is that one's stutter, not a het
-    c4 = [j for j in c4 if not any(8 <= j - k <= st + 6 and y[k] > 0.7 * y[j] for k in idx)]
-    c4 = [_lead(idx, y, j, span=10) for j in c4]           # a shoulder can lead
-    c4 = sorted(set(c4))
-    area = {j: _single_area(y, j, st) for j in c4}
-    near = st + 4                                           # a het's own stutter is not a het
+    c4 = sorted(j for j in idx if lo4 <= j <= het_end and y[j] > SPECIES_HET_MIN * nz)
+    # A heteroduplex often shows as a doublet (main + shoulder a few scans
+    # apart), so candidates are grouped into clusters first; a cluster is a
+    # stutter only when it starts about one stutter distance after another
+    # cluster *and* is clearly smaller -- the two heteroduplexes themselves
+    # can sit a stutter apart and are about as large as each other.
+    clusters: List[List[int]] = []
+    for j in c4:
+        if clusters and j - clusters[-1][-1] <= HET_CLUSTER_GAP:
+            clusters[-1].append(j)
+        else:
+            clusters.append([j])
+    top = {id(c): max(y[j] for j in c) for c in clusters}
+    keep = []
+    for c in clusters:
+        stutter_of_prev = any(st - 4 <= c[0] - p[-1] <= st + 6 and top[id(c)] < 0.6 * top[id(p)]
+                              for p in clusters if p is not c and p[-1] < c[0])
+        if not stutter_of_prev:
+            keep.append(c)
+    lead = {id(c): c[0] for c in keep}
+    area = {id(c): float(np.clip(y[max(0, c[0] - 6):c[-1] + 7], 0, None).sum()) for c in keep}
     best, best_s = [], 0.0
-    for i, j4 in enumerate(c4):
-        for j5 in c4[i + 1:]:
-            if j5 - j4 <= near or min(area[j4], area[j5]) <= 0:
+    for i, a in enumerate(keep):
+        for b in keep[i + 1:]:
+            if min(area[id(a)], area[id(b)]) <= 0:
                 continue
-            q = np.log(area[j5] / area[j4])
-            sc = (area[j4] + area[j5]) * np.exp(-0.5 * (q / SPECIES_HET_EQUAL) ** 2)
+            q = np.log(area[id(b)] / area[id(a)])
+            sc = (area[id(a)] + area[id(b)]) * np.exp(-0.5 * (q / SPECIES_HET_EQUAL) ** 2)
             if sc > best_s:
-                best, best_s = [j4, j5], sc
-    if not best and c4:                                     # one het (the other merged / lost)
-        best = [max(c4, key=lambda j: area[j])]
+                best, best_s = [lead[id(a)], lead[id(b)]], sc
+    if not best and keep:                                   # one het (the other merged / lost)
+        best = [lead[id(max(keep, key=lambda c: area[id(c)]))]]
     hets = best
     return [h2, h3] + sorted(hets)
 
@@ -866,11 +885,17 @@ def species_blocks(y: np.ndarray, mains: Sequence[int],
         v = int(a + np.argmin(y[a:n - 1])) if n - 1 > a else (c + n) // 2
         low = min(ys[max(0, c - 2):c + 3].max(), ys[max(0, n - 2):n + 3].max())
         bounds[k][1] = v
-        if ys[v] > 0.05 * low:                         # truly overlapping: one line
+        # Neighbours that truly merge (the valley stays above half the
+        # smaller peak) share one line with a drop at the valley; otherwise
+        # each keeps its own straight line split at the valley, as an
+        # operator drags them -- a shared line under well separated
+        # heteroduplexes counted the raised ground between them (Hetero1
+        # +65 % on 010823 A01).
+        if ys[v] > MERGED_VALLEY * low:
             joined[k] = True
             bounds[k + 1][0] = v + 1
         else:
-            bounds[k + 1][0] = max(v + 1, bounds[k + 1][0])
+            bounds[k + 1][0] = max(v + 1, bounds[k + 1][0]) if ys[v] <= 0.05 * low else v + 1
     out: List[tuple] = []
     k = 0
     while k < len(mains):
@@ -893,7 +918,7 @@ def species_bounds(y: np.ndarray, mains: Sequence[int],
 
 
 def stutter_of(ys: np.ndarray, h2: int, default: float = SPECIES_STUTTER) -> float:
-    """This well's stutter offset: the tallest peak 8-35 scans after Hom2
+    """This well's stutter offset: the tallest peak 8-35 scans after Homo1
     (hump-free trace), else the plate's value."""
     seg = ys[h2 + 8:h2 + 36]
     if len(seg) and seg.max() > 0.1 * ys[h2]:
@@ -930,7 +955,7 @@ def species_areas(y: np.ndarray, mains: Sequence[int],
 
 
 def species_minor_fraction(areas: Sequence[float]) -> Optional[float]:
-    """Mass action over [Hom2, Hom3, Het...]: p = (A_Hom3 + A_het / 2) / A_total."""
+    """Mass action over [Homo1, Homo2, Het...]: p = (A_Homo2 + A_het / 2) / A_total."""
     a = list(areas) + [0.0] * (4 - len(areas))
     total = sum(a)
     if total <= 0:
@@ -939,9 +964,56 @@ def species_minor_fraction(areas: Sequence[float]) -> Optional[float]:
     return min(p, 1.0 - p)
 
 
+def _fwhm(y: np.ndarray, c: int) -> int:
+    return _width(y, c, 0.5, -1) + _width(y, c, 0.5, 1)
+
+
+def present_species(ys: np.ndarray, mains: Sequence[int]):
+    """(names, scans) of the species that are really there.
+
+    Homo1 always; Homo2 and each heteroduplex only if its main peak stands
+    SPECIES_HET_MIN x the noise above the trace and is a peak, not a broad
+    bump (at most SPECIES_MAX_WIDTH x Homo1's width).  At a low minor
+    fraction Homo2 (~p^2) drops out first, leaving Homo1 and the two
+    heteroduplexes."""
+    nz = noise_level(ys)
+    w1 = max(_fwhm(ys, mains[0]), 2)
+    names, kept = [SPECIES_NAMES[0]], [mains[0]]
+    for name, c in zip(SPECIES_NAMES[1:], mains[1:]):
+        if ys[c] >= SPECIES_HET_MIN * nz and \
+                _fwhm(ys, c) <= max(SPECIES_MAX_WIDTH * w1, SPECIES_MAX_WIDTH_SCANS):
+            names.append(name)
+            kept.append(c)
+    return names, kept
+
+
+def minor_fraction_named(areas: Dict[str, float]) -> Optional[float]:
+    """The minor fraction from the species present:
+    p = (A_Homo2 + (A_Hetero1 + A_Hetero2) / 2) / A_total.
+
+    It holds whatever the share of heteroduplexes: a well with little
+    template is still amplifying when the program ends and forms few
+    heteroduplexes, so p rests on the homoduplexes, Homo2 / (Homo1 + Homo2);
+    at a low fraction Homo2 (~p^2) drops out and p rests on the
+    heteroduplexes.  Neither Homo2 nor a heteroduplex seen: None -- the
+    minor species is below detection and no number is forced out of noise.
+    One heteroduplex lost: its partner's area stands in for it (the two
+    crossed pairings are equal in theory)."""
+    hets = [areas[n] for n in ("Hetero1", "Hetero2") if n in areas]
+    h1, h2 = areas.get("Homo1", 0.0), areas.get("Homo2", 0.0)
+    if not hets and "Homo2" not in areas:
+        return None
+    het_each = float(np.mean(hets)) if hets else 0.0
+    total = h1 + h2 + 2 * het_each
+    if total <= 0:
+        return None
+    p = (h2 + het_each) / total
+    return min(p, 1.0 - p)
+
+
 def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
     """Teach the plate its pattern from one run per well (same temperature):
-    the static peaks, Hom2's band, and Hom3's ratio to Hom2."""
+    the static peaks, Homo1's band, and Homo2's ratio to Homo1."""
     traces = [(r, species_trace(r)) for r in runs if r.anchor]
     pat = SpeciesPattern(temperature=next((r.temperature for r in runs), None))
     if not traces:
@@ -980,7 +1052,7 @@ def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
                 break
             if all(abs(bins[k] - s) > 0.02 for s in pat.static):
                 pat.static.append(round(float(bins[k]), 4))
-    # Hom2 band and Hom3 ratio from the strongest third of the wells
+    # Homo1 band and Homo2 ratio from the strongest third of the wells
     first = []
     for r, y in traces:
         sp = find_species(y, r.anchor, SpeciesPattern(static=pat.static), _static_scans(r))
@@ -992,7 +1064,7 @@ def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
     strong = first[:max(5, len(first) // 3)]
     mid = float(np.median([h2 / r.anchor for _f, h2, r, _y in strong]))
     pat.band = (mid - SPECIES_BAND, mid + SPECIES_BAND)
-    # Hom3: the dominant block after Hom2's own cluster, in each strong well
+    # Homo2: the dominant block after Homo1's own cluster, in each strong well
     r3s, stut = [], []
     for _f, h2, r, y in strong:
         ip = _species_peaks(y, r.anchor, noise_level(y))
@@ -1002,7 +1074,7 @@ def learn_species_pattern(runs: Sequence[RunTrace]) -> SpeciesPattern:
         if cand:
             j = max(cand, key=lambda j: _foot(y, j))
             r3s.append(_lead(ip, y, j) / h2)
-        # the stutter: the tallest peak 8-35 scans after Hom2
+        # the stutter: the tallest peak 8-35 scans after Homo1
         after = [j for j in ip if h2 + 8 <= j <= h2 + 35 and y[j] > 0.1 * y[h2]]
         if after:
             stut.append(max(after, key=lambda j: y[j]) - h2)
@@ -1018,14 +1090,18 @@ def _static_scans(run: RunTrace) -> List[float]:
     return list(getattr(run, "_static_scans", ()) or ())
 
 
-def _label_species(run: RunTrace, mains: Sequence[int], stutter: float = SPECIES_STUTTER) -> None:
+def _label_species(run: RunTrace, mains: Sequence[int], stutter: float = SPECIES_STUTTER,
+                   names: Optional[Sequence[str]] = None) -> None:
     """Mark the species on the run's peaks for display: the main peak red and
-    labelled, the rest of its block as its satellites."""
+    labelled, the rest of its block as its satellites; the early peak is the
+    primer peak."""
     for p in run.peaks:
         if p.role in ("melting", "satellite"):
             p.role, p.parent = "other", None
+        if p.role == "anchor":
+            p.label = "primer peak"
     lo_w, hi_w = SPECIES_WINDOW[0], int(round(2 * stutter))
-    for name, c in zip(SPECIES_NAMES, mains):
+    for name, c in zip(names or SPECIES_NAMES, mains):
         near = [k for k, p in enumerate(run.peaks) if abs(p.raw_pos - c) <= 3]
         if near:
             k = min(near, key=lambda k: abs(run.peaks[k].raw_pos - c))
@@ -1041,7 +1117,7 @@ def _label_species(run: RunTrace, mains: Sequence[int], stutter: float = SPECIES
 
 
 def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
-    """Plate level: find Hom2 / Hom3 / heteroduplexes in every well as a
+    """Plate level: find Homo1 / Homo2 / heteroduplexes in every well as a
     pattern the plate teaches itself, and measure them as blocks (main peak
     + stutter).  Replaces the areas, fractions and minor fraction of each
     well not guided by a template.  Measured at the temperature where the
@@ -1064,9 +1140,12 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
                 and abs(x.temperature - t) <= SAME_TEMPERATURE]
     # the measuring temperature: where the most wells resolve all four species
     best_t, best_n, pattern = None, -1, SpeciesPattern()
+    pats: Dict[Optional[float], SpeciesPattern] = {}
     for t in (temps or [None]):
         firsts = [rr[0] for rr in (runs_at(r, t) for r in todo) if rr]
         pat = learn_species_pattern(firsts)
+        pat.temperature = t
+        pats[t] = pat
         n = sum(1 for x in firsts if x.anchor and len(
             find_species(species_trace(x), x.anchor, pat, _static_scans(x)) or []) == 4)
         if n >= best_n:                  # ties: the warmer run
@@ -1074,48 +1153,76 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
     t_meas = best_t
     pattern.temperature = t_meas
 
+    def temp_of(run):
+        if run.temperature is None or not pats:
+            return next(iter(pats), None)
+        return min(pats, key=lambda t: abs((t if t is not None else 0) - run.temperature))
+
     for res in todo:
-        reps = [x for x in runs_at(res, t_meas) if x.anchor]
+        # Measured at the temperature that resolves the species best
+        # (replicate runs there averaged): at the other temperature the
+        # heteroduplexes merge or shift onto other peaks, and averaging it in
+        # widened the spread over 96 replicate wells (robust CV 0.19 -> 0.34).
         found = []
-        for run in reps:
+        for run in [x for x in runs_at(res, t_meas) if x.anchor]:
+            pat = pats.get(temp_of(run), pattern)
             ys = species_trace(run)
-            mains = find_species(ys, run.anchor, pattern, _static_scans(run))
-            if mains:
-                st = stutter_of(ys, mains[0], pattern.stutter)
-                yq = quant_trace(run)
-                blocks = species_blocks(yq, mains, st)
-                run._species_overlay = {
-                    "channel": run.channel, "yq": yq, "hump": yq - ys,
-                    "blocks": [(n,) + tuple(bl) for n, bl in zip(SPECIES_NAMES, blocks)]}
-                found.append((run, mains, [block_area(yq, *bl) for bl in blocks]))
+            mains = find_species(ys, run.anchor, pat, _static_scans(run))
+            if not mains:
+                continue
+            names, kept = present_species(ys, mains)
+            st = stutter_of(ys, kept[0], pat.stutter)
+            yq = quant_trace(run)
+            blocks = species_blocks(yq, kept, st)
+            areas = [block_area(yq, *bl) for bl in blocks]
+            run._species_overlay = {
+                "channel": run.channel, "yq": yq, "hump": yq - ys,
+                "blocks": [(n,) + tuple(bl) for n, bl in zip(names, blocks)]}
+            found.append((run, kept, names, areas,
+                          minor_fraction_named(dict(zip(names, areas)))))
         res.flags = [f for f in res.flags if not f.startswith(("no melting", "satellite"))
                      and "satellite peak(s)" not in f]
         if not found:
-            res.flags.append("species: Hom2/Hom3 not found")
+            res.flags.append("species: Homo1/Homo2 not found")
             continue
-        run, mains, areas = found[0]
-        _label_species(run, mains, pattern.stutter)
-        for x, m, _a in found:
+        # the run shown: the one with the strongest Homo1
+        run, mains, names, areas, _p = max(found, key=lambda f: f[3][0])
+        _label_species(run, mains, pattern.stutter, names)
+        for x, m, n, _a, p in found:
             k = res.runs.index(x)
             if k < len(res.regimes):
-                res.regimes[k] = f"{len(m)} species"
+                res.regimes[k] = ", ".join(n) if p is not None else "below detection"
         res.flags = [f.replace("one temperature: peaks classified by shape", "one temperature")
                      for f in res.flags]
         res.best = res.runs.index(run)
         res.method = "species"
-        res.species = list(SPECIES_NAMES[:len(mains)])
+        res.species = list(names)
         res.areas = areas
         total = sum(areas)
         res.fractions = [a / total for a in areas] if total > 0 else []
         res.fraction_sd = []
-        res.minor_fraction = species_minor_fraction(areas)
-        same = [f for f in found if len(f[1]) == len(mains)]
-        if len(same) > 1:
-            fr = np.asarray([[a / sum(f[2]) for a in f[2]] for f in same])
-            res.fractions = [float(x) for x in fr.mean(axis=0)]
-            res.fraction_sd = [float(x) for x in fr.std(axis=0, ddof=1)]
-            mfs = [species_minor_fraction(f[2]) for f in same]
+        # A number only where every run sees the minor species: a fraction
+        # forced out of noise in one run is not reported (below detection).
+        # The runs are at different temperatures and do not resolve the
+        # heteroduplexes equally well: a well is measured from the runs that
+        # see its minor species clearly (see present_species).  Where none
+        # does, it is below detection -- no number forced out of noise.
+        n_runs = len([x for x in runs_at(res, t_meas) if x.anchor])
+        mfs = [f[4] for f in found if f[4] is not None]
+        if not mfs:
+            res.minor_fraction = None
+            res.flags.append("below detection: neither Homo2 nor a heteroduplex is seen clearly")
+        else:
+            if len(mfs) < n_runs:
+                res.flags.append(f"minor species seen in {len(mfs)} of {n_runs} runs")
             res.minor_fraction = float(np.mean(mfs))
+            if len(mfs) > 1:
+                res.fraction_sd = [float(np.std(mfs, ddof=1))]
+                spread = (max(mfs) - min(mfs)) / max(res.minor_fraction, 1e-9)
+                if spread > RUNS_DISAGREE:
+                    res.flags.append(f"runs disagree: minor fraction {', '.join(f'{p:.3f}' for p in mfs)}")
+        if "Homo2" not in names and res.minor_fraction is not None:
+            res.flags.append("Homo2 not seen (low minor fraction): fraction from the heteroduplexes")
         clipped = [x for x, *_ in found if getattr(x, "_desat", None)]
         if clipped:
             ch, gain = clipped[0]._desat
@@ -1168,7 +1275,7 @@ def analyse_plate(run_folders: Sequence, channel: Optional[int] = None,
                   species: bool = True) -> List[WellResult]:
     """Every well present in all the given runs of one plate.  With
     *species* (the default), wells not guided by a template are quantified
-    as Hom2 / Hom3 / heteroduplex blocks learnt over the plate."""
+    as Homo1 / Homo2 / heteroduplex blocks learnt over the plate."""
     run_folders = [Path(f) for f in run_folders]
     names = plate_wells(run_folders)
     if wells:

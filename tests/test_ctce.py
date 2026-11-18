@@ -141,7 +141,7 @@ def test_one_temperature_uses_shape_and_replicates(monkeypatch):
 
 # ------------------------------------------------------------ species model
 def _species_well(k, p=0.15, rng=None):
-    """A well with Hom2 / Hom3 / Het4 / Het5 (each with its stutter), a
+    """A well with Homo1 / Homo2 / Hetero1 / Hetero2 (each with its stutter), a
     static ssDNA peak and the early peak, on a well-specific migration scale."""
     rng = rng or np.random.default_rng(k)
     x = np.arange(N, dtype=float)
@@ -171,15 +171,18 @@ def test_species_are_found_as_a_plate_pattern_and_measured_as_blocks():
     assert any(abs(s - 1.226) < 0.012 for s in pattern.static)       # ssDNA learnt as static
     for res, (rt, pos, truth) in zip(results, wells):
         assert res.method == "species"
-        assert res.species == ["Hom2", "Hom3", "Het4", "Het5"]
+        assert res.species == ["Homo1", "Homo2", "Hetero1", "Hetero2"]
         marked = {p.label: p.raw_pos for p in rt.peaks if p.label}
         for name, c in zip(ctce.SPECIES_NAMES, pos):
             assert abs(marked[name] - c) <= 4                         # the main peak, not the stutter
         for a, t in zip(res.areas[:2], truth[:2]):
             assert abs(a - t) / t < 0.05                              # block = main + stutter
-        het, het_true = sum(res.areas[2:]), sum(truth[2:])          # the two overlap: their sum
-        assert abs(het - het_true) / het_true < 0.1
-        assert abs(res.minor_fraction - 0.15) < 0.01
+        # each heteroduplex is measured above its own line, split at the
+        # valley between them, as an operator drags them: what lies below the
+        # valley level is not counted, so the sum reads low when they overlap
+        het, het_true = sum(res.areas[2:]), sum(truth[2:])
+        assert 0.6 < het / het_true < 1.05
+        assert abs(res.minor_fraction - 0.15) < 0.03
 
 
 def test_a_clipped_peak_is_measured_in_another_channel():

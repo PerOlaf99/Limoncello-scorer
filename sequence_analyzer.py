@@ -230,7 +230,7 @@ BUTTON_HELP = {
     "close / back to viewer": "Close this tool and go back to the trace viewer.",
     "use my picked peaks as template": "Use the peaks you picked as the "
                                        "pattern for the other wells.",
-    "measure hom2 / hom3 / heteroduplex blocks (plate pattern)":
+    "measure homo1 / homo2 / heteroduplex blocks (plate pattern)":
         "Measure the CTCE species blocks in every well from the plate's pattern.",
     "add stutter to its parent peak": "Count stutter peaks into the area of "
                                       "the peak they belong to.",
@@ -7050,7 +7050,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         tpl_chk = ttk.Checkbutton(top, text="Use my picked peaks as template", variable=tpl_var)
         tpl_chk.grid(row=2, column=1, columnspan=3, sticky="w", padx=6, pady=(4, 0))
         species_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="Measure Hom2 / Hom3 / heteroduplex blocks (plate pattern)",
+        ttk.Checkbutton(top, text="Measure Homo1 / Homo2 / heteroduplex blocks (plate pattern)",
                         variable=species_var).grid(row=3, column=1, columnspan=4, sticky="w",
                                                    padx=6, pady=(4, 0))
         info = ttk.Label(top, foreground="#555")
@@ -7136,7 +7136,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 tree.insert("", tk.END, iid=r.well, values=[s[c] for c in cols])
             how = {"template": "your picked peaks", "shape": "peak shape (one temperature)",
                    "change": "the change between temperatures",
-                   "species": "the plate's Hom2/Hom3/het pattern (blocks with stutter)"}
+                   "species": "the plate's Homo1/Homo2/het pattern (blocks with stutter)"}
             methods = {r.method for r in results}
             status.config(text=f"{len(results)} wells — peaks of interest from "
                                + ", ".join(how.get(m, m) for m in sorted(methods))

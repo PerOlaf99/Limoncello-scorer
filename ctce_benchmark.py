@@ -59,7 +59,7 @@ def overlap(a0, a1, b0, b1) -> int:
 
 
 def minor_fraction(by_name: dict) -> float | None:
-    if "Hom2" not in by_name or "Hom3" not in by_name:
+    if "Homo1" not in by_name or "Homo2" not in by_name:
         return None
     return ctce.species_minor_fraction([by_name.get(n, 0.0) for n in ctce.SPECIES_NAMES
                                         if n in by_name])
@@ -120,10 +120,10 @@ def main(argv=None) -> int:
                     print(f"{'':<44} {well:<4} {'(no drag)':>11} {'':>10} | {name:<5} "
                           f"{lo:>5}-{hi:<5} {ctce.block_area(yq, lo, hi, a, b):>10.0f}")
             mdr, men = minor_fraction(drag_named), minor_fraction(eng_named)
-            h4, h5 = drag_named.get("Het4"), drag_named.get("Het5")
+            h4, h5 = drag_named.get("Hetero1"), drag_named.get("Hetero2")
             note = f"   minor fraction: drags {mdr:.4f}  engine {men:.4f}" if mdr and men else ""
             if h4 and h5:
-                note += f"   drag Het5/Het4 {h5 / h4:.2f}"
+                note += f"   drag Hetero2/Hetero1 {h5 / h4:.2f}"
             if note:
                 print(note)
             if mdr and men:
