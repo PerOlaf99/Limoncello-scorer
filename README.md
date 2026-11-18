@@ -602,6 +602,10 @@ python scorer.py ladders
 python scorer.py size well.rsd --ladder geneflo1000_rox \
     --ladder-channel 4 --sample-channel 2 --out sizes.csv --report sizes.html
 
+# a MegaBACE genotyping plate: ET400-R in ET-ROX on Ch1, FAM sample on Ch2
+python scorer.py size plate/*.rsd --ladder et400r \
+    --ladder-channel 1 --sample-channel 2 --out sizes.csv
+
 # a ladder that is not bundled: inline lengths or a JSON file
 python scorer.py size well.rsd --lengths 50,100,150,200,250,300
 python scorer.py size well.rsd --ladder my_ladder.json
@@ -616,24 +620,33 @@ How it works, and what to watch:
   FAM-sample / ROX-ladder layout, but the pair is a property of the **kit** —
   it cannot be guessed from the trace, so a run whose channels differ must say
   so. `python scorer.py ladders` and `size` print the channels used.
-- **Matching is order-based.** Ladder peaks and the kit's lengths are aligned
-  monotonically (a Needleman–Wunsch alignment), so a missing or extra band is
-  skipped instead of shifting every length. The fit is a shape-preserving PCHIP
-  curve through the matched anchors — the classic `scan -> bp` size-call curve.
+- **Matching is order-based.** Only peaks of ladder-band height are offered
+  (dye bleed from the sample channels sits far lower), and they are aligned to
+  the kit's lengths monotonically (a Needleman–Wunsch alignment), so a missing
+  or extra band is skipped instead of shifting every length. Several starting
+  pairings are tried and the alignment whose anchors lie best on a smooth
+  migration curve wins; it is then grown band by band from the anchors it got
+  clearly right, which steps over primer/dye peaks ahead of the ladder. The fit
+  is a shape-preserving PCHIP curve through the matched anchors — the classic
+  `scan -> bp` size-call curve.
 - **Accuracy is reported honestly.** A residual on the fit is always zero, so
   the tool reports the **leave-one-out RMS error** in bp (each anchor predicted
   from the others). Below four anchors it reports `n/a` rather than a falsely
-  precise zero, and `size` warns when too few ladder peaks matched (usually a
-  wrong ladder channel or a wrong length table).
+  precise zero. `size` warns when fewer than 60 % of the ladder's bands were
+  found, and when the bands fit poorly (RMS above 15 % of the spacing to the
+  nearest band; a correct ladder sits near 1 %) — usually a wrong ladder
+  channel, a wrong length table, or a well with no size standard (e.g. a
+  spectral-matrix well).
 - **Out-of-range peaks are flagged.** A peak whose scan falls outside the
   ladder's span is extrapolated linearly and written with `in_range = False`;
   those bp values are the least trustworthy.
 
 ### Ladders: built in, or your own
 
-Two ROX standards are bundled by name (`python scorer.py ladders` lists them):
-**GeneScan 500 ROX** and **Geneflo 1000 ROX** (400–1000 bp, 25 bp steps). Any
-other kit is a JSON file:
+Three standards are bundled by name (`python scorer.py ladders` lists them):
+**GeneScan 500 ROX**, **Geneflo 1000 ROX** (400–1000 bp, 25 bp steps) and
+**MegaBACE ET400-R** (`et400r`, 20 bands, 60–400 bp; see below). Any other kit
+is a JSON file:
 
 ```json
 {"name": "My FAM ladder", "dye": "FAM",
@@ -655,10 +668,24 @@ work but need more label. The validated genotyping dye sets are
 | Genotyping filter set 1 | FAM · TET · HEX | ET ROX |
 | Genotyping filter set 2 | FAM · HEX · NED/TAMRA (or JOE · TAMRA) | ET ROX |
 
-(`MegaBACE Instrument Administrator's Guide`, Appendix A.) **The exact
-fragment tables of ET400-R / ET550-R / ET900-R are printed on the kit inserts
-and are not bundled here** — a half-remembered ladder sizes every peak wrongly,
-which is worse than none. Enter them once from your insert:
+(`MegaBACE Instrument Administrator's Guide`, Appendix A.) In a MegaBACE
+genotyping `.rsd` the footer names the dye on each physical channel; on the
+Genetic Profiler 2.2 demo plates that is ET-ROX, FAM, NED, HEX on Ch1–Ch4, so
+the ladder is `--ladder-channel 1`.
+
+**ET400-R is bundled** (`--ladder et400r`): its 20 band sizes (60, 90, 100,
+120, 150, 160, 170, 190, 200, 220, 250, 270, 290, 300, 310, 330, 350, 360, 380,
+400 bp) are taken from GE's own Genetic Profiler 2.2 test-plate definition
+(`test_plate.tdb` on the GP 2.2 CD). On the two GP 2.2 demo plates every band
+is matched in every well that has a ladder, at about 0.15 bp leave-one-out, and
+the Genotyping Test Plate fragments (`CS_Ladder_info.tdb`: 13 fragments in
+FAM, TAMRA and HEX) are found in every sample well with a ladder (81–82 per
+dye) and come out within 0.15 bp of Genetic Profiler's sizes. `tests/test_sizing_gp22_demo.py` checks this when the demo
+data is present (`LIMONCELLO_GP22_DEMO`).
+
+**The fragment tables of ET550-R / ET900-R are printed on the kit inserts and
+are not bundled** — a half-remembered ladder sizes every peak wrongly, which is
+worse than none. Enter them once from your insert:
 
 ```bash
 python scorer.py size well.rsd --lengths <your insert's sizes> \

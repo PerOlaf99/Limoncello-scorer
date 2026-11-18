@@ -70,6 +70,15 @@ MIN_LADDER_ANCHORS = 3
 # ladder clears 100x comfortably; a channel holding nothing but noise does not.
 MIN_LADDER_SNR = 20.0
 
+# A correctly matched ladder predicts each band from the others to a small
+# fraction of the spacing to its nearest band (ET400-R on the GP 2.2 demo
+# plates: ~0.1-0.2 bp of 10 bp, about 1 %); a band matched to the wrong peak,
+# or a well with no size standard, is off by a good part of a spacing.  A
+# sparse ladder on a curved migration fits less tightly (synthetic GeneScan 500
+# with two merged bands: 13 %).  RMS over the bands, as a fraction of that
+# spacing:
+MAX_LADDER_RMS_SPACING = 0.15
+
 
 @dataclass(frozen=True)
 class Ladder:
@@ -153,6 +162,17 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "source": "ChimerX Geneflo 1000 Size Standard (cat. 3127), insert",
         "notes": "25 equally spaced bands, 400-1000 bp; 100-mers spiked.",
     },
+    "et400r": {
+        "name": "MegaBACE ET400-R",
+        "dye": "ET-ROX",
+        "lengths": [60, 90, 100, 120, 150, 160, 170, 190, 200, 220, 250, 270,
+                    290, 300, 310, 330, 350, 360, 380, 400],
+        "source": "GE MegaBACE Genetic Profiler 2.2, test_plate.tdb "
+                  "(Genotyping Test Plate definition)",
+        "notes": "20 fragments, 60-400 bp.  Checked on the GP 2.2 demo plates: "
+                 "every band matched, ~0.15 bp leave-one-out, test-plate "
+                 "fragments within 0.15 bp of GP's sizes.",
+    },
 }
 
 # MegaBACE 1000-compatible size standards.  These are the kits a MegaBACE user
@@ -162,8 +182,8 @@ BUILTIN_LADDERS: Dict[str, dict] = {
 # lengths from your own insert with ``--lengths`` or a ladder JSON file.
 # Resolution figures come from the MegaBACE Long Read Matrix specification.
 KNOWN_MEGABACE_STANDARDS = [
-    {"key": "et400r", "name": "MegaBACE ET400-R", "dye": "ET-ROX",
-     "range_bp": "~20-400", "resolution_bp": 0.3,
+    {"key": "et400r", "name": "MegaBACE ET400-R (bundled)", "dye": "ET-ROX",
+     "range_bp": "60-400", "resolution_bp": 0.3,
      "catalog": "GE/Cytiva MegaBACE ET400-R Size Standard"},
     {"key": "et550r", "name": "MegaBACE ET550-R", "dye": "ET-ROX",
      "range_bp": "~20-550", "resolution_bp": 0.5,
@@ -397,36 +417,213 @@ def _align_dp(scans: Sequence[int], lengths: Sequence[float],
     return pairs
 
 
+def _align_from(scans: List[int], lengths: List[float], coef: np.ndarray,
+                iterations: int, tf=np.log) -> List[Tuple[int, int]]:
+    """Iterate DP alignment against ``scan = polyval(coef, tf(bp))`` and a
+    refit of that model on the matches: linear to start, quadratic once five
+    or more anchors can carry the curvature (a straight line through 60-400
+    bp misplaces the end bands by more than a band spacing)."""
+    best: List[Tuple[int, int]] = []
+    tl = tf(np.asarray(lengths, float))
+    for _ in range(max(1, iterations)):
+        pairs = _align_dp(scans, lengths, np.polyval(coef, tl))
+        if len(pairs) < 2:
+            best = pairs or best
+            break
+        u = tl[[j for _, j in pairs]]
+        v = np.asarray([scans[i] for i, _ in pairs], float)
+        if len(pairs) >= 5:
+            coef = np.polyfit(u, v, 2)
+        else:
+            a, b = _log_linear_fit(u, v)
+            coef = np.array([b, a])
+        if pairs == best:
+            break
+        best = pairs
+    return best
+
+
+def _trusted(scans: List[int], lengths: List[float],
+             pairs: List[Tuple[int, int]], tol_bp: float = 1.0) -> List[Tuple[int, int]]:
+    """The anchors of *pairs* that the curve through all the others predicts
+    to within *tol_bp*."""
+    xs = [scans[i] for i, _ in pairs]
+    ys = [lengths[j] for _, j in pairs]
+    keep = []
+    for h, pr in enumerate(pairs):
+        try:
+            c = SizeCurve(xs[:h] + xs[h + 1:], ys[:h] + ys[h + 1:])
+        except ValueError:
+            continue
+        if abs(float(c.bp([xs[h]])[0]) - ys[h]) <= tol_bp:
+            keep.append(pr)
+    return keep
+
+
+def _extend(scans: List[int], lengths: List[float],
+            pairs: List[Tuple[int, int]], tol: float = 0.35) -> List[Tuple[int, int]]:
+    """Grow an alignment band by band from anchors already trusted.
+
+    Each unmatched band next to a matched one is predicted from its nearest
+    four anchors (a local quadratic in bp) and takes the closest unused peak
+    lying between its matched neighbours, if that peak is within *tol* of a
+    band spacing of the prediction.  Local fits follow the migration curve
+    where one global curve extrapolated over a hundred bases cannot."""
+    match = {j: i for i, j in pairs}
+    k = len(lengths)
+    bp = np.asarray(lengths, float)
+    changed = True
+    while changed:
+        changed = False
+        for j in range(k):
+            if j in match or not ((j - 1) in match or (j + 1) in match):
+                continue
+            near = sorted(match, key=lambda m: abs(bp[m] - bp[j]))[:4]
+            if len(near) < 2:
+                continue
+            u = bp[near]
+            v = np.asarray([scans[match[m]] for m in near], float)
+            coef = np.polyfit(u, v, 2 if len(near) >= 4 else 1)
+            pred = float(np.polyval(coef, bp[j]))
+            slope = float(np.polyval(np.polyder(coef), bp[j]))
+            if slope <= 0:
+                continue
+            nb = [bp[m] for m in (j - 1, j + 1) if 0 <= m < k]
+            spacing = slope * min(abs(bp[j] - x) for x in nb)
+            lo = max((scans[match[m]] for m in match if m < j), default=-np.inf)
+            hi = min((scans[match[m]] for m in match if m > j), default=np.inf)
+            used = set(match.values())
+            cand = [i for i, sc in enumerate(scans) if lo < sc < hi and i not in used]
+            if not cand:
+                continue
+            i = min(cand, key=lambda i: abs(scans[i] - pred))
+            if abs(scans[i] - pred) <= tol * spacing:
+                match[j] = i
+                changed = True
+    return sorted(((i, j) for j, i in match.items()), key=lambda p: p[1])
+
+
+def _alignment_score(scans: List[int], lengths: List[float],
+                     pairs: List[Tuple[int, int]]) -> float:
+    """Lower is better: the scatter (bp) of the anchors about a smooth
+    migration curve -- a quadratic in bp or in log(bp), whichever fits --
+    plus 1 bp per ladder band left unmatched.
+
+    A global smooth curve rather than the PCHIP leave-one-out: on a sparse
+    ladder PCHIP through a handful of points cannot follow the true shape,
+    and its end anchors can only be extrapolated, so it would favour
+    alignments that drop bands."""
+    if len(pairs) < 3:
+        return float("inf")
+    v = np.asarray([scans[i] for i, _ in pairs], float)
+    bp = np.asarray([lengths[j] for _, j in pairs], float)
+    scans_per_bp = max((v[-1] - v[0]) / max(bp[-1] - bp[0], 1e-9), 1e-9)
+    if scans_per_bp <= 1e-9 or np.any(np.diff(v) <= 0):
+        return float("inf")
+    best = float("inf")
+    for u in (np.log(bp), bp):
+        deg = 2 if len(pairs) >= 4 else 1
+        coef = np.polyfit(u, v, deg)
+        resid = v - np.polyval(coef, u)
+        best = min(best, float(np.sqrt(np.mean(resid ** 2))) / scans_per_bp)
+    return best + (len(lengths) - len(pairs))
+
+
 def align_peaks(scans: Sequence[int], lengths: Sequence[float],
-                iterations: int = 3) -> List[Tuple[int, float]]:
+                iterations: int = 5) -> List[Tuple[int, float]]:
     """Match ladder peak scans to the kit's known lengths.
 
-    Bootstraps a log-linear migration model from the endpoints (or a direct
-    pairing when the counts already agree), aligns with DP, refits the model on
-    the matches, and repeats -- the iteration is what absorbs the curvature a
-    single global fit cannot.  Returns ``(scan, length)`` anchors.
+    Bootstraps a migration model (scan linear in log(bp), or in bp), aligns
+    with DP, refits the model on the matches, and repeats -- the iteration is what absorbs the curvature
+    a single global fit cannot.  One stray peak at either end (a primer peak,
+    dye bleed from a sample channel) would wreck a bootstrap taken from the
+    outermost peaks, so several end pairings are tried -- each of the first and
+    last few peaks against each of the first and last few lengths -- and the
+    alignment whose anchors sit best on a smooth curve wins; a repair pass then
+    re-aligns from the anchors that alignment got clearly right.
+    Returns ``(scan, length)`` anchors.
     """
     scans = [int(s) for s in scans]
     lengths = [float(b) for b in lengths]
     if not scans or not lengths:
         return []
-    if len(scans) == len(lengths):
-        a, b = _log_linear_fit(np.log(lengths), np.asarray(scans, float))
-    else:
-        a, b = _log_linear_fit(np.log([lengths[0], lengths[-1]]),
-                               np.asarray([scans[0], scans[-1]], float))
-    best: List[Tuple[int, int]] = []
-    for _ in range(max(1, iterations)):
-        pred = a + b * np.log(lengths)
-        pairs = _align_dp(scans, lengths, pred)
-        if len(pairs) < 2:
-            best = pairs or best
+    n, k = len(scans), len(lengths)
+    # Migration is close to log(bp) for short fragments and close to linear
+    # in bp over a few hundred bases; seed with both and let the fit decide.
+    starts = []
+    for tf in (np.log, np.asarray):
+        tl = tf(np.asarray(lengths, float))
+        if n == k:
+            starts.append((tf, _log_linear_fit(tl, np.asarray(scans, float))))
+        ends = 3
+        for i0 in range(min(ends, n)):
+            for i1 in range(max(i0 + 1, n - ends), n):
+                for j0 in range(min(2, k)):
+                    for j1 in range(max(j0 + 1, k - 2), k):
+                        starts.append((tf, _log_linear_fit(
+                            np.asarray([tl[j0], tl[j1]]),
+                            np.asarray([scans[i0], scans[i1]], float))))
+    best, best_score, seen = [], float("inf"), set()
+
+    def consider(pairs):
+        nonlocal best, best_score
+        key = tuple(pairs)
+        if key in seen:
+            return
+        seen.add(key)
+        score = _alignment_score(scans, lengths, pairs)
+        if score < best_score or not best:
+            best, best_score = pairs, score
+
+    for tf, (a, b) in starts:
+        consider(_align_from(scans, lengths, np.array([b, a]), iterations, tf))
+    # Walks: assume four consecutive peaks at one end are the four end bands
+    # (allowing for a few stray peaks or a missing band there) and grow the
+    # alignment band by band from them.  A local prediction steps over dye
+    # bleed sitting between bands, which a global curve fit does not.
+    seed = 4
+    if n >= seed and k >= seed:
+        for s in range(min(3, n - seed + 1)):
+            for b in range(min(2, k - seed + 1)):
+                consider(_extend(scans, lengths,
+                                 [(n - 1 - s - t, k - 1 - b - t) for t in range(seed)][::-1]))
+        for s in range(min(max(3, n - k + 3), n - seed + 1)):
+            for b in range(min(2, k - seed + 1)):
+                consider(_extend(scans, lengths, [(s + t, b + t) for t in range(seed)]))
+    # Repair: junk ahead of the ladder (primer and dye peaks) can push every
+    # seed to pair the first bands one peak too early.  The anchors the rest
+    # of the curve predicts well are right; keep those and grow the alignment
+    # from them band by band (see _extend).
+    for _ in range(3):
+        good = _trusted(scans, lengths, best)
+        if len(good) < 5 or len(good) == len(best):
             break
-        u = np.log([lengths[j] for _, j in pairs])
-        v = np.asarray([scans[i] for i, _ in pairs], float)
-        a, b = _log_linear_fit(u, v)
-        best = pairs
+        before = best_score
+        consider(_extend(scans, lengths, good))
+        if best_score >= before:
+            break
     return [(scans[i], lengths[j]) for i, j in best]
+
+
+# Ladder bands of one kit come out at broadly similar heights; dye bleed from
+# the sample channels, primer remnants and noise sit well below them.  Peaks
+# under this fraction of a typical band (the median of the band-count tallest
+# peaks) are not offered to the aligner.
+LADDER_BAND_REL_HEIGHT = 0.3
+
+
+def ladder_candidates(peaks: Sequence[Peak], n_bands: int,
+                      rel: float = LADDER_BAND_REL_HEIGHT) -> List[Peak]:
+    """The detected peaks tall enough to be bands of an *n_bands* ladder."""
+    if not peaks or n_bands <= 0:
+        return list(peaks)
+    tall = sorted((p.height for p in peaks), reverse=True)[:n_bands]
+    ref = float(np.median(tall))
+    keep = [p for p in peaks if p.height >= rel * ref]
+    # a ladder fading badly at one end: loosen rather than drop real bands
+    if len(keep) < 0.6 * min(n_bands, len(peaks)):
+        keep = [p for p in peaks if p.height >= 0.5 * rel * ref]
+    return keep
 
 
 class SizeCurve:
@@ -504,6 +701,7 @@ def ladder_fit_quality(scans: Sequence[int],
         "rms_error_bp": None,
         "max_error_bp": None,
         "rms_error_rel": None,
+        "rms_error_spacing": None,
     }
     if n < 4:
         return quality
@@ -522,6 +720,13 @@ def ladder_fit_quality(scans: Sequence[int],
         quality["rms_error_bp"] = float(np.sqrt(np.mean(np.square(errors))))
         quality["max_error_bp"] = float(err.max())
         quality["rms_error_rel"] = float(np.sqrt(np.mean((err / denom) ** 2)))
+        # each error as a fraction of the distance to the nearest other band:
+        # a band matched to the wrong peak is off by a sizeable part of a
+        # spacing, whatever the ladder's density
+        ls = np.asarray(lengths, float)
+        gaps = np.abs(ls[:, None] - ls[None, :])
+        np.fill_diagonal(gaps, np.inf)
+        quality["rms_error_spacing"] = float(np.sqrt(np.mean((err / gaps.min(axis=1)) ** 2)))
     return quality
 
 
@@ -583,6 +788,7 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                             file=Path(str(getattr(doc, "path", ""))).name,
                             warnings=warnings)
 
+    ladder_peaks = ladder_candidates(ladder_peaks, len(ladder.lengths))
     anchors = align_peaks([p.scan for p in ladder_peaks], ladder.lengths)
     quality = ladder_fit_quality([s for s, _ in anchors],
                                  [b for _, b in anchors])
@@ -593,11 +799,19 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
             f"table ({len(ladder_peaks)} peak(s) found); results are not "
             "trustworthy")
     if ladder_peaks and anchors:
-        matched = len(anchors) / float(len(ladder_peaks))
-        if matched < 0.6:
+        # bands of the table found, not peaks of the channel matched: primer
+        # and dye peaks ahead of the ladder are expected and harmless
+        found = len(anchors) / float(len(ladder.lengths))
+        if found < 0.6:
             warnings.append(
-                f"only {matched:.0%} of ladder peaks matched the table; check "
-                "the ladder channel and the fragment lengths")
+                f"only {len(anchors)} of the {len(ladder.lengths)} ladder bands "
+                "were found; check the ladder channel and the fragment lengths")
+    rel = quality.get("rms_error_spacing")
+    if rel is not None and rel > MAX_LADDER_RMS_SPACING:
+        warnings.append(
+            f"poor ladder fit: each band is predicted from the others to only "
+            f"{quality['rms_error_bp']:.1f} bp RMS ({rel:.0%} of a band spacing); "
+            "the lengths are not reliable -- is there a ladder in this well?")
 
     curve = None
     if len(anchors) >= 2:
