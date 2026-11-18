@@ -637,9 +637,11 @@ SPECIES_HET_TO = 4.0
 SPECIES_HET_EQUAL = 0.7       # the two hets' areas should agree (log-ratio sigma ~x2)
 SPECIES_HET_MIN = 25          # heteroduplex main peak >= 25 x the noise
 HET_CLUSTER_GAP = 12          # heteroduplex peaks this close (scans) are one doublet
+HET_PAIR_SPAN = 18            # ... but a run of 3+ such peaks this long is both heteroduplexes
 MERGED_VALLEY = 0.5           # blocks share one baseline only if the valley stays above this
 SPECIES_MAX_WIDTH = 4.0       # a species' main peak is at most 4 x Homo1's width ...
 SPECIES_MAX_WIDTH_SCANS = 20  # ... or 20 scans at half height: broad bumps are not species
+MERGED_HET_WIDTH = 1.0        # a lone heteroduplex block at least Homo1's width is both, merged
 RUNS_DISAGREE = 0.5           # runs of one well differing by > 50 % of the mean are flagged
 SPECIES_BAND = 0.06           # Homo1 / early peak within +-0.06 of the plate's typical value
 STATIC_SHARE = 0.6            # static: at one ratio to the early peak in >= 60 % of wells ...
@@ -801,6 +803,17 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
             clusters[-1].append(j)
         else:
             clusters.append([j])
+    # two doublets spaced like their own peaks merge into one long cluster:
+    # a cluster of three or more peaks over HET_PAIR_SPAN scans is both
+    # heteroduplexes -- split it in the middle
+    split = []
+    for c in clusters:
+        if len(c) >= 3 and c[-1] - c[0] >= HET_PAIR_SPAN:
+            half = (len(c) + 1) // 2
+            split += [c[:half], c[half:]]
+        else:
+            split.append(c)
+    clusters = split
     top = {id(c): max(y[j] for j in c) for c in clusters}
     keep = []
     for c in clusters:
@@ -846,10 +859,24 @@ def _back(ys: np.ndarray, c: int, stutter: float) -> int:
     cap = min(len(ys) - 2, c + int(round(2 * stutter)))
     sm = np.convolve(ys, np.ones(3) / 3, mode="same")
     lo, hi = c + 8, min(len(sm) - 2, c + int(round(stutter)) + 6)
-    tops = [i for i in range(lo, hi + 1)
+    # the stutter is the tallest peak near the stutter offset, not the first
+    # bump after the main peak: a shoulder 7-8 scans on ended the block in
+    # the valley before an equally tall Taq +A cluster (Homo1 at half size)
+    near = max(lo, c + int(round(stutter)) - 6)
+    tops = [i for i in range(near, hi + 1)
             if sm[i] >= sm[i - 1] and sm[i] >= sm[i + 1] and sm[i] > 0.1 * top]
-    k = tops[0] if tops else (lo + int(np.argmax(sm[lo:hi + 1])) if hi >= lo else c)
-    while k < cap and sm[k] >= 0.01 * top and sm[k + 1] <= sm[k]:
+    if tops:
+        k = max(tops, key=lambda i: sm[i])
+    else:
+        tops = [i for i in range(lo, hi + 1)
+                if sm[i] >= sm[i - 1] and sm[i] >= sm[i + 1] and sm[i] > 0.1 * top]
+        k = tops[0] if tops else (lo + int(np.argmax(sm[lo:hi + 1])) if hi >= lo else c)
+    # down the stutter's tail -- through its own sub-peaks (a doublet), up
+    # to a real valley (below 20 % of the stutter peak) or flat ground
+    ktop = sm[k]
+    while k < cap and sm[k] >= 0.01 * top:
+        if sm[k + 1] > sm[k] and sm[k] < 0.2 * ktop:
+            break
         k += 1
     return k
 
@@ -987,6 +1014,21 @@ def present_species(ys: np.ndarray, mains: Sequence[int]):
     return names, kept
 
 
+def merged_heteroduplex(names: Sequence[str], blocks: Sequence[tuple]) -> List[str]:
+    """Rename a lone heteroduplex block "Hetero1+2" when it is the two
+    heteroduplexes merged: wider than Homo1's own block (main + stutter).
+    A merged block holds both and counts once; a lone, narrow one lost its
+    partner, whose area it then stands in for (minor_fraction_named)."""
+    names = list(names)
+    hets = [i for i, n in enumerate(names) if n.startswith("Hetero")]
+    if len(hets) == 1 and blocks:
+        w1 = blocks[0][1] - blocks[0][0]
+        i = hets[0]
+        if blocks[i][1] - blocks[i][0] >= MERGED_HET_WIDTH * w1:
+            names[i] = "Hetero1+2"
+    return names
+
+
 def minor_fraction_named(areas: Dict[str, float]) -> Optional[float]:
     """The minor fraction from the species present:
     p = (A_Homo2 + (A_Hetero1 + A_Hetero2) / 2) / A_total.
@@ -1001,6 +1043,13 @@ def minor_fraction_named(areas: Dict[str, float]) -> Optional[float]:
     crossed pairings are equal in theory)."""
     hets = [areas[n] for n in ("Hetero1", "Hetero2") if n in areas]
     h1, h2 = areas.get("Homo1", 0.0), areas.get("Homo2", 0.0)
+    if "Hetero1+2" in areas:                    # merged: both in one block
+        het_sum = areas["Hetero1+2"]
+        total = h1 + h2 + het_sum
+        if total <= 0:
+            return None
+        p = (h2 + het_sum / 2.0) / total
+        return min(p, 1.0 - p)
     if not hets and "Homo2" not in areas:
         return None
     het_each = float(np.mean(hets)) if hets else 0.0
@@ -1175,6 +1224,7 @@ def quantify_species(results: Sequence[WellResult]) -> Optional[SpeciesPattern]:
             yq = quant_trace(run)
             blocks = species_blocks(yq, kept, st)
             areas = [block_area(yq, *bl) for bl in blocks]
+            names = merged_heteroduplex(names, blocks)
             run._species_overlay = {
                 "channel": run.channel, "yq": yq, "hump": yq - ys,
                 "blocks": [(n,) + tuple(bl) for n, bl in zip(names, blocks)]}
