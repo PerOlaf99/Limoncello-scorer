@@ -896,6 +896,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.file_list.bind("<Page_Up>", self._page_key)
         # Help and README promise Delete removes the selected samples.
         self.file_list.bind("<Delete>", lambda e: self.remove_samples())
+        # Ctrl+A selects every listed sample -- in the list, and anywhere in
+        # the window except where Ctrl+A already means "all text"
+        self.file_list.bind("<Control-a>", self.select_all_samples)
+        self.file_list.bind("<Control-A>", self.select_all_samples)
+        self.bind_all("<Control-a>", self._ctrl_a_anywhere, add="+")
+        self.bind_all("<Control-A>", self._ctrl_a_anywhere, add="+")
 
         self.bind("<Down>", self._page_key_root)
         self.bind("<Up>", self._page_key_root)
@@ -1752,6 +1758,36 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self._geno_runs_shown = runs
             self._plate_files_cache = {}        # folders changed: re-scan
             self._sync_geno_table()
+
+    def select_all_samples(self, _evt=None):
+        """Select every sample in the list (Ctrl+A)."""
+        n = self.file_list.size()
+        if n:
+            self.file_list.selection_set(0, tk.END)
+            self.file_list.activate(0)
+            self.on_file_select()
+            self.status_var.set(f"Selected all {len(self.selected)} sample(s)")
+        return "break"
+
+    def _ctrl_a_anywhere(self, event):
+        """Ctrl+A outside the sample list: select all samples, unless the
+        focus is a text field (there Ctrl+A keeps its own meaning)."""
+        w = event.widget
+        if w is self.file_list:
+            return None                    # its own binding has handled it
+        try:
+            cls = w.winfo_class()
+        except Exception:                                  # noqa: BLE001
+            return None
+        if cls in ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox",
+                   "TCombobox", "Listbox"):
+            return None
+        try:
+            if w.winfo_toplevel() is not self:
+                return None                # a dialog, not the main window
+        except Exception:                                  # noqa: BLE001
+            return None
+        return self.select_all_samples()
 
     def on_file_select(self, _evt=None):
         idxs = self.file_list.curselection()

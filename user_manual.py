@@ -317,6 +317,7 @@ Fragment analysis ▸ Size selected wells… sizes the sample's peaks in bp agai
     ("Keyboard and mouse", """\
 ```
   ↓  ↑  ←  →  PgDn  PgUp   page through wells (whole wells with Overlay runs)
+  Ctrl+A                   select every sample in the list (not in text boxes)
   Space                    start / stop the auto-tour (in the Samples list)
   Delete                   hide the selected files from the list
   Home                     reset the view
