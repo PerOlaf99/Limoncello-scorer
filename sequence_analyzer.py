@@ -170,47 +170,107 @@ SORT_CODES = {label: code for code, label in SORT_OPTIONS}
 SORT_LABELS = {code: label for code, label in SORT_OPTIONS}
 
 
-class ToolTip:
-    """Small floating label that appears after hovering a widget.
-    `getter` is called on hover and returns the text to show (or '')."""
+from tooltips import ToolTip, install_tooltips  # noqa: E402
 
-    def __init__(self, widget, getter):
-        self.widget = widget
-        self.getter = getter
-        self.tip = None
-        self._after = None
-        widget.bind("<Enter>", lambda e: self._schedule(), add="+")
-        widget.bind("<Leave>", lambda e: self._cancel(), add="+")
-        widget.bind("<Motion>", lambda e: self._schedule(), add="+")
+# Hover help for every button-like control, keyed by its label (see
+# tooltips.label_key: symbols and spacing dropped, lower case).  A new button
+# needs a line here; tests/test_tooltips.py lists any that have none.
+BUTTON_HELP = {
+    # left panel
+    "add…": "Add a data folder: every run folder found under it is listed.",
+    "remove run": "Remove the run folder selected above from the list "
+                  "(nothing is deleted on disk).",
+    "hide file(s)": "Hide the selected wells from the list (Delete key); "
+                    "nothing is deleted on disk.",
+    "tour": "Auto-tour: step through the wells by themselves, a page of graphs "
+            "at a time, at the interval set beside it (Space starts/stops it "
+            "in the samples list).",
+    "stop": "Stop the auto-tour (Space in the samples list).",
+    # channel bar
+    "µa": "Show the instrument current (µA) as a dotted line on its own axis.",
+    "time (min)": "Show minutes instead of scan numbers along the x axis.",
+    "plate map": "A 96-well map of the run: click a well to show it.",
+    "align": "Align graphs to each other: to the top graph, on the internal "
+             "standard, or reset.",
+    # view bar
+    "−": "Zoom out along the scans (mouse wheel down on the graphs).",
+    "+": "Zoom in along the scans (mouse wheel up on the graphs).",
+    "go": "Zoom to the scan range typed in the Scans boxes (or press Enter).",
+    "fit y to view": "Scale each graph's height to the peaks inside the "
+                     "visible scan range.",
+    "overlay runs": "Draw every run of the same well in one graph (e.g. the "
+                    "temperatures of a CTCE gradient).",
+    "reset view": "Back to the whole trace, unzoomed (Home key, double-click "
+                  "or right-click on a graph).",
+    # picking banner
+    "exit (esc)": "Leave peak picking / area measuring and go back to viewing.",
+    "clear shown wells": "Remove the picks or measurements of the wells shown now.",
+    "mark is in shown wells": "Mark the internal standard peaks in every well "
+                              "shown, from the marked pattern.",
+    # dialogs and tool windows
+    "apply": "Apply these settings.",
+    "apply + redraw": "Apply these settings and redraw the graphs.",
+    "basecall selected with these": "Base-call the selected wells with these settings.",
+    "analyse": "Run the analysis on the selected wells.",
+    "show well": "Show this well in the main window.",
+    "show sequence": "Show the called sequence of this well.",
+    "save table…": "Save the table shown (CSV / JSON / Excel).",
+    "save": "Save.",
+    "cancel": "Close without changing anything.",
+    "close": "Close this window.",
+    "discard": "Throw these changes away.",
+    "undo last": "Undo the last pick or measurement (Ctrl+Z).",
+    "clear": "Clear the picks of this well.",
+    "clear all": "Clear every pick.",
+    "close / back to viewer": "Close this tool and go back to the trace viewer.",
+    "use my picked peaks as template": "Use the peaks you picked as the "
+                                       "pattern for the other wells.",
+    "measure hom2 / hom3 / heteroduplex blocks (plate pattern)":
+        "Measure the CTCE species blocks in every well from the plate's pattern.",
+    "add stutter to its parent peak": "Count stutter peaks into the area of "
+                                      "the peak they belong to.",
+    "add +a (a-addition) peak": "Count the +A (non-templated A) peak into its "
+                                "parent's area.",
+    "mark picked peaks as standard": "Mark the picked peaks as the internal standard.",
+    "mark start/end from the 2nd derivative": "Set each peak's start and end "
+                                              "where its curvature changes.",
+    # base-calling settings
+    "enable baseline": "Subtract a running baseline before calling bases "
+                       "(window set below).",
+    "spectral separation": "Separate the four dyes with the colour matrix "
+                           "before calling (removes dye overlap).",
+    "position-adaptive matrix": "Let the dye matrix change along the run "
+                                "instead of one matrix for the whole trace.",
+    "mobility correction": "Correct the small run-speed differences between "
+                           "the four dyes so bases line up.",
+    "gaussian reconstruction": "Deconvolve overlapping bands into Gaussian "
+                               "peaks before calling (segment size and noise "
+                               "regularisation below).",
+    # ladder / sizing dialogs
+    "size": "Size the selected wells with these settings.",
+    "manage ladders…": "Open the ladder library: add, import, edit or export ladders.",
+    "new…": "Make a new ladder: type or paste its band lengths.",
+    "import…": "Import a ladder from a file: ladder JSON, a list/CSV of "
+               "lengths, or a Genetic Profiler .tdb table.",
+    "edit…": "Edit your ladder (bundled ones are read-only: duplicate them).",
+    "duplicate": "Make an editable copy of the selected ladder.",
+    "delete": "Delete the selected ladder from your library.",
+    "export…": "Save the selected ladder as a JSON file to share.",
+    "choose…": "Pick the display colour for this ladder's dye.",
+}
+BUTTON_PATTERNS = [
+    (r"^ch\d+ ", "Show or hide this detector channel (the dye or base it "
+                 "carries is named after the number)."),
+    (r"^ch\d+$", "Show or hide this detector channel."),
+]
 
-    def _schedule(self):
-        # Never stack tips: drop any visible one and re-arm.
-        self._cancel()
-        self._after = self.widget.after(350, self._show)
 
-    def _cancel(self):
-        if self._after:
-            self.widget.after_cancel(self._after)
-            self._after = None
-        if self.tip is not None:
-            self.tip.destroy()
-            self.tip = None
-
-    def _show(self):
-        self._after = None
-        text = self.getter()
-        if not text:
-            return
-        if self.tip is not None:
-            self.tip.destroy()
-            self.tip = None
-        self.tip = tk.Toplevel(self.widget, bg="#FFFFE1")
-        self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{self.widget.winfo_pointerx() + 14}"
-                             f"+{self.widget.winfo_pointery() + 14}")
-        tk.Label(self.tip, text=text, bg="#FFFFE1", fg="#222222",
-                 justify=tk.LEFT, font=("DejaVu Sans", 9),
-                 padx=4, pady=2).pack()
+def _install_help(win):
+    """Hover help on every control of *win* (main window or a dialog)."""
+    try:
+        install_tooltips(win, BUTTON_HELP, BUTTON_PATTERNS)
+    except Exception:                                      # noqa: BLE001
+        pass
 
 
 class LimoncelloAnalyzerApp(tk.Tk):
@@ -398,6 +458,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._style()
         self._build_menu()
         self._build_layout()
+        _install_help(self)
+        # dialogs and tool windows get the same hover help when they appear
+        self.bind_class("Toplevel", "<Map>", lambda e: _install_help(e.widget),
+                        add="+")
         roots = list(self.folders)
         self.folders = []
         for root in roots:
@@ -809,6 +873,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 activebackground="#D6DCE3", activeforeground="#0F3A6E",
                 bd=0, padx=0, pady=2, takefocus=0, cursor="hand2")
             mb.pack(side=tk.LEFT, padx=2, pady=1)
+            mb._has_tooltip = True          # menu titles: no hover note
             # Stock Menubutton posting misbehaves under this WM, and a menu
             # opened on press is closed again by the same click's release.
             # Open on release instead, with the default handling suppressed.
@@ -915,14 +980,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         ttk.Button(rrow, text="– Hide file(s)",
                    command=self.remove_samples).pack(side=tk.LEFT)
 
-        frow = ttk.Frame(left)
-        frow.pack(fill=tk.X, padx=4, pady=(0, 2))
-        ttk.Label(frow, text="Tour (ms)").pack(side=tk.LEFT)
-        tk.Spinbox(
-            frow, from_=500, to=20000, increment=500, textvariable=self.cycle_ms,
-            width=5, highlightthickness=0
-        ).pack(side=tk.LEFT, padx=2)
-        ttk.Button(frow, text="▶", width=3, command=self.toggle_tour).pack(side=tk.LEFT, padx=2)
 
         # ----- Center: plots -----
         center = ttk.Frame(body)
@@ -938,7 +995,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             # physical channel -- so widget i IS Ch i+1 and the widgets are
             # already in order.  Only the label needs the dye order.
             cb = tk.Checkbutton(
-                chan_bar, text=f"  Ch{i + 1} {CHANNEL_ORDER[i]}  ", variable=self.chan_show[i],
+                chan_bar, text=f" Ch{i + 1} {CHANNEL_ORDER[i]} ", variable=self.chan_show[i],
                 command=self._chan_changed, bg="#F2F4F7",
                 fg="#000000", activebackground="#F2F4F7",
                 selectcolor="white")
@@ -948,7 +1005,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._extra_cbs = []
         for i in range(len(CHANNEL_ORDER), MAX_CHANNELS):
             self._extra_cbs.append(tk.Checkbutton(
-                chan_bar, text=f"  Ch{i + 1}  ", variable=self.chan_show[i],
+                chan_bar, text=f" Ch{i + 1} ", variable=self.chan_show[i],
                 command=self._chan_changed, bg="#F2F4F7", fg="#000000",
                 activebackground="#F2F4F7", selectcolor="white"))
         self._extra_shown = 0
@@ -957,23 +1014,23 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.base_order_var.trace_add("write", self._on_base_order_changed)
         self._refresh_channel_buttons()
         self._cur_btn = tk.Checkbutton(
-            chan_bar, text="  µA  ", variable=self.show_current,
+            chan_bar, text=" µA ", variable=self.show_current,
             bg="#DFF6DC", activebackground="#DFF6DC", fg="#14532D",
             selectcolor="white",
             command=lambda: (self._sync_current_btn(), self.redraw()))
         self._cur_btn.pack(side=tk.LEFT, padx=(8, 2))
         self._sync_current_btn()
         self._time_btn = tk.Checkbutton(
-            chan_bar, text="  Time (min)  ", variable=self.x_time,
+            chan_bar, text=" Time (min) ", variable=self.x_time,
             bg="#F2F4F7", activebackground="#F2F4F7", selectcolor="white",
             command=self.redraw)
         self._time_btn.pack(side=tk.LEFT, padx=(8, 2))
         self.theme_cb = ttk.Combobox(
-            chan_bar, textvariable=self.theme, width=24, state="readonly",
+            chan_bar, textvariable=self.theme, width=12, state="readonly",
             values=list(TRACE_THEMES))
-        self.theme_cb.pack(side=tk.RIGHT, padx=(4, 8))
+        self.theme_cb.pack(side=tk.RIGHT, padx=(2, 4))
         self.theme_cb.bind("<<ComboboxSelected>>", lambda e: self.redraw())
-        ttk.Label(chan_bar, text="Trace colors:").pack(side=tk.RIGHT, pady=4)
+        ttk.Label(chan_bar, text="Colors:").pack(side=tk.RIGHT, pady=4)
         self._chan_bar = chan_bar
 
         self._build_view_bar(center)
@@ -1104,10 +1161,21 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # the view bar is full at ordinary window widths.
         top = getattr(self, "_chan_bar", bar)
         ttk.Button(top, text="▦ Plate map",
-                   command=self.show_plate_map).pack(side=tk.RIGHT, padx=(4, 10))
-        amb = ttk.Menubutton(top, text="⇄ Align")
+                   command=self.show_plate_map).pack(side=tk.RIGHT, padx=(2, 6))
+        amb = ttk.Menubutton(top, text="Align")
         amb["menu"] = self._alignment_menu(amb)
-        amb.pack(side=tk.RIGHT, padx=4)
+        amb.pack(side=tk.RIGHT, padx=2)
+        # the auto-tour: next to the other view tools, not tucked under the
+        # samples list where nobody found it
+        tour_ms = tk.Spinbox(top, from_=500, to=20000, increment=500,
+                             textvariable=self.cycle_ms, width=4,
+                             highlightthickness=0)
+        tour_ms.pack(side=tk.RIGHT, padx=(0, 4))
+        self._tour_btn = ttk.Button(top, text="▶ Tour",
+                                    command=self.toggle_tour)
+        self._tour_btn.pack(side=tk.RIGHT, padx=(4, 2))
+        ToolTip(tour_ms, lambda: "Auto-tour interval: milliseconds each page "
+                                 "of graphs stays on screen.")
         ToolTip(spin, lambda: f"Graphs stacked at once (1–{MAX_GRAPHS})")
         ToolTip(ycb, lambda: "Shared: one height scale for all graphs (compare wells).\n"
                              "Each graph: every graph scaled to its own peaks.")
@@ -1917,6 +1985,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
     def toggle_tour(self):
         self.touring = not self.touring
+        btn = getattr(self, "_tour_btn", None)
+        if btn is not None:
+            btn.config(text="■ Stop" if self.touring else "▶ Tour")
         if self.touring:
             self.cycle_pos = 0
             self._tour_tick()
@@ -5020,7 +5091,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         label.  Free of Tk so it can be tested.
         """
         order = (order or self._display_order() or "ACTG").upper()[:4]
-        return [(ci, f"  Ch{ci + 1} {order[ci]}  ")
+        return [(ci, f" Ch{ci + 1} {order[ci]} ")
                 for ci in range(min(len(order), len(CHANNEL_ORDER)))]
 
     def _refresh_channel_labels(self):

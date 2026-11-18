@@ -26,14 +26,14 @@ Limoncello shows capillary-electrophoresis traces (.rsd, .scf, ABI .ab1/.fsa —
 
 The window:
 ```
- ┌ menus: File  View  Base calling  Manual genotyping  Auto genotyping  Comments  Help
- ├ channel bar: Ch1..Ch4 · µA · Time (min) · Trace colors
+ ┌ menus: File  View  Base calling  Manual genotyping  Auto genotyping  Fragment analysis  Comments  Help
+ ├ channel bar: Ch1..Ch4 (Ch5 on five-dye runs) · µA · Time (min) · ▶ Tour + interval · Align · Plate map · Colors
  ├ view bar: Graphs · wells shown · Zoom · Scans · Y scale · Fit Y · Overlay · Align · Plate · Reset
  ├ (while picking) a coloured banner: what the mouse does now · Exit
  │ Data folders │
  │ Samples list │     graphs (one per well, stacked)
  │ Sort, Jump   │
- │ Tour ▶       ├──── drag this divider ────
+ │              ├──── drag this divider ────
  │              │     table: genotypes / picked peaks / called sequence
  └ status line
 ```
@@ -94,7 +94,8 @@ Samples / files
 ```
 • **Jump/well** filters the list by well, file or run name as you type.
 • – Hide file(s) or the Delete key hides the selected files from the list.
-• ▶ (bottom left) starts the auto-tour, which pages through the list every Tour (ms) milliseconds; Space starts and stops it. View ▸ Tour interval sets common speeds."""),
+• ▶ Tour (top bar, next to Align) starts the auto-tour, which pages through the list every so many milliseconds (the box beside it); the button turns into ■ Stop while it runs, and Space starts and stops it too. View ▸ Tour interval sets common speeds.
+• Rest the pointer on any button for a moment to see what it does."""),
 
     ("Moving around the graphs", """\
 On the graphs
