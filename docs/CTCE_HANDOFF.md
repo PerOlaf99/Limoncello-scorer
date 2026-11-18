@@ -1,61 +1,79 @@
-# CTCE handoff (2026-11-18)
+# CTCE handoff (2026-11-18, evening)
 
-State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`),
-for continuing on another machine. Branch: `ctce-baseline-hets`, not merged to main.
+State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`)
+for continuing at home. Everything is on `main`.
 
-## What changed on this branch
-- **Baseline.** A broad hump (500–2000 counts) sits under the species, mostly Hom2's long tail.
-  - `hump_baseline()` removes it (a morphological opening 101 scans wide) before peaks are found and ranked (`species_trace()`).
-  - Blocks are measured on `quant_trace()` (flat floor plus the clipped-peak rebuild), above a **straight line between the block ends**. This is what the GUI's area drag does.
-- **Blocks** (`species_blocks()`):
-  - A block starts at the foot of the main peak's front (`_front`).
-  - It ends after its *first* stutter peak, at the valley or where the trace goes flat (`_back`).
-  - Neighbours that truly overlap share one line, split by a drop at the valley.
-  - The stutter offset is measured per well (`stutter_of`): +24 scans on 040723, about +15 on 010823.
-- **Hom3 position ratio** (r3) = median of the dominant peak after Hom2's cluster in the strong wells.
-- **Heteroduplexes** are picked as the most *equal-area* pair. They must lie 1.5–4 Hom2→Hom3 distances after Hom2; on #19_20 they sit at about 2.0 and 2.3. A peak just after a comparable one is that peak's stutter, never a het. One het is used only when no pair exists.
-- **GUI:**
-  - "Clear shown wells" button in the picking/area bar.
-  - After the CTCE analysis, a shown well draws the hump (blue band, "not counted") and each block's baseline (red line, block shaded). This works in the normal view and in area-drag mode.
+## Where it stands
+The engine matches the hand drags on 16 marked runs: on average the engine
+minus drags difference is +0.000, and the mean absolute difference is 0.012.
+The marked runs cover:
+- **Plates:** 010823 and 021123 #19_20.
+- **Wells:** A01, A02, A03, A05 and A06.
+- **Runs:** both runs of each plate.
 
-## Reference measurements (user's drags, 040723_mt_nucl_#19_20_dil_curveRun01, A01, Ch2)
-| species | drag | area | engine block | engine area |
-|---|---|---|---|---|
-| Hom2 | 2520–2565 | 644 672 (clipped in the trace) | 2518–2569 | 686 792 (de-clipped) |
-| Hom3 | 2665–2698 | 60 419 | 2664–2699 | 61 768 |
-| Het4 | 2812–2842 | 27 012 | 2811–2846 | 27 793 |
-| Het5 | 2859–2882 | 19 712 (stops before the extra bump at 2885) | 2858–2882 | 18 566 |
+| Plate | Expectation | Result |
+|---|---|---|
+| 021123 #19_20 (96 replicates; col 12 = 20 µl PCR) | one fraction everywhere | 92/96 wells, median 0.129, robust CV 0.21 (was 0.34) |
+| 010823 #19_20 dilution curve (cols 1–12, rows = replicates) | flat across the dilution | 92/96 wells, column medians 0.093–0.125, median 0.109 |
 
-The user also confirmed 010823 #19_20 Run01 A01 positions: Hom2 2552, Hom3 2679, Het4 2802, Het5 2831. The engine now hits all four exactly.
+Reproduce with:
+```bash
+python3 ctce_marks_benchmark.py --data "<folder with the run folders>" \
+    --marks "docs/ctce_marks/More_measure_#19_20.csv" \
+    --plate "021123_mt_nucl_#19_20" --plate "010823_mt_nucl_#19_20_dil_curve"
+```
+- `docs/ctce_marks/` holds a snapshot of the drags. The live file is
+  `More_measure_#19_20.csv` in the repo root, and it is not committed.
+- On this machine the data is in `/run/media/per/NVMe Disk/CTCE data/`, with 25 run folders:
+  - #19_20: 010823, 021123, 031123 T5 LCM, 040723, 110523 PFU and 130323;
+  - the OY rs1695 runs.
+- At home the plates are under `/media/tv/Bilder og Data/tv/Nedlastinger/mtDNA …`
+  (see the old notes). 021123 may not be there.
 
-## Domain rules from the user
-- Analyse one channel, the sample channel. An internal standard on another channel is only used to align runs.
-- Peaks of interest change with temperature. Duplexes have a sharp front and a tail; ssDNA is symmetric. Taq gives a stutter peak after each species.
-- If a peak is out of scale (flat top), measure it in another channel. This is done by rebuilding the clipped part from crosstalk × fitted gain.
-- **Heteroduplexes:** the two hets come from Watson(variant 1)/Crick(variant 2) and Crick(v1)/Watson(v2), so in theory they have equal area. They form at the end of the PCR or with a boil-and-reanneal step after it.
-- **Mass action:** with minor-variant fraction p:
-  - major hom (1−p)², each het p(1−p), minor hom p²
-  - so the major hom is larger than each het, which is larger than the minor hom
-  - hets merged into one peak can exceed the major hom
-  - at low p the minor hom disappears, leaving 3 peaks (the major hom and 2 hets)
-  - minor fraction = (A_minorHom + ΣA_het/2) / A_total
+## Naming (from the operator)
+- **Species:** primer peak, Homo1, Homo2, Hetero1, Hetero2 (formerly Hom2/Hom3/Het4/Het5).
+- **"Hetero1+2":** the two heteroduplexes merged into one block. It counts once.
 
-## Open questions and issues
-1. **Baseline convention.** The hand-integrated `data(1).csv` (010823 plates) *includes* the hump; the user's new drags exclude it. With the line baseline the engine is about 2.7× below the CSV on Hom3. Proposal: re-baseline the benchmark on fresh drags of 5–10 wells per plate. **Waiting for the user's decision.**
-2. **Mass action is violated in the data.** The peak called the second homoduplex is about 30× larger than p² predicts from the het areas, and larger than each het in most wells. Asked the user: was there a final denature/reanneal step? Is that peak really the minor homoduplex? Until this is answered, the ordering is *not* enforced, and 3-peak wells (no minor hom) are not modelled.
-3. **The hets are only roughly equal in the data.** Strong wells 040723 A03/B03 have Het4 ≈ 2× Het5. On the strongest half of the wells, Het5/Het4 has a median of 1.02 on 040723 (83 % within ×1.5) and 1.27 on 010823 (60 %; cause unknown).
-4. **Faint dilution wells often get only one het** (40 of 92 on 040723): the second is below the 25σ threshold. Idea: a lower threshold for the second het.
-5. **010823 A03, A04 and C06 are mislabelled.** For example, A03 picks Hom3 at 1.03 × Hom2 instead of about 1.049; these traces are unusual.
-6. **#8 fragment** (010823 #8 Run01/Run02): weaker, with no clear het pattern. More reference drags are needed.
+## Rules now in the engine
+- **Block:** a species is its main peak plus its whole Taq +A stutter cluster.
+  - The stutter cluster is about 15–22 scans after the main peak, is often a doublet, and can be as tall as the main peak.
+  - `_back` takes the *tallest* peak near the stutter offset, not the first bump.
+  - It then follows the stutter's tail through its own sub-peaks down to a real valley (below 20 % of the stutter peak).
+- **Baseline:** every block has its own straight line, split at the valley, as dragged.
+  - Blocks share a line only if the valley stays above half of the smaller peak (`MERGED_VALLEY`).
+- **Heteroduplex candidates:**
+  - They are grouped into doublets (gap ≤ 12 scans).
+  - A run of 3+ peaks over 18+ scans is both heteroduplexes, split in the middle.
+  - A cluster counts as stutter only if it lies one stutter offset after another cluster *and* is < 60 % of its height.
+  - The two heteroduplexes are the pair with the most equal areas.
+- **Presence (`present_species`):** Homo2 and each heteroduplex need ≥ 25 × noise and FWHM ≤ max(4 × Homo1's, 20 scans), so broad bumps are not species.
+- **Fraction (`minor_fraction_named`):** p = (Homo2 + ΣHet/2) / total, from whatever is present.
+  - **Homo2 absent** (low p, ~p²): p rests on the heteroduplexes.
+  - **Few heteroduplexes** (dilute wells; the PCR is still running at the end, so there is little re-annealing): p rests on Homo2 / (Homo1 + Homo2).
+  - **A lone narrow heteroduplex:** it stands in for its partner.
+  - **A lone wide one** (≥ Homo1's block): it is "Hetero1+2".
+  - **Neither Homo2 nor a heteroduplex:** **below detection, no number** (the operator's wish: no forced numbers).
+- **Temperature:** measured at the temperature that resolves the species best.
+  - Replicate runs there are averaged.
+  - Averaging the other temperature in made it worse (robust CV 0.19 → 0.34): the heteroduplexes merge or shift at 56 °C.
 
-## Data used (home machine)
-- mtDNA run zips: `/media/tv/Bilder og Data/tv/Nedlastinger/mtDNA copy-20230831T174221Z-001/`. Plates 010823 / 040723 / 130323, #19_20 and #8. The sample channel is Ch2 (G).
-- Hand reference: `/media/tv/Bilder og Data/tv/Nedlastinger/data(1).csv` (semicolon-separated: plate; well; Primer Peak 1; Hom2; Hom3; Het4; Het5).
-- The user has more CTCE data at work. New plates with hand drags of a few wells would be the best benchmark.
+## Open items, roughly in order
+1. **Homo1 at the colder temperature** covers an extra peak, so its area there is slightly too large (operator's note). Check whether the measuring temperature's Homo1 block includes it, and trim it.
+2. **021123 Run01 A03:** the heteroduplexes are ~40 % above the drags (17–20 k vs 12.5 k), which gives p 0.138 vs 0.121.
+3. **021123 Run02 A03 / A05:** the operator placed 3 marks. Their Run02 A05 Homo1 of 39 631 looks like another peak. Ask before using them.
+4. **Use the temperature shift between the two runs to *identify* species** (operator's hint), for example to confirm Homo2 in wells where it is weak. Do not use it for quantifying.
+   - **Caveat:** on 010823 both runs say 55 °C in the files (Temperature 55, comment "CTCE (55-52)").
+5. **Set the detection threshold** (`SPECIES_HET_MIN` = 25 × noise) on the dilute columns (010823 cols 7–12) once there are drags there.
+6. **The CTCE window** (`sequence_analyzer.py`):
+   - show the new names, "below detection" and "Hetero1+2" in the table and the graph labels;
+   - show the primer peak label.
+7. **rs1695 runs with the internal standard** (OY_rs1695_T1…T10 in "CTCE data") still need testing. These are 4-dye genotyping plates (ET-ROX, FAM, NED, HEX).
+8. **Other plates to try:**
+   - 040723 dilution (54/55 °C);
+   - 110523 PFU (Pfu adds no A, so it is a stutter-free control);
+   - 031123 T5 LCM (real samples).
 
-## How to check
-- `python3 -m pytest -q tests/test_ctce.py`: 12 tests on synthetic plates, covering species blocks, the pattern, static exclusion and clipped peaks.
-- Benchmark idea:
-  1. run `ctce.analyse_plate([run folders])`;
-  2. compare `res.areas` and the labelled peaks (`p.label in ctce.SPECIES_NAMES`) to the user's drags;
-  3. check the Het5/Het4 equality and the mass-action consistency.
+## Tests
+- `tests/test_ctce.py`: 12 tests.
+  - The synthetic species test now expects the drag convention for overlapping heteroduplexes (the sum reads low).
+- The full suite passes.

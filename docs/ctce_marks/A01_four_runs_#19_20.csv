@@ -1,0 +1,17 @@
+﻿file,run,well,scan,start_scan,end_scan,midpoint,peak_scan,channel,base,kind,height_V,area_Vscan,baseline_left_V,baseline_right_V,MF height,MF area
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun01/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun01,A01,2564,2545,2583,2564,2552,3,G,region,"54257,3947","534745,5",1949,2278,"0,886827343344003","0,896689823909705"
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun01/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun01,A01,2689,2672,2707,2689,2679,3,G,region,5340,46076,791,591,"0,113172656655997","0,103310176090295"
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun01/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun01,A01,2810,2797,2824,2810,2802,3,G,region,"1859,8519",17589,909,1061,,
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun01/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun01,A01,2837,2824,2850,2837,2831,3,G,region,"1771,7308","17523,5",1061,984,,
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun02/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun02,A01,2542,2520,2565,2542,2528,3,G,region,40682,436951,1357,1582,"0,878957040924908","0,895834606647694"
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun02/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun02,A01,2672,2655,2690,2672,2662,3,G,region,"4183,2",34647,683,387,"0,121042959075092","0,104165393352306"
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun02/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun02,A01,2793,2778,2809,2793,2786,3,G,region,"1700,7097","16750,839",546,675,,
+/run/media/per/NVMe Disk/CTCE data/010823_mt_nucl_#19_20_dil_curveRun02/A01.rsd,010823_mt_nucl_#19_20_dil_curveRun02,A01,2828,2812,2844,2828,2818,3,G,region,1591,19823,680,664,,
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run01/A01.rsd,021123_mt_nucl_#19_20Run01,A01,2341,2307,2375,2341,2337,3,G,region,"19991,1471","360623,118",604,1329,"0,868601891680431","0,901888934827505"
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run01/A01.rsd,021123_mt_nucl_#19_20Run01,A01,2483,2467,2500,2483,2488,3,G,region,"2037,8182",27951,707,569,"0,131398108319569","0,0981110651724955"
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run01/A01.rsd,021123_mt_nucl_#19_20Run01,A01,2609,2597,2622,2609,2612,3,G,region,"1216,4",14636,620,666,,
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run01/A01.rsd,021123_mt_nucl_#19_20Run01,A01,2636,2625,2648,2636,2636,3,G,region,"1107,913","10675,522",1050,977,,
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run02/A01.rsd,021123_mt_nucl_#19_20Run02,A01,2617,2597,2638,2617,2603,3,G,region,"23296,561",339295,1209,1253,"0,872556624752458","0,880764186412521"
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run02/A01.rsd,021123_mt_nucl_#19_20Run02,A01,2730,2716,2745,2730,2734,3,G,region,"2462,1034",34459,582,548,"0,127443375247542","0,119235813587479"
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run02/A01.rsd,021123_mt_nucl_#19_20Run02,A01,2817,2802,2832,2817,2811,3,G,region,"1163,8",15604,554,828,,
+/run/media/per/NVMe Disk/CTCE data/021123_mt_nucl_#19_20Run02/A01.rsd,021123_mt_nucl_#19_20Run02,A01,2847,2834,2860,2847,2847,3,G,region,1039,10937,1091,897,,
