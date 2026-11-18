@@ -103,6 +103,7 @@ def test_demo_ladder_fits_to_a_fraction_of_a_base(run, well):
     assert len(res.anchors) == len(ET400R)
     assert res.quality["rms_error_bp"] < 0.3
     assert not res.warnings
+    assert res.rows and all(r["ladder_ok"] for r in res.rows)
 
 
 @needs_demo
@@ -110,8 +111,11 @@ def test_demo_ladder_fits_to_a_fraction_of_a_base(run, well):
     ("GPScoreCard_DemoData", "A04"), ("GPScoreCard_DemoData", "A08"),
     ("GP20_Demo_Data", "C12"), ("GP20_Demo_Data", "G12")])
 def test_demo_spectral_standard_wells_warn(run, well):
-    # single-dye matrix-standard wells hold no ROX ladder
-    assert _size(run, well).warnings
+    # single-dye matrix-standard wells hold no ROX ladder; any rows they
+    # still give must say so
+    res = _size(run, well)
+    assert res.warnings
+    assert all(r["ladder_ok"] is False for r in res.rows)
 
 
 @needs_demo

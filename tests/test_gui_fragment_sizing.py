@@ -69,6 +69,13 @@ class StubApp:
         return self.base_order_var.get()
 
 
+@pytest.fixture(autouse=True)
+def _private_library(monkeypatch, tmp_path):
+    # the sizing dialog remembers its answers in the mark library's prefs;
+    # never let a test write into the user's real library
+    monkeypatch.setattr(sa.mark_library, "LIBRARY_DIR", tmp_path / "library")
+
+
 @pytest.fixture
 def stub_app(tmp_path):
     return StubApp([tmp_path / "A01.rsd", tmp_path / "A02.rsd"])
@@ -78,11 +85,18 @@ def _patch_dialogs(monkeypatch, *, ladder="genescan500_rox",
                    channels=(4, 2), out="", askstring_cancel=False,
                    file_cancel=False):
     calls = {"info": [], "error": []}
-    monkeypatch.setattr(sa.simpledialog, "askstring",
-                        lambda *a, **k: None if askstring_cancel else ladder)
+    calls["initial"] = []
+
+    def askstring(*a, **k):
+        calls["initial"].append(k.get("initialvalue"))
+        return None if askstring_cancel else ladder
     it = iter(channels)
-    monkeypatch.setattr(sa.simpledialog, "askinteger",
-                        lambda *a, **k: next(it))
+
+    def askinteger(*a, **k):
+        calls["initial"].append(k.get("initialvalue"))
+        return next(it)
+    monkeypatch.setattr(sa.simpledialog, "askstring", askstring)
+    monkeypatch.setattr(sa.simpledialog, "askinteger", askinteger)
     monkeypatch.setattr(sa.filedialog, "asksaveasfilename",
                         lambda *a, **k: "" if file_cancel else out)
     monkeypatch.setattr(sa.messagebox, "showinfo",
@@ -134,3 +148,22 @@ def test_custom_lengths_ladder_is_accepted(monkeypatch, stub_app, tmp_path):
     _patch_dialogs(monkeypatch, ladder="50,100,150,200,250", out=out)
     sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
     assert Path(out).is_file()
+
+
+def test_rows_carry_the_wells_ladder_verdict(monkeypatch, stub_app, tmp_path):
+    out = str(tmp_path / "sizes.csv")
+    _patch_dialogs(monkeypatch, out=out)
+    sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
+    header = Path(out).read_text(encoding="utf-8-sig").splitlines()[0]
+    assert "ladder_rms_bp" in header and "ladder_ok" in header
+
+
+def test_the_last_ladder_and_channels_are_offered_next_time(monkeypatch, stub_app,
+                                                            tmp_path):
+    out = str(tmp_path / "sizes.csv")
+    first = _patch_dialogs(monkeypatch, ladder="et400r", channels=(1, 3), out=out)
+    sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
+    assert first["initial"] == ["genescan500_rox", 4, 2]      # nothing remembered yet
+    again = _patch_dialogs(monkeypatch, ladder="et400r", channels=(1, 3), out=out)
+    sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
+    assert again["initial"] == ["et400r", 1, 3]

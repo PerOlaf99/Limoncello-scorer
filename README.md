@@ -636,7 +636,10 @@ How it works, and what to watch:
   found, and when the bands fit poorly (RMS above 15 % of the spacing to the
   nearest band; a correct ladder sits near 1 %) — usually a wrong ladder
   channel, a wrong length table, or a well with no size standard (e.g. a
-  spectral-matrix well).
+  spectral-matrix well). Every sized row also carries its well's
+  `ladder_rms_bp` and `ladder_ok`, so a table opened on its own still shows
+  which lengths stand on a usable ladder. The GUI (Manual genotyping →
+  Fragment-length sizing) remembers the last ladder and channels used.
 - **Out-of-range peaks are flagged.** A peak whose scan falls outside the
   ladder's span is extrapolated linearly and written with `in_range = False`;
   those bp values are the least trustworthy.

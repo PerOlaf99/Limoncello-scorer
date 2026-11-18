@@ -827,6 +827,12 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
     well = getattr(doc, "well", "") or Path(str(getattr(doc, "path", ""))).stem
     file_name = Path(str(getattr(doc, "path", ""))).name
 
+    # Every row carries its well's ladder verdict, so a table opened on its
+    # own still shows which lengths stand on a usable ladder: a well without
+    # a size standard (a spectral-matrix well) can still produce rows.
+    rms = quality.get("rms_error_bp")
+    ladder_rms = None if rms is None else round(float(rms), 3)
+    ladder_ok = not warnings
     rows: List[dict] = []
     if curve is not None and sample_peaks:
         scans = [p.scan for p in sample_peaks]
@@ -843,6 +849,8 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                 "height": round(float(peak.height), 3),
                 "area": round(float(area), 3),
                 "in_range": bool(rng),
+                "ladder_rms_bp": ladder_rms,
+                "ladder_ok": ladder_ok,
             })
 
     return SizingResult(ladder=ladder, ladder_channel=ladder_channel,

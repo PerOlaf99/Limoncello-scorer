@@ -4600,6 +4600,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         from fragment_sizing import list_ladders, load_ladder, size_trace
 
+        # the last ladder and channels used: a lab sizes plate after plate
+        # with the same kit, so retyping them each time is only a chance to
+        # get one wrong
+        try:
+            last = dict(mark_library.load_prefs().get("fragment_sizing", {}))
+        except Exception:                                  # noqa: BLE001
+            last = {}
         names = ", ".join(list_ladders())
         spec = simpledialog.askstring(
             "Fragment-length sizing",
@@ -4607,7 +4614,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             f"  {names},\n"
             "a comma-separated length list, or a path to a ladder JSON file.\n"
             "Run `python scorer.py ladders` for the MegaBACE ET standards.",
-            initialvalue="genescan500_rox", parent=self)
+            initialvalue=str(last.get("ladder") or "genescan500_rox"),
+            parent=self)
         if spec is None:
             return
         try:
@@ -4617,14 +4625,24 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
         ladder_channel = simpledialog.askinteger(
             "Fragment sizing", "Ladder channel (1-4, physical):",
-            initialvalue=4, minvalue=1, maxvalue=4, parent=self)
+            initialvalue=int(last.get("ladder_channel") or 4),
+            minvalue=1, maxvalue=4, parent=self)
         if ladder_channel is None:
             return
         sample_channel = simpledialog.askinteger(
             "Fragment sizing", "Sample channel (1-4, physical):",
-            initialvalue=2, minvalue=1, maxvalue=4, parent=self)
+            initialvalue=int(last.get("sample_channel") or 2),
+            minvalue=1, maxvalue=4, parent=self)
         if sample_channel is None:
             return
+        try:
+            prefs = mark_library.load_prefs()
+            prefs["fragment_sizing"] = {"ladder": spec.strip(),
+                                        "ladder_channel": ladder_channel,
+                                        "sample_channel": sample_channel}
+            mark_library.save_prefs(prefs)
+        except Exception:                                  # noqa: BLE001
+            pass
         out = filedialog.asksaveasfilename(
             parent=self, defaultextension=".csv",
             filetypes=[("CSV (sized peaks)", "*.csv"), ("JSON", "*.json"),
@@ -4662,14 +4680,18 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         n_peaks = sum(len(res.rows) for res in results)
         n_warn = sum(len(res.warnings) for res in results)
+        warned = [res.well or res.file for res in results if res.warnings]
+        if len(warned) > 12:
+            warned = warned[:12] + [f"… {len(warned) - 12} more"]
         self.status_var.set(
             f"Sized {n_peaks} peak(s) in {len(results)} well(s) → {out}")
         messagebox.showinfo(
             "Fragment sizing",
             f"Sized {n_peaks} peak(s) across {len(results)} well(s) "
             f"against {ladder.name}.\n" +
-            (f"{n_warn} warning(s) — open the report or run the sizing CLI "
-             "for details.\n" if n_warn else "") +
+            (f"{n_warn} warning(s) in well(s) {', '.join(warned)} — their "
+             "rows have ladder_ok = False; open the report or run the "
+             "sizing CLI for details.\n" if n_warn else "") +
             (f"{len(failures)} well(s) skipped.\n" if failures else "") +
             f"Written to {out}")
 
