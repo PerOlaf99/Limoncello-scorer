@@ -42,7 +42,7 @@ Fluorescence is shown in volts (V); the instrument current in µA.
 New here? Open a folder (File ▸ Add data folder…), click a well in the Samples list, and roll the mouse wheel over the graph to zoom."""),
 
     ("Quick start: viewing traces", """\
-1. File ▸ Add data folder… and choose a run folder — or a parent folder to load every run under it. Runs appear under Data folders, their files under Samples / files.
+1. File ▸ Add data folder… and choose a run folder — or a parent folder holding a whole project. Its runs appear under Data folders; double-click a run (or select several and press Enter / ▼ List files) to list its files under Samples / files.
 2. Click a well. Ctrl-click or Shift-click to select several, then set **Graphs** in the view bar to how many to stack (1–12).
 3. Zoom with the mouse wheel on the graph; drag to zoom to a range; double-click to reset. (All gestures: Moving around the graphs.)
 4. Page through the plate with ↓ / ↑ (or ← / →, PgDn / PgUp). The view bar shows which wells are on screen, e.g. “A01–A04 · 4 of 96 files”.
@@ -80,11 +80,13 @@ Do NOT size CTC-CE runs this way: their internal standard is four conformers of 
 
     ("Data folders and the samples list", """\
 Data folders (top left)
-• Click a run to list only its files; Ctrl/Shift-click several runs to list them together; double-click to open the run's first sample.
-• – Remove run unloads the selected runs; File ▸ Clear folders unloads all.
+• Every run found under an added folder is listed here, but its files are not in the Samples list until you open the run: double-click it, or Ctrl/Shift-click several and press Enter or ▼ List files. Opened runs are ticked (✓) and shaded; double-click one again to take its files out.
+• Work on a large project a few runs at a time: open Run01 and Run02, do the work, then the broom (Clear list) and open the next pair.
+• – Remove run takes the selected runs out of Data folders; File ▸ Clear folders empties both lists.
 
 Samples / files
-• Each line is one trace, shown as run/file. Click to plot; Ctrl/Shift-click to plot several.
+• Each line is one trace, shown as run/file. Click to plot; Ctrl/Shift-click to plot several; Ctrl+A selects them all.
+• The broom (Clear list) empties the list — the runs stay in Data folders. Hide selected (Delete key) hides single wells.
 • **Sort** (the box above the list, or View ▸ Sort files):
 ```
   Well, row order       A01, A02 … A12, B01 …   runs of one well next to each other
@@ -304,7 +306,7 @@ Fragment analysis ▸ Size selected wells… sizes the sample's peaks in bp agai
 
     ("Comments and run info", """\
 • Comments ▸ Dye order of this run… — fix the dye order for the run of the selected well (Automatic = what its files declare, else the general setting). Its traces are reloaded at once.
-• Comments ▸ Run comments… — a note for the selected run, saved beside the data file as <file>.comment.txt (the data file is not touched) and shown under the sequence.
+• Comments ▸ Run comments… — the comment typed on the instrument when the run was started (read from the run's files), and your own note for the run, kept in the run folder as limoncello-run-note.txt (the data files are not touched). Both are shown under the graphs and in Run info.
 • Comments ▸ Run info… — what the file says about the run: well, scan count, run time, dye order, caller, per-channel signal, current; for .rsd also plate ID, machine, method, laser, filters, dye per channel, and the run conditions (voltage, injection, temperature, PMT). A “Dye order note” appears when the file's dye order differs from the one in use — the first thing to check when traces look channel-swapped."""),
 
     ("Files and export", """\

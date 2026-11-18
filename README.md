@@ -410,14 +410,26 @@ returns to plain viewing. **Peak picking is built from scratch:**
 - **Exit peak picking** returns to the normal trace viewer (the same menu item
   toggles back and forth).
 
+## Data folders and the Samples list
+
+*Add…* (File ▸ Add data folder…) lists every run found under the chosen folder
+in **Data folders**, but puts no files in the **Samples** list yet. Double-click
+a run — or Ctrl/Shift-click several and press Enter / **▼ List files** — to list
+its files; opened runs are ticked and shaded, and double-clicking one again
+takes its files out. The broom (**Clear list**) empties the Samples list and
+keeps the runs, so a large project can be worked through a pair of runs at a
+time. Folders given on the command line (`--folder`) are listed at once.
+
 ## Comments & run info
 
 The **Comments** menu sits between *Genotyping* and *Help*:
 
-- **Run comments…** writes a note for the selected run (main-curve style). It is
-  stored beside the data file as `<file>.comment.txt`, so it travels with the
-  run without ever touching the binary `.rsd`/`.scf` header. A saved comment is
-  shown in the sequence pane under the `>` header line.
+- **Run comments…** shows the comment typed on the instrument when the run was
+  started (the `.rsd` footer's COMMENT, line breaks kept) and lets you keep
+  your own note for the run, stored in the run folder as
+  `limoncello-run-note.txt` so it travels with the run without ever touching
+  the binary files (older per-file `<file>.comment.txt` notes are still read).
+  Both are shown in the sequence pane under the `>` header line and in Run info.
 - **Run info…** gives a read-only rundown of the selected well: source, scan
   count and run time, base order, basecaller preset, sequence statistics
   (length, Qmean/Qmin, N, peak spacing), per-channel signal maxima and the

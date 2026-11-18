@@ -177,11 +177,16 @@ from tooltips import ToolTip, install_tooltips  # noqa: E402
 # needs a line here; tests/test_tooltips.py lists any that have none.
 BUTTON_HELP = {
     # left panel
-    "add…": "Add a data folder: every run folder found under it is listed.",
+    "add…": "Add a data folder: every run folder found under it appears in "
+            "Data folders. Double-click a run to list its files.",
     "remove run": "Remove the run folder selected above from the list "
                   "(nothing is deleted on disk).",
-    "hide file(s)": "Hide the selected wells from the list (Delete key); "
-                    "nothing is deleted on disk.",
+    "hide selected": "Hide the selected wells from the Samples list (Delete "
+                     "key); nothing is deleted on disk.",
+    "clear list": "Empty the Samples list (the broom). The runs stay in Data "
+                  "folders: double-click the next ones to list their files.",
+    "list files": "List the files of the runs selected in Data folders (or "
+                  "double-click a run; Enter does the same).",
     "tour": "Auto-tour: step through the wells by themselves, a page of graphs "
             "at a time, at the interval set beside it (Space starts/stops it "
             "in the samples list).",
@@ -265,6 +270,27 @@ BUTTON_PATTERNS = [
 ]
 
 
+def _broom_icon(master) -> "tk.PhotoImage":
+    """A 16x16 broom, drawn pixel by pixel (no emoji font needed): the
+    MegaBACE software's symbol for clearing the file list."""
+    img = tk.PhotoImage(master=master, width=16, height=16)
+    handle, band, straw = "#8B5A2B", "#B22222", "#E0B000"
+    for i in range(9):                         # the stick, top right to middle
+        x, y = 14 - i, 1 + i
+        img.put(handle, (x, y))
+        img.put(handle, (x - 1, y))
+    for x in range(3, 9):                      # binding
+        img.put(band, (x, 9))
+        img.put(band, (x, 10))
+    for y in range(11, 16):                    # bristles, flaring out
+        spread = y - 11
+        for x in range(2 - spread // 2, 10 + spread // 2):
+            if 0 <= x < 16 and (x + y) % 2 == 0 or spread < 2:
+                if 0 <= x < 16:
+                    img.put(straw, (x, y))
+    return img
+
+
 def _install_help(win):
     """Hover help on every control of *win* (main window or a dialog)."""
     try:
@@ -317,6 +343,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._comment_cache: dict[str, str] = {}
         self.selected: List[Path] = []
         self.excluded: set[str] = set()   # individual files hidden by the user
+        # run folders whose files are in the Samples list: a folder added to
+        # Data folders is only listed there until it is opened (double-click)
+        self.active_runs: set[str] = set()
         self._bg_checked = False
         self._bg_imgs: List[np.ndarray] = []
         self.settings = AnalysisSettings()
@@ -465,7 +494,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         roots = list(self.folders)
         self.folders = []
         for root in roots:
-            self._absorb_runs(root)
+            self._absorb_runs(root, activate=True)   # asked for by name: list them
         self.refresh_file_list()
         # Draw the empty (background) view once the window is up, otherwise
         # the plot area stays blank until the first selection.
@@ -900,7 +929,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         ttk.Label(left, text="⛁ Data folders", font=("", 10, "bold"),
                   foreground="#0F3A6E").pack(anchor=tk.W, padx=4, pady=(4, 0))
-        self.folder_list = tk.Listbox(left, height=5, exportselection=False,
+        self.folder_list = tk.Listbox(left, height=8, exportselection=False,
                                       selectmode=tk.EXTENDED,
                                       bg="#FFFFFF", highlightthickness=1,
                                       highlightbackground="#B9C2D2",
@@ -917,12 +946,26 @@ class LimoncelloAnalyzerApp(tk.Tk):
         fb = ttk.Frame(left)
         fb.pack(fill=tk.X, padx=4)
         ttk.Button(fb, text="⊕ Add…", command=self.add_folder).pack(side=tk.LEFT)
-        ttk.Button(fb, text="– Remove run", command=self.remove_folder).pack(side=tk.LEFT, padx=4)
+        ttk.Button(fb, text="▼ List files",
+                   command=self.open_selected_runs).pack(side=tk.LEFT, padx=4)
+        ttk.Button(fb, text="– Remove run", command=self.remove_folder).pack(side=tk.LEFT)
+        self.folder_list.bind("<Return>", self.open_selected_runs)
+        self.folder_list.bind("<KP_Enter>", self.open_selected_runs)
 
-        self.samples_label = ttk.Label(left, text="◧ Samples / files",
+        shead = ttk.Frame(left)
+        shead.pack(fill=tk.X, padx=4, pady=(8, 0))
+        self.samples_label = ttk.Label(shead, text="◧ Samples / files",
                                        font=("", 10, "bold"),
                                        foreground="#0F3A6E")
-        self.samples_label.pack(anchor=tk.W, padx=4, pady=(8, 0))
+        self.samples_label.pack(side=tk.LEFT)
+        sbtn = ttk.Frame(left)
+        sbtn.pack(fill=tk.X, padx=4, pady=(2, 0))
+        self._broom_img = _broom_icon(self)
+        ttk.Button(sbtn, text="Clear list", image=self._broom_img,
+                   compound=tk.LEFT, command=self.clear_file_list
+                   ).pack(side=tk.LEFT)
+        ttk.Button(sbtn, text="Hide selected",
+                   command=self.remove_samples).pack(side=tk.LEFT, padx=4)
 
         # sort + filter row
         srow = ttk.Frame(left)
@@ -975,10 +1018,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.bind("<Page_Down>", self._page_key_root)
         self.bind("<Page_Up>", self._page_key_root)
 
-        rrow = ttk.Frame(left)
-        rrow.pack(fill=tk.X, padx=4, pady=(0, 2))
-        ttk.Button(rrow, text="– Hide file(s)",
-                   command=self.remove_samples).pack(side=tk.LEFT)
 
 
         # ----- Center: plots -----
@@ -1610,20 +1649,88 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.settings_win.lift()
 
     # ------------------------------------------------------------------ data
-    def _absorb_runs(self, root: Path):
-        """Expand a root folder into its run folders and add them to the list.
-        Returns (n_found, n_added)."""
+    def _absorb_runs(self, root: Path, activate: bool = False):
+        """Expand a root folder into its run folders and add them to Data
+        folders.  Their files go to the Samples list only when a run is
+        opened (double-click / Enter / List files), or at once with
+        *activate*.  Returns (n_found, n_added)."""
         runs = find_run_folders(root)
         known = {str(p.resolve()) for p in self.folders}
         added = 0
         for p in runs:
+            if activate:
+                self.active_runs.add(str(p.resolve()))
             if str(p.resolve()) in known:
                 continue
             self.folders.append(p)
             self._folder_paths.append(p)
             self.folder_list.insert(tk.END, p.name)
             added += 1
+        self._mark_folders()
         return len(runs), added
+
+    def _mark_folders(self):
+        """Data folders: runs whose files are in the Samples list are ticked
+        and shaded, the rest are only available."""
+        fl = getattr(self, "folder_list", None)
+        if fl is None:
+            return
+        for i, p in enumerate(self._folder_paths):
+            on = str(p.resolve()) in self.active_runs
+            text = ("✓ " if on else "   ") + p.name
+            if fl.get(i) != text:
+                sel = fl.selection_includes(i)
+                fl.delete(i)
+                fl.insert(i, text)
+                if sel:
+                    fl.selection_set(i)
+            fl.itemconfig(i, bg=LIMON_BAR if on else "#FFFFFF",
+                          fg="#1A1C22" if on else "#555B66")
+
+    def open_selected_runs(self, _evt=None):
+        """List the files of the runs selected in Data folders (Enter /
+        List files).  Runs already listed stay listed."""
+        paths = self._selected_folder_paths()
+        if not paths:
+            self.status_var.set("Select run(s) in Data folders first "
+                                "(Ctrl/Shift-click for several)")
+            return "break"
+        new = [p for p in paths if str(p.resolve()) not in self.active_runs]
+        for p in paths:
+            self.active_runs.add(str(p.resolve()))
+        self._after_runs_changed(opened=new)
+        return "break"
+
+    def _after_runs_changed(self, opened=()):
+        self._mark_folders()
+        self.refresh_file_list()
+        if opened and self.files:
+            # show the first well of the first newly opened run
+            first = str(Path(opened[0]).resolve())
+            for i, f in enumerate(self.files):
+                if str(f.parent.resolve()) == first:
+                    self.file_list.selection_clear(0, tk.END)
+                    self.file_list.selection_set(i)
+                    self.file_list.activate(i)
+                    self.file_list.see(i)
+                    self.on_file_select(None)
+                    break
+        else:
+            self.redraw()
+        n = len(self.active_runs)
+        self.status_var.set(f"{len(self.files)} file(s) from {n} run(s) in the "
+                            "Samples list" if n else
+                            "Samples list is empty: double-click a run in Data "
+                            "folders to list its files")
+
+    def clear_file_list(self):
+        """The broom: empty the Samples list (the runs stay in Data folders,
+        ready to be opened again).  Files hidden one by one come back too."""
+        self.active_runs.clear()
+        self.excluded.clear()
+        self.selected = []
+        self.file_list.selection_clear(0, tk.END)
+        self._after_runs_changed()
 
     def _pick_folders(self) -> List[Path]:
         """Pick one or more folders. Prefer zenity (a proper picker where you
@@ -1661,8 +1768,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
             total_added += added
             if n_found == 0:
                 nofiles.append(root)
-        # show everything again (a stale folder selection would hide new runs)
-        self.folder_list.selection_clear(0, tk.END)
         self.refresh_file_list()
         if nofiles:
             messagebox.showwarning(
@@ -1670,7 +1775,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 "No trace files found under:\n"
                 + "\n".join(str(p) for p in nofiles), parent=self)
         if total_added:
-            self.status_var.set(f"Added {total_added} run folder(s)")
+            self.status_var.set(
+                f"Added {total_added} run folder(s) to Data folders — double-"
+                "click a run (or select several and press Enter) to list its files")
 
     def _folder_tip_text(self) -> str:
         if not self._folder_paths:
@@ -1685,18 +1792,29 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if sel:
             idx = sel[0]
             if 0 <= idx < len(self._folder_paths):
-                self.status_var.set(f"Folder: {self._folder_paths[idx]}")
-        self.refresh_file_list()
+                p = self._folder_paths[idx]
+                on = str(p.resolve()) in self.active_runs
+                self.status_var.set(
+                    f"Run {p.name} — " + ("listed; double-click to take its files "
+                                          "out of the Samples list" if on else
+                                          "double-click to list its files") +
+                    f"   ({p})")
 
-    def _on_folder_activate(self, _evt=None):
-        # Double-click a folder row: show only that folder's files and open
-        # the first one. Ctrl/Shift-click several rows first to show a union.
-        self.refresh_file_list()
-        if self.files:
-            self.file_list.selection_clear(0, tk.END)
-            self.file_list.selection_set(0)
-            self.file_list.activate(0)
-            self.on_file_select(None)
+    def _on_folder_activate(self, event=None):
+        """Double-click a run: list its files, or take them out of the
+        Samples list again if they are there."""
+        i = self.folder_list.nearest(event.y) if event is not None else None
+        if i is None or not 0 <= i < len(self._folder_paths):
+            return self.open_selected_runs()
+        p = self._folder_paths[i]
+        key = str(p.resolve())
+        if key in self.active_runs:
+            self.active_runs.discard(key)
+            self._after_runs_changed()
+        else:
+            self.active_runs.add(key)
+            self._after_runs_changed(opened=[p])
+        return "break"
 
     def _selected_folder_paths(self) -> List[Path]:
         return [self._folder_paths[i] for i in self.folder_list.curselection()
@@ -1723,6 +1841,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self.excluded = {e for e in self.excluded
                              if not e.startswith(rp + "/") and e != rp}
         gone = {str(p.resolve()) for p in removed}
+        self.active_runs -= gone
         self.selected = [p for p in self.selected
                          if str(p.resolve()) not in gone]
         self.folder_list.selection_clear(0, tk.END)
@@ -1749,6 +1868,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def clear_folders(self):
         self.folders.clear()
         self._folder_paths.clear()
+        self.active_runs.clear()
         self.excluded.clear()
         self.selected = []
         self.folder_list.delete(0, tk.END)
@@ -1777,10 +1897,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         return (f.parent.name, f.name)
 
     def refresh_file_list(self):
-        selected = self._selected_folder_paths()
-        # No folder selected -> every added run (cross-run compare). Selecting
-        # one or more folders narrows the sample list to those folders' files.
-        folders = selected if selected else self.folders
+        # The Samples list holds the files of the runs opened from Data
+        # folders (double-click / Enter / List files), not of every run added.
+        folders = [p for p in self.folders if str(p.resolve()) in self.active_runs]
         files = [f for f in discover_files(folders)
                  if str(f.resolve()) not in self.excluded]
         filt = self.filter_var.get().strip().lower()
@@ -1811,8 +1930,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             for i in sel_idxs:
                 self.file_list.selection_set(i)
         exts = " ".join(sorted({f".{f.suffix.lower().lstrip('.')}" for f in self.files}))
-        scope = (f"{len(selected)} selected folder(s)" if selected
-                 else f"{len(self.folders)} folder(s)")
+        scope = f"{len(folders)} of {len(self.folders)} run folder(s)"
         if hasattr(self, "samples_label"):
             self.samples_label.configure(
                 text=f"◧ Samples / files  ({len(self.files)})")
@@ -5116,86 +5234,123 @@ class LimoncelloAnalyzerApp(tk.Tk):
             doc = self.docs.get(key)
             if not doc:
                 continue
-            if key not in self._comment_cache:
-                self._comment_cache[key] = self._read_comment(path)
-            comment = self._comment_cache.get(key, "")
+            comment = self._comment_summary(path, doc)
             if not doc.sequence:
                 head = f">{doc.well} ({doc.source}) — use Basecall ▸ Basecall selected"
                 if comment:
-                    head += f"\n; {comment}"
+                    head += "\n" + "\n".join(f"; {ln}" for ln in comment.splitlines())
                 self.seq_text.insert(tk.END, head + "\n\n")
                 continue
             head = f">{doc.well} {self._well_stats(doc)}  [{doc.source}]"
             if comment:
-                head += f"\n; {comment}"
+                head += "\n" + "\n".join(f"; {ln}" for ln in comment.splitlines())
             self.seq_text.insert(
                 tk.END, f"{head}\n{doc.sequence}\n\n")
         self._below_follow()       # the table follows the batch either way
 
     # ------------------------------------------------------- comments / info
     def _comment_file(self, path: Path) -> Path:
-        """Comments are kept next to the data as '<file>.comment.txt' — they
-        travel with the run and never touch the binary .rsd/.scf file."""
+        """Older per-file notes, kept beside the data as '<file>.comment.txt'
+        (read still; new notes are kept per run, see _run_note_file)."""
         return Path(str(path) + ".comment.txt")
 
+    @staticmethod
+    def _run_note_file(path: Path) -> Path:
+        """Your note for a run: one text file in the run folder, beside the
+        data -- the binary .rsd/.fsa files are never touched."""
+        return Path(path).parent / "limoncello-run-note.txt"
+
     def _read_comment(self, path: Path) -> str:
-        cf = self._comment_file(path)
-        try:
-            if cf.exists():
-                return cf.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            pass
+        """Your note for *path*'s run (or an older per-file note)."""
+        for cf in (self._run_note_file(path), self._comment_file(path)):
+            try:
+                if cf.exists():
+                    return cf.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                pass
         return ""
 
+    @staticmethod
+    def _instrument_comment(doc) -> str:
+        """The comment typed on the instrument when the run was started
+        (MegaBACE: the .rsd footer's COMMENT), with its line breaks."""
+        fld = getattr(doc, "footer_fields", None) or {}
+        text = str(fld.get("COMMENT") or "")
+        return "\n".join(ln.strip() for ln in text.replace("\r\n", "\n")
+                         .replace("\r", "\n").split("\n") if ln.strip())
+
+    def _comment_summary(self, path: Path, doc) -> str:
+        """Instrument comment plus your note, for the text under the graphs."""
+        key = str(Path(path).parent.resolve())
+        if key not in self._comment_cache:
+            self._comment_cache[key] = self._read_comment(path)
+        parts = [self._instrument_comment(doc), self._comment_cache.get(key, "")]
+        return "\n".join(p for p in parts if p)
+
     def edit_comments(self):
-        """View / write the run comment for the currently selected file."""
+        """The selected well's run: the comment entered on the instrument
+        (read from the file) and your own note for the run (editable)."""
         if not self.selected:
             messagebox.showinfo("Run comments", "Select a well/file first.")
             return
         path = self.selected[0]
-        key = str(path.resolve())
+        key = str(path.parent.resolve())
         if key not in self._comment_cache:
             self._comment_cache[key] = self._read_comment(path)
-        comment = self._comment_cache.get(key, "")
+        note = self._comment_cache.get(key, "")
+        try:
+            instrument = self._instrument_comment(self._ensure_doc(path))
+        except Exception:                                  # noqa: BLE001
+            instrument = ""
 
         win = tk.Toplevel(self)
-        win.title("Run comments")
-        win.geometry("520x300")
+        win.title(f"Run comments — {path.parent.name}")
+        win.geometry("640x460")
+        win.minsize(420, 320)
         win.transient(self)
         self._grab_soon(win)
-        tk.Label(win, text=f"{path.name}: comment for this run", anchor=tk.W).pack(
-            fill=tk.X, padx=10, pady=(8, 2))
-        box = tk.Text(win, wrap=tk.WORD, undo=True)
-        box.insert("1.0", comment)
-        box.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
-        note = (
-            "Stored beside the data file:\n"
-            f"{self._comment_file(path).name}\n"
-            "You can delete the file to remove the comment.")
-        tk.Label(win, text=note, fg="#555", justify=tk.LEFT, anchor=tk.W).pack(
-            fill=tk.X, padx=10, pady=(0, 2))
+        # buttons first, at the bottom, so a small window never hides them
         bar = ttk.Frame(win)
-        bar.pack(fill=tk.X, padx=10, pady=6)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=8)
+        tk.Label(win, text=f"Run {path.parent.name}", anchor=tk.W,
+                 font=("DejaVu Sans", 10, "bold")).pack(fill=tk.X, padx=10, pady=(8, 2))
+        tk.Label(win, text="Comment entered on the instrument (read from the run's "
+                           "files):", anchor=tk.W).pack(fill=tk.X, padx=10)
+        inst = tk.Text(win, wrap=tk.WORD, height=4, background="#F2F4F7",
+                       relief="flat")
+        inst.insert("1.0", instrument or "(none)")
+        inst.configure(state="disabled")
+        inst.pack(fill=tk.X, padx=10, pady=(2, 8))
+        tk.Label(win, text="Your note for this run:", anchor=tk.W).pack(fill=tk.X, padx=10)
+        box = tk.Text(win, wrap=tk.WORD, undo=True, height=6)
+        box.insert("1.0", note)
+        box.pack(fill=tk.BOTH, expand=True, padx=10, pady=2)
+        tk.Label(win, text=f"Kept in the run folder as {self._run_note_file(path).name}; "
+                           "the data files are not touched. Both are shown under the "
+                           "graphs and in Run info.",
+                 fg="#555", justify=tk.LEFT, anchor=tk.W, wraplength=600
+                 ).pack(fill=tk.X, padx=10, pady=(2, 0))
 
         def save():
             text = box.get("1.0", "end-1c").strip()
             self._comment_cache[key] = text
+            nf = self._run_note_file(path)
             try:
                 if text:
-                    self._comment_file(path).write_text(text, encoding="utf-8")
-                else:
-                    try:
-                        self._comment_file(path).unlink()
-                    except OSError:
-                        pass
-                self.status_var.set(f"Comment saved for {path.name}")
+                    nf.write_text(text + "\n", encoding="utf-8")
+                elif nf.exists():
+                    nf.unlink()
+                self.status_var.set(f"Note saved for run {path.parent.name}")
             except OSError as e:
-                messagebox.showerror("Run comments", f"Could not write comment:\n{e}")
+                messagebox.showerror("Run comments", f"Could not write the note:\n{e}",
+                                     parent=win)
+                return
             win.destroy()
             self._show_sequence()
 
-        ttk.Button(bar, text="Save", command=save).pack(side=tk.LEFT)
-        ttk.Button(bar, text="Discard", command=win.destroy).pack(side=tk.LEFT, padx=6)
+        ttk.Button(bar, text="Save", command=save).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Discard", command=win.destroy).pack(side=tk.RIGHT, padx=6)
+        box.focus_set()
 
     def show_run_info(self):
         """Read-only rundown of the selected well's run parameters."""
@@ -5209,9 +5364,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Run info", f"{path.name}:\n{e}")
             return
-        comment = self._comment_cache.get(key) or self._read_comment(path)
+        comment = self._read_comment(path)
 
-        add = lambda k, v: chunks.append(f"{k:<20} {v}")
+        def add(k, v):
+            # multi-line values (a run comment) stay aligned under the value
+            lines = str(v).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            chunks.append(f"{k:<20} {lines[0]}")
+            chunks.extend(f"{'':<20} {ln}" for ln in lines[1:] if ln.strip())
         chunks = ["Run info", "   " + str(path), ""]
         add("Well", doc.well)
         add("Source", doc.source)
@@ -5225,11 +5384,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             chunks.append("")
             add("Run", fld.get("R CODE") or fld.get("PLATE ID") or "-")
             for key in ("PLATE ID", "SAMPLE NAME", "WELL ID", "MACHINE ID",
-                        "APPLICATION", "BASE CALLER", "NAME", "COMMENT",
+                        "APPLICATION", "BASE CALLER", "NAME",
                         "LASER MODE", "BEAMSPLITTER A", "BEAMSPLITTER B",
                         "FILTER"):
                 if fld.get(key):
                     add(key, fld[key])
+            if fld.get("COMMENT"):
+                add("Run comment", self._instrument_comment(doc))
             for key, label in (("CHANNEL DYES", "Dyes (Ch1–Ch4)"),
                                ("CHANNEL BASES", "Bases (Ch1–Ch4)")):
                 vals = fld.get(key) or []
@@ -5305,8 +5466,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             add("Current (µA)", f"mean {np.nanmean(cu):.2f}, max {np.nanmax(cu):.2f}")
         if comment:
             chunks.append("")
-            chunks.append("Comment:")
-            chunks.append(comment)
+            add("Your note", comment)
 
         win = tk.Toplevel(self)
         win.title("Run info")
