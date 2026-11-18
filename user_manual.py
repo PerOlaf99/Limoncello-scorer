@@ -73,8 +73,8 @@ By hand: Manual genotyping ▸ Manual peak picking…, click each peak, then Man
 Only for runs with a real multi-fragment size ladder in its own channel.
 1. Select the wells.
 2. Manual genotyping ▸ Fragment-length sizing (ladder)….
-3. Choose the ladder (e.g. genescan500_rox), the ladder channel and the sample channel.
-4. Read the fit quality before trusting the lengths; a channel without a ladder gives a warning and no lengths.
+3. Pick the ladder from the list (Manage ladders… adds or imports one), check the ladder channel and the sample channel, and press Size. The dialog remembers your last choice.
+4. Read the fit quality before trusting the lengths: rows from a well whose ladder did not fit carry ladder_ok = False, and a channel without a ladder gives a warning and no lengths.
 Do NOT size CTC-CE runs this way: their internal standard is four conformers of one fragment, not a ladder — see Fragment-length sizing."""),
 
     ("Data folders and the samples list", """\
@@ -286,8 +286,10 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
 
     ("Fragment-length sizing", """\
 Manual genotyping ▸ Fragment-length sizing (ladder)… sizes the sample's peaks in bp against a ladder run in its own channel. It is a different analysis from peak picking and CTC-CE genotyping.
-• Ladder: a built-in name (genescan500_rox, geneflo1000_rox, …), a comma-separated list of lengths, or a ladder JSON file. ‘python scorer.py ladders’ lists the built-in ones.
-• Channels are physical (1–4 in the run's dye order); the common layout is ladder on Ch4, sample on Ch2.
+• Ladder: picked from the ladder library — bundled commercial standards (MegaBACE ET400-R/ET550-R/ET900-R, GeneScan 120/350/400HD/500/600/1200, Promega ILS 600 and WEN/CC5 ILS 500, Beckman CEQ 400/600, Geneflo 1000) and your own.
+• Manual genotyping ▸ Size-standard ladders… manages the library: New, Import (a ladder JSON, a list/CSV of lengths, or a Genetic Profiler .tdb), Edit, Duplicate, Delete, Export. Bundled ladders are read-only; duplicate one to change it. Your ladders are kept in library/ladders/.
+• A ladder can list bands to exclude from the fit (the vendor's “do not use for sizing” bands are already excluded), a display colour, and its usual channel.
+• Channels are physical (1–4 in the run's dye order). On a MegaBACE genotyping plate the ET-ROX ladder is usually Ch1 (Run info shows the dye per channel).
 • The fit is reported as leave-one-out error (rms / max, in bp) — an honest number, since a fitted curve always passes its own points.
 • No ladder found, or only one fragment matched: you get a warning and NO lengths. Treat that as “not measured”.
 • **Never size CTC-CE runs this way.** Their internal standard is a few same-length conformers, not a ladder, and it can line up with a GeneScan table convincingly enough to give believable but meaningless numbers. Use peak picking and MF instead.

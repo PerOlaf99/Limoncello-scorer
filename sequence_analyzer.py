@@ -583,6 +583,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         genotyping_m.add_command(label="Save peaks table…", command=self._gen_save)
         genotyping_m.add_command(label="Fragment-length sizing (ladder)…",
                                  command=self.size_selected_fragments)
+        genotyping_m.add_command(label="Size-standard ladders…",
+                                 command=self.manage_ladders)
         genotyping_m.add_separator()
         genotyping_m.add_cascade(label="Picking options…", menu=self._build_picking_opts(genotyping_m))
         genotyping_m.add_separator()
@@ -4585,6 +4587,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.status_var.set(f"Saved {len(rows)} {unit} rows ({len(wells)} well"
                             f"{'s' if len(wells) != 1 else ''}) to {path}")
 
+    def manage_ladders(self):
+        """The ladder library: bundled size standards and the user's own
+        (new, import, edit, duplicate, delete, export)."""
+        import ladder_gui
+        ladder_gui.open_manager(self)
+
     def size_selected_fragments(self):
         """Size the selected wells against a size-standard ladder.
 
@@ -4598,7 +4606,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             messagebox.showinfo("Fragment sizing",
                                 "Select one or more wells first.")
             return
-        from fragment_sizing import list_ladders, load_ladder, size_trace
+        import ladder_gui
+        from fragment_sizing import size_trace
 
         # the last ladder and channels used: a lab sizes plate after plate
         # with the same kit, so retyping them each time is only a chance to
@@ -4607,37 +4616,15 @@ class LimoncelloAnalyzerApp(tk.Tk):
             last = dict(mark_library.load_prefs().get("fragment_sizing", {}))
         except Exception:                                  # noqa: BLE001
             last = {}
-        names = ", ".join(list_ladders())
-        spec = simpledialog.askstring(
-            "Fragment-length sizing",
-            "Ladder: a built-in name,\n"
-            f"  {names},\n"
-            "a comma-separated length list, or a path to a ladder JSON file.\n"
-            "Run `python scorer.py ladders` for the MegaBACE ET standards.",
-            initialvalue=str(last.get("ladder") or "genescan500_rox"),
-            parent=self)
-        if spec is None:
+        setup = ladder_gui.ask_sizing_setup(self, last)
+        if setup is None:
             return
-        try:
-            ladder = load_ladder(spec.strip())
-        except (ValueError, OSError) as e:                 # noqa: BLE001
-            messagebox.showerror("Fragment sizing", f"Ladder:\n{e}")
-            return
-        ladder_channel = simpledialog.askinteger(
-            "Fragment sizing", "Ladder channel (1-4, physical):",
-            initialvalue=int(last.get("ladder_channel") or 4),
-            minvalue=1, maxvalue=4, parent=self)
-        if ladder_channel is None:
-            return
-        sample_channel = simpledialog.askinteger(
-            "Fragment sizing", "Sample channel (1-4, physical):",
-            initialvalue=int(last.get("sample_channel") or 2),
-            minvalue=1, maxvalue=4, parent=self)
-        if sample_channel is None:
-            return
+        ladder = setup["ladder"]
+        ladder_channel = setup["ladder_channel"]
+        sample_channel = setup["sample_channel"]
         try:
             prefs = mark_library.load_prefs()
-            prefs["fragment_sizing"] = {"ladder": spec.strip(),
+            prefs["fragment_sizing"] = {"ladder": setup["key"],
                                         "ladder_channel": ladder_channel,
                                         "sample_channel": sample_channel}
             mark_library.save_prefs(prefs)

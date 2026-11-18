@@ -89,6 +89,12 @@ class Ladder:
     dye: str = "ROX"
     source: str = ""
     notes: str = ""
+    vendor: str = ""
+    color: str = ""                     # display colour, e.g. "#d62728"
+    # bands that are in the lane but must not anchor the curve (known
+    # anomalous migrators, e.g. GeneScan 500's 250 and 340 bp)
+    exclude: Tuple[float, ...] = ()
+    default_channel: Optional[int] = None   # usual physical ladder channel
 
     def __post_init__(self):
         if not self.lengths:
@@ -97,6 +103,7 @@ class Ladder:
             raise ValueError(f"Ladder {self.name!r} lengths must be positive")
         if list(self.lengths) != sorted(self.lengths):
             object.__setattr__(self, "lengths", tuple(sorted(self.lengths)))
+        object.__setattr__(self, "exclude", tuple(float(b) for b in self.exclude))
 
     @property
     def span(self) -> Tuple[float, float]:
@@ -152,15 +159,166 @@ BUILTIN_LADDERS: Dict[str, dict] = {
         "dye": "ROX",
         "lengths": [35, 50, 75, 100, 139, 150, 160, 200, 250, 300,
                     340, 350, 400, 450, 490, 500],
-        "source": "Applied Biosystems GeneScan 500 ROX Size Standard",
-        "notes": "16 fragments; 100-mers (100,200,300,400,500) are spiked.",
+        "source": "Applied Biosystems GeneScan 500 ROX Size Standard; "
+                  "Thermo Fisher DNA Fragment Analysis by CE User Guide "
+                  "(Pub. 4474504 Rev B), ch. 2 'Size standards'",
+        "vendor": "Applied Biosystems",
+        "color": "#d62728",
+        "exclude": [250],
+        "notes": "16 fragments; 100-mers (100,200,300,400,500) are spiked. "
+                 "The vendor says not to use 250 for sizing.",
     },
     "geneflo1000_rox": {
         "name": "Geneflo 1000 ROX",
         "dye": "ROX",
         "lengths": list(range(400, 1001, 25)),
         "source": "ChimerX Geneflo 1000 Size Standard (cat. 3127), insert",
+        "vendor": "ChimerX",
+        "color": "#d62728",
         "notes": "25 equally spaced bands, 400-1000 bp; 100-mers spiked.",
+    },
+    "et550r": {
+        "name": "MegaBACE ET550-R",
+        "dye": "ET-ROX",
+        "lengths": [60, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 310,
+                    325, 350, 375, 400, 425, 450, 475, 500, 525, 550],
+        "source": "GE MegaBACE Genetic Profiler 2.2 (gpcom.dll, built-in "
+                  "'ET550-R Size Standard'); same list in MRC Holland's "
+                  "Coffalyser.Net size-marker table",
+        "vendor": "GE Healthcare / Amersham",
+        "color": "#d62728",
+        "default_channel": 1,
+        "notes": "22 fragments, 60-550 bp. Coffalyser.Net leaves 60, 75 and "
+                 "550 out of its sizing curve; GE flags none.",
+    },
+    "et900r": {
+        "name": "MegaBACE ET900-R",
+        "dye": "ET-ROX",
+        "lengths": [60, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300, 310,
+                    325, 350, 375, 400, 425, 450, 475, 500, 525, 550, 575, 600,
+                    610, 625, 650, 675, 700, 725, 750, 775, 800, 825, 850, 875,
+                    900],
+        "source": "GE MegaBACE Genetic Profiler 2.2 (gpcom.dll, built-in "
+                  "'ET900-R Size Standard'); same list in MRC Holland's "
+                  "Coffalyser.Net size-marker table",
+        "vendor": "GE Healthcare / Amersham",
+        "color": "#d62728",
+        "default_channel": 1,
+        "notes": "37 fragments, 60-900 bp, cat. 25-6900-01. Coffalyser.Net "
+                 "leaves 60, 75 and 900 out of its sizing curve; GE flags none.",
+    },
+    "genescan120_liz": {
+        "name": "GeneScan 120 LIZ",
+        "dye": "LIZ",
+        "lengths": [15, 20, 25, 35, 50, 62, 80, 110, 120],
+        "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
+        "vendor": "Applied Biosystems",
+        "color": "#ff7f0e",
+        "notes": "9 fragments, 15-120 nt (denatured); for SNaPshot/SNP work.",
+    },
+    "genescan350_rox": {
+        "name": "GeneScan 350 ROX",
+        "dye": "ROX",
+        "lengths": [35, 50, 75, 100, 139, 150, 160, 200, 250, 300, 340, 350],
+        "exclude": [250],
+        "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
+        "vendor": "Applied Biosystems",
+        "color": "#d62728",
+        "notes": "12 fragments, 35-350 nt. The vendor says not to use 250 for sizing.",
+    },
+    "genescan400hd_rox": {
+        "name": "GeneScan 400HD ROX",
+        "dye": "ROX",
+        "lengths": [50, 60, 90, 100, 120, 150, 160, 180, 190, 200, 220, 240,
+                    260, 280, 290, 300, 320, 340, 360, 380, 400],
+        "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
+        "vendor": "Applied Biosystems",
+        "color": "#d62728",
+        "notes": "21 fragments, 50-400 nt; high density, for microsatellites.",
+    },
+    "genescan500_liz": {
+        "name": "GeneScan 500 LIZ",
+        "dye": "LIZ",
+        "lengths": [35, 50, 75, 100, 139, 150, 160, 200, 250, 300, 340, 350,
+                    400, 450, 490, 500],
+        "exclude": [250],
+        "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
+        "vendor": "Applied Biosystems",
+        "color": "#ff7f0e",
+        "notes": "16 fragments, 35-500 nt. The vendor says not to use 250 for sizing.",
+    },
+    "genescan600_liz": {
+        "name": "GeneScan 600 LIZ (v1 / v2.0)",
+        "dye": "LIZ",
+        "lengths": [20, 40, 60, 80, 100, 114, 120, 140, 160, 180, 200, 214,
+                    220, 240, 250, 260, 280, 300, 314, 320, 340, 360, 380, 400,
+                    414, 420, 440, 460, 480, 500, 514, 520, 540, 560, 580, 600],
+        "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 'Size standards'; GeneScan 600 LIZ v2.0 product sheet (Pub. 4425787 Rev C)",
+        "vendor": "Applied Biosystems",
+        "color": "#ff7f0e",
+        "notes": "36 fragments, 20-600 nt; v1 and v2.0 have the same peaks. A "
+                 "primer peak can mask the smallest band.",
+    },
+    "genescan1200_liz": {
+        "name": "GeneScan 1200 LIZ",
+        "dye": "LIZ",
+        "lengths": [20, 30, 40, 60, 80, 100, 114, 120, 140, 160, 180, 200, 214,
+                    220, 240, 250, 260, 280, 300, 314, 320, 340, 360, 380, 400,
+                    414, 420, 440, 460, 480, 500, 514, 520, 540, 560, 580, 600,
+                    614, 620, 640, 660, 680, 700, 714, 720, 740, 760, 780, 800,
+                    820, 840, 850, 860, 880, 900, 920, 940, 960, 980, 1000, 1020,
+                    1040, 1060, 1080, 1100, 1120, 1160, 1200],
+        "source": "Thermo Fisher DNA Fragment Analysis by CE User Guide (Pub. 4474504 Rev B), ch. 2 \'Size standards\'",
+        "vendor": "Applied Biosystems",
+        "color": "#ff7f0e",
+        "notes": "68 fragments, 20-1200 nt (no 1140).",
+    },
+    "promega_ils600": {
+        "name": "Promega ILS 600",
+        "dye": "CXR",
+        "lengths": [60, 80, 100, 120, 140, 160, 180, 200, 225, 250, 275, 300,
+                    325, 350, 375, 400, 425, 450, 475, 500, 550, 600],
+        "source": "Promega MSI Analysis System v1.2 Technical Manual TM255 "
+                  "(Rev 2/23), section 1.B",
+        "vendor": "Promega",
+        "color": "#d62728",
+        "notes": "22 fragments, 60-600 bases; multiples of 100 are about twice as bright.",
+    },
+    "promega_ils500": {
+        "name": "Promega WEN / CC5 ILS 500",
+        "dye": "WEN",
+        "lengths": [60, 65, 80, 100, 120, 140, 160, 180, 200, 225, 250, 275,
+                    300, 325, 350, 375, 400, 425, 450, 475, 500],
+        "source": "Promega PowerPlex Fusion Technical Manual TMD039 (WEN ILS "
+                  "500); Promega customer letter: WEN ILS has the same fragment "
+                  "sizes as CC5 ILS 500",
+        "vendor": "Promega",
+        "color": "#ff7f0e",
+        "notes": "21 fragments, 60-500 bases. WEN and CC5 fragments migrate "
+                 "slightly differently (matters for bins, not for sizes).",
+    },
+    "beckman_ss400": {
+        "name": "Beckman CEQ Size Standard 400",
+        "dye": "WellRED D1",
+        "lengths": [60, 70, 80, 90, 100, 120, 140, 160, 180, 190, 200, 220,
+                    240, 260, 280, 300, 320, 340, 360, 380, 400, 420],
+        "source": "Beckman Coulter GenomeLab GeXP Pre-Installation Guide "
+                  "(PN A32350 AB), consumables: DNA Size Standard Kit-400, P/N 608098",
+        "vendor": "Beckman Coulter",
+        "color": "#9467bd",
+        "notes": "22 fragments, 60-420 nt.",
+    },
+    "beckman_ss600": {
+        "name": "Beckman CEQ Size Standard 600",
+        "dye": "WellRED D1",
+        "lengths": [60, 70, 80, 90, 100, 120, 140, 160, 180, 190, 200, 220,
+                    240, 260, 280, 300, 320, 340, 360, 380, 400, 420, 440, 460,
+                    480, 500, 520, 540, 560, 580, 600, 620, 640],
+        "source": "Beckman Coulter GenomeLab GeXP Pre-Installation Guide "
+                  "(PN A32350 AB), consumables: DNA Size Standard Kit-600, P/N 608095",
+        "vendor": "Beckman Coulter",
+        "color": "#9467bd",
+        "notes": "33 fragments, 60-640 nt.",
     },
     "et400r": {
         "name": "MegaBACE ET400-R",
@@ -169,6 +327,9 @@ BUILTIN_LADDERS: Dict[str, dict] = {
                     290, 300, 310, 330, 350, 360, 380, 400],
         "source": "GE MegaBACE Genetic Profiler 2.2, test_plate.tdb "
                   "(Genotyping Test Plate definition)",
+        "vendor": "GE Healthcare / Amersham",
+        "color": "#d62728",
+        "default_channel": 1,
         "notes": "20 fragments, 60-400 bp.  Checked on the GP 2.2 demo plates: "
                  "every band matched, ~0.15 bp leave-one-out, test-plate "
                  "fragments within 0.15 bp of GP's sizes.",
@@ -185,10 +346,10 @@ KNOWN_MEGABACE_STANDARDS = [
     {"key": "et400r", "name": "MegaBACE ET400-R (bundled)", "dye": "ET-ROX",
      "range_bp": "60-400", "resolution_bp": 0.3,
      "catalog": "GE/Cytiva MegaBACE ET400-R Size Standard"},
-    {"key": "et550r", "name": "MegaBACE ET550-R", "dye": "ET-ROX",
+    {"key": "et550r", "name": "MegaBACE ET550-R (bundled)", "dye": "ET-ROX",
      "range_bp": "~20-550", "resolution_bp": 0.5,
      "catalog": "GE/Cytiva MegaBACE ET550-R Size Standard"},
-    {"key": "et900r", "name": "MegaBACE ET900-R", "dye": "ET-ROX",
+    {"key": "et900r", "name": "MegaBACE ET900-R (bundled)", "dye": "ET-ROX",
      "range_bp": "~20-900", "resolution_bp": 2.0,
      "catalog": "GE/Cytiva MegaBACE ET900-R, cat. 25-6900-01"},
     {"key": "geneflo1000_rox", "name": "Geneflo 1000 ROX (bundled)",
@@ -198,7 +359,15 @@ KNOWN_MEGABACE_STANDARDS = [
 
 
 def list_ladders() -> List[str]:
-    return sorted(BUILTIN_LADDERS)
+    """Names usable with :func:`load_ladder`: the bundled ladders, then the
+    user's own library (:mod:`ladder_library`)."""
+    names = sorted(BUILTIN_LADDERS)
+    try:
+        import ladder_library
+        names += [k for k in ladder_library.user_ladders() if k not in names]
+    except Exception:                                   # noqa: BLE001
+        pass
+    return names
 
 
 def _coerce_lengths(lengths: Sequence) -> Tuple[float, ...]:
@@ -227,11 +396,31 @@ def parse_lengths(spec: str) -> Ladder:
     return ladder_from_lengths(parts, name="custom", dye="custom")
 
 
+def ladder_from_dict(data: dict, default_name: str = "custom",
+                     default_source: str = "") -> Ladder:
+    """A :class:`Ladder` from its JSON form (see :mod:`ladder_library`)."""
+    if isinstance(data, list):
+        data = {"lengths": data}
+    ch = data.get("default_channel")
+    return Ladder(
+        name=str(data.get("name") or default_name),
+        lengths=_coerce_lengths(data.get("lengths", [])),
+        dye=str(data.get("dye") or "custom"),
+        source=str(data.get("source") or default_source),
+        notes=str(data.get("notes") or ""),
+        vendor=str(data.get("vendor") or ""),
+        color=str(data.get("color") or ""),
+        exclude=_coerce_lengths(data.get("exclude") or []),
+        default_channel=int(ch) if ch not in (None, "") else None,
+    )
+
+
 def load_ladder(spec) -> Ladder:
     """Resolve *spec* to a :class:`Ladder`.
 
-    *spec* may be a built-in name (case-insensitive), a comma-separated list of
-    lengths, or a path to a JSON file::
+    *spec* may be a bundled or library ladder name (case-insensitive, see
+    :mod:`ladder_library`), a comma-separated list of lengths, or a path to a
+    JSON file::
 
         {"name": "My ROX ladder", "dye": "ROX",
          "lengths": [50, 100, 150, 200], "notes": "..."}
@@ -245,22 +434,19 @@ def load_ladder(spec) -> Ladder:
     path = Path(text)
     if path.is_file():
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            data = {"lengths": data}
-        return Ladder(
-            name=str(data.get("name") or path.stem),
-            lengths=_coerce_lengths(data.get("lengths", [])),
-            dye=str(data.get("dye") or "custom"),
-            source=str(data.get("source") or str(path)),
-            notes=str(data.get("notes") or ""),
-        )
+        return ladder_from_dict(data, default_name=path.stem,
+                                default_source=str(path))
 
     key = text.lower()
     if key in BUILTIN_LADDERS:
-        data = BUILTIN_LADDERS[key]
-        return Ladder(name=data["name"], lengths=_coerce_lengths(data["lengths"]),
-                      dye=data.get("dye", "ROX"),
-                      source=data.get("source", ""), notes=data.get("notes", ""))
+        return ladder_from_dict(BUILTIN_LADDERS[key])
+    try:
+        import ladder_library
+        found = ladder_library.find(text)
+    except Exception:                                   # noqa: BLE001
+        found = None
+    if found is not None:
+        return found
 
     if any(ch.isdigit() for ch in text):
         return parse_lengths(text)
@@ -790,6 +976,11 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
 
     ladder_peaks = ladder_candidates(ladder_peaks, len(ladder.lengths))
     anchors = align_peaks([p.scan for p in ladder_peaks], ladder.lengths)
+    if ladder.exclude:
+        # aligned with every band (they are in the lane), but the curve is
+        # built without the ones known to migrate anomalously
+        anchors = [(s, b) for s, b in anchors
+                   if not any(abs(b - x) < 1e-6 for x in ladder.exclude)]
     quality = ladder_fit_quality([s for s, _ in anchors],
                                  [b for _, b in anchors])
 

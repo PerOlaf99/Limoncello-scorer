@@ -784,22 +784,65 @@ def _cmd_peaks(args) -> int:
     return 0
 
 
-def _cmd_ladders(_args) -> int:
-    from fragment_sizing import (BUILTIN_LADDERS, KNOWN_MEGABACE_STANDARDS,
-                                 list_ladders)
-    print("Bundled ladders (use by name with `size --ladder`):")
-    for key in list_ladders():
-        data = BUILTIN_LADDERS[key]
-        lengths = data["lengths"]
-        span = f"{min(lengths)}-{max(lengths)} bp, {len(lengths)} fragments"
-        print(f"  {key:<18} {data['name']:<22} {data['dye']:<6} {span}")
-    print("\nMegaBACE-compatible standards (fill in lengths from your kit insert):")
+def _cmd_ladders(args) -> int:
+    import dataclasses
+    import ladder_library as lib
+    from fragment_sizing import KNOWN_MEGABACE_STANDARDS
+
+    if getattr(args, "delete", None):
+        try:
+            lib.delete_user_ladder(args.delete)
+        except ValueError as exc:
+            print(f"ladders: {exc}", file=sys.stderr)
+            return 2
+        print(f"deleted {args.delete}")
+        return 0
+    if getattr(args, "import_file", None):
+        try:
+            ladders = lib.import_ladder_file(args.import_file)
+        except (OSError, ValueError) as exc:
+            print(f"ladders: {exc}", file=sys.stderr)
+            return 2
+        for lad in ladders:
+            change = {}
+            if args.name and len(ladders) == 1:
+                change["name"] = args.name
+            if args.dye:
+                change["dye"] = args.dye
+            if args.default_channel:
+                change["default_channel"] = args.default_channel
+            lad = dataclasses.replace(lad, **change)
+            if not lad.color:
+                lad = dataclasses.replace(lad, color=lib.default_color(lad.dye))
+            try:
+                key = lib.save_user_ladder(lad)
+            except (ValueError, OSError) as exc:
+                print(f"ladders: {lad.name}: {exc}", file=sys.stderr)
+                return 2
+            print(f"imported {lad.name!r} as `{key}`: {len(lad.lengths)} bands, "
+                  f"{lad.lengths[0]:g}-{lad.lengths[-1]:g} bp, dye {lad.dye}")
+        return 0
+
+    print("Ladders (use by name with `size --ladder`):")
+    for row in lib.all_ladders():
+        lad = row["ladder"]
+        kind = "bundled" if row["builtin"] else "mine"
+        span = f"{lad.lengths[0]:g}-{lad.lengths[-1]:g} bp, {len(lad.lengths)} bands"
+        ch = f", usually Ch{lad.default_channel}" if lad.default_channel else ""
+        print(f"  {row['key']:<20} {lad.name:<24} {lad.dye:<7} {span}{ch}  [{kind}]")
+    print(f"\nYour ladders are kept in {lib.ladder_dir()}")
+    print("\nMegaBACE-compatible standards not bundled (import their lengths "
+          "from your kit insert):")
+    bundled = {r["key"] for r in lib.all_ladders() if r["builtin"]}
     for std in KNOWN_MEGABACE_STANDARDS:
+        if std["key"] in bundled:
+            continue
         res = "" if std["resolution_bp"] is None else f", {std['resolution_bp']} bp resolution"
         print(f"  {std['name']}: {std['dye']}, {std['range_bp']}{res}")
-    print("\nA custom ladder is a comma-separated length list or a JSON file:")
-    print('  python scorer.py size well.rsd --lengths 50,100,150,200')
-    print('  python scorer.py size well.rsd --ladder my_ladder.json')
+    print("\nAdd a ladder from a file (JSON, a list/CSV of lengths, or a GP .tdb):")
+    print("  python scorer.py ladders --import insert.csv --name 'ET550-R' --dye ET-ROX")
+    print("or size against lengths directly:")
+    print("  python scorer.py size well.rsd --lengths 50,100,150,200")
     return 0
 
 
@@ -816,7 +859,9 @@ def _cmd_size(args) -> int:
     for path in args.inputs:
         try:
             doc = load_trace(Path(path), base_order=args.base_order)
-            res = size_trace(doc, ladder, ladder_channel=args.ladder_channel,
+            res = size_trace(doc, ladder,
+                             ladder_channel=(args.ladder_channel
+                                             or ladder.default_channel or 4),
                              sample_channel=args.sample_channel,
                              base_order=args.base_order)
         except Exception as exc:                            # noqa: BLE001
@@ -867,8 +912,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ladder name, JSON path or lengths (default genescan500_rox)")
     s.add_argument("--lengths",
                    help="comma-separated ladder lengths (overrides --ladder)")
-    s.add_argument("--ladder-channel", type=int, default=4,
-                   help="ladder channel 1..4 (default 4)")
+    s.add_argument("--ladder-channel", type=int, default=None,
+                   help="ladder channel 1..4 (default: the ladder's usual "
+                        "channel, else 4)")
     s.add_argument("--sample-channel", type=int, default=2,
                    help="sample channel 1..4 (default 2)")
     s.add_argument("--base-order", default="ACTG",
@@ -877,7 +923,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--report", help="write an HTML sizing report here")
     s.set_defaults(func=_cmd_size)
 
-    ld = sub.add_parser("ladders", help="list ladders available to `size`")
+    ld = sub.add_parser("ladders", help="list, import or delete ladders for `size`")
+    ld.add_argument("--import", dest="import_file", type=Path, default=None,
+                    help="add a ladder from a JSON file, a list/CSV of lengths "
+                         "or a Genetic Profiler .tdb table")
+    ld.add_argument("--name", default=None, help="name for the imported ladder")
+    ld.add_argument("--dye", default=None, help="dye of the imported ladder")
+    ld.add_argument("--default-channel", type=int, choices=[1, 2, 3, 4],
+                    default=None, help="usual physical ladder channel")
+    ld.add_argument("--delete", default=None, metavar="KEY",
+                    help="remove one of your ladders")
     ld.set_defaults(func=_cmd_ladders)
 
     c = sub.add_parser("check", help="report which parts are available")

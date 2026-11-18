@@ -77,6 +77,8 @@ Limoncello-scorer/
 ├── analyzer_core.py           # loaders + basecaller wrapper (vendor discovery, --check)
 ├── genotyping.py              # headless PeakPicker engine + Tk picker dialog
 ├── fragment_sizing.py         # ladder registry + fragment-length sizing (headless)
+├── ladder_library.py          # ladder library: bundled + user ladders, import (headless)
+├── ladder_gui.py              # ladder manager, editor and sizing set-up windows (Tk)
 ├── scorer.py                  # genotype calls, read QC, fragment sizing, HTML report
 ├── basecall.py                # standalone FASTA/FASTQ basecaller CLI
 ├── configs.py                 # basecaller presets (GOLDEN / PRECISION / SOFT)
@@ -644,20 +646,59 @@ How it works, and what to watch:
   ladder's span is extrapolated linearly and written with `in_range = False`;
   those bp values are the least trustworthy.
 
-### Ladders: built in, or your own
+### Ladders: the ladder library
 
-Three standards are bundled by name (`python scorer.py ladders` lists them):
-**GeneScan 500 ROX**, **Geneflo 1000 ROX** (400–1000 bp, 25 bp steps) and
-**MegaBACE ET400-R** (`et400r`, 20 bands, 60–400 bp; see below). Any other kit
-is a JSON file:
+Every ladder lives in one library: **bundled** commercial standards, and
+**your own** (custom or imported) ladders, kept as one JSON file each in
+`library/ladders/` next to the marks and preferences. In the GUI, **Manual
+genotyping → Size-standard ladders…** (or *Manage ladders…* in the sizing
+dialog) lists them all and can make a **New** ladder, **Import** one,
+**Edit**, **Duplicate** (bundled ladders are read-only; duplicate to change
+one), **Delete** and **Export** (send the JSON to a colleague). The sizing
+dialog picks the ladder from a list, pre-fills its usual channel, and
+remembers the last ladder and channels used.
+
+Bundled standards, each with its band table from a primary source (cited in
+the ladder's *Source*); bands the vendor says not to size with are excluded
+from the curve:
+
+| Ladder | Dye | Bands | Range | Source |
+|---|---|---|---|---|
+| MegaBACE ET400-R / ET550-R / ET900-R | ET-ROX | 20 / 22 / 37 | 60–400 / 550 / 900 | GE Genetic Profiler 2.2 (`test_plate.tdb`, `gpcom.dll`) |
+| GeneScan 120 LIZ | LIZ | 9 | 15–120 | Thermo Fisher Pub. 4474504 |
+| GeneScan 350 ROX (250 excluded) | ROX | 12 | 35–350 | " |
+| GeneScan 400HD ROX | ROX | 21 | 50–400 | " |
+| GeneScan 500 ROX / 500 LIZ (250 excluded) | ROX / LIZ | 16 | 35–500 | " |
+| GeneScan 600 LIZ (v1 and v2.0) | LIZ | 36 | 20–600 | " |
+| GeneScan 1200 LIZ | LIZ | 68 | 20–1200 | " |
+| Promega ILS 600 | CXR | 22 | 60–600 | Promega TM255 |
+| Promega WEN / CC5 ILS 500 | WEN | 21 | 60–500 | Promega TMD039 |
+| Beckman CEQ Size Standard 400 / 600 | WellRED D1 | 22 / 33 | 60–420 / 640 | Beckman PN A32350 |
+| Geneflo 1000 ROX | ROX | 25 | 400–1000 | ChimerX insert |
+
+A ladder file looks like this; only `lengths` matters to sizing, `exclude`
+lists bands that are in the lane but must not anchor the curve, `color` is for
+display, and `default_channel` pre-fills the ladder channel:
 
 ```json
-{"name": "My FAM ladder", "dye": "FAM",
- "lengths": [50, 100, 150, 200, 250], "notes": "home-made"}
+{"name": "My FAM ladder", "vendor": "home-made", "dye": "FAM", "color": "#1f77b4",
+ "lengths": [50, 100, 150, 200, 250], "exclude": [], "default_channel": 2,
+ "source": "lab protocol 12", "notes": ""}
 ```
 
-`dye` is free text (it only labels the report), so a lab can use a ladder with
-a fluorophore of its choice. The `lengths` are the only thing that matters.
+**Import** reads a ladder JSON (one ladder, a list, or `{"ladders": [...]}`)
+or any text/CSV/TSV list of lengths — a row of numbers, one per line, or the
+`size`/`bp`/`length` column of a table (a European `;`-separated file with
+decimal commas works too) — and a Genetic Profiler `.tdb` table. Every import
+opens in the editor first so it can be named and given its dye and colour.
+From the command line:
+
+```bash
+python scorer.py ladders                                   # list all
+python scorer.py ladders --import insert.csv --name "Lab ladder" \
+    --dye FAM --default-channel 2
+python scorer.py ladders --delete lab_ladder
+```
 
 ### MegaBACE-compatible standards
 
@@ -686,17 +727,10 @@ FAM, TAMRA and HEX) are found in every sample well with a ladder (81–82 per
 dye) and come out within 0.15 bp of Genetic Profiler's sizes. `tests/test_sizing_gp22_demo.py` checks this when the demo
 data is present (`LIMONCELLO_GP22_DEMO`).
 
-**The fragment tables of ET550-R / ET900-R are printed on the kit inserts and
-are not bundled** — a half-remembered ladder sizes every peak wrongly, which is
-worse than none. Enter them once from your insert:
-
-```bash
-python scorer.py size well.rsd --lengths <your insert's sizes> \
-    --ladder-channel <ET-ROX channel> --sample-channel <FAM channel>
-```
-
-Then save them as a JSON file so the same plate can be sized repeatably. No
-single vendor ladder is required — the tool is ladder-agnostic by design.
+**ET550-R and ET900-R are bundled too** (`et550r`, `et900r`): their band
+tables are the ones built into Genetic Profiler 2.2 (`gpcom.dll`), and MRC
+Holland's Coffalyser.Net lists the same sizes. They have not yet been checked
+against real ET550/ET900 runs here.
 
 ## Development
 

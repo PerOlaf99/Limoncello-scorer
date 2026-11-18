@@ -84,19 +84,20 @@ def stub_app(tmp_path):
 def _patch_dialogs(monkeypatch, *, ladder="genescan500_rox",
                    channels=(4, 2), out="", askstring_cancel=False,
                    file_cancel=False):
-    calls = {"info": [], "error": []}
-    calls["initial"] = []
+    """Stand in for the sizing set-up dialog and the file/message boxes.
 
-    def askstring(*a, **k):
-        calls["initial"].append(k.get("initialvalue"))
-        return None if askstring_cancel else ladder
-    it = iter(channels)
+    ``calls["last"]`` records what the set-up dialog was offered (the
+    remembered ladder and channels)."""
+    import ladder_gui
+    calls = {"info": [], "error": [], "last": []}
 
-    def askinteger(*a, **k):
-        calls["initial"].append(k.get("initialvalue"))
-        return next(it)
-    monkeypatch.setattr(sa.simpledialog, "askstring", askstring)
-    monkeypatch.setattr(sa.simpledialog, "askinteger", askinteger)
+    def setup(parent, last=None):
+        calls["last"].append(dict(last or {}))
+        if askstring_cancel:
+            return None
+        return {"key": ladder, "ladder": fs.load_ladder(ladder),
+                "ladder_channel": channels[0], "sample_channel": channels[1]}
+    monkeypatch.setattr(ladder_gui, "ask_sizing_setup", setup)
     monkeypatch.setattr(sa.filedialog, "asksaveasfilename",
                         lambda *a, **k: "" if file_cancel else out)
     monkeypatch.setattr(sa.messagebox, "showinfo",
@@ -163,7 +164,8 @@ def test_the_last_ladder_and_channels_are_offered_next_time(monkeypatch, stub_ap
     out = str(tmp_path / "sizes.csv")
     first = _patch_dialogs(monkeypatch, ladder="et400r", channels=(1, 3), out=out)
     sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
-    assert first["initial"] == ["genescan500_rox", 4, 2]      # nothing remembered yet
+    assert first["last"] == [{}]                               # nothing remembered yet
     again = _patch_dialogs(monkeypatch, ladder="et400r", channels=(1, 3), out=out)
     sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
-    assert again["initial"] == ["et400r", 1, 3]
+    assert again["last"] == [{"ladder": "et400r", "ladder_channel": 1,
+                              "sample_channel": 3}]
