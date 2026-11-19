@@ -637,9 +637,10 @@ SPECIES_HET_FROM = 1.5        # hets lie 1.5 to 4 Homo1->Homo2 distances after H
 SPECIES_HET_TO = 4.0
 SPECIES_HET_EQUAL = 0.7       # the two hets' areas should agree (log-ratio sigma ~x2)
 SPECIES_HET_MIN = 25          # heteroduplex main peak >= 25 x the noise
-HET_CLUSTER_GAP = 12          # heteroduplex peaks this close (scans) are one doublet
-HET_PAIR_SPAN = 18            # ... but a run of 3+ such peaks this long is both heteroduplexes
-MERGED_VALLEY = 0.5           # blocks share one baseline only if the valley stays above this
+HET_CLUSTER_GAP = 12          # a small bump this close before a bigger heteroduplex peak is neither's main
+HET_DOUBLET_SPAN = 18         # a heteroduplex's +A stutter lies at most this many scans after it
+MERGED_VALLEY = 0.2           # heteroduplexes whose valley stays above this have begun to merge:
+                              # one area under one line (split at the valley only for display)
 SPECIES_MAX_WIDTH = 4.0       # a species' main peak is at most 4 x Homo1's width ...
 SPECIES_MAX_WIDTH_SCANS = 20  # ... or 20 scans at half height: broad bumps are not species
 MERGED_HET_WIDTH = 1.0        # a lone heteroduplex block at least Homo1's width is both, merged
@@ -811,28 +812,25 @@ def find_species(y: np.ndarray, anchor: float, pattern: Optional[SpeciesPattern]
     lo4 = max(h3 + SPECIES_MIN_GAP, h2 + SPECIES_HET_FROM * d)
     het_end = h2 + SPECIES_HET_TO * d
     c4 = sorted(j for j in idx if lo4 <= j <= het_end and y[j] > SPECIES_HET_MIN * nz)
-    # A heteroduplex often shows as a doublet (main + shoulder a few scans
-    # apart), so candidates are grouped into clusters first; a cluster is a
-    # stutter only when it starts about one stutter distance after another
-    # cluster *and* is clearly smaller -- the two heteroduplexes themselves
-    # can sit a stutter apart and are about as large as each other.
+    # A heteroduplex shows as a doublet: its main peak and its Taq +A
+    # stutter 8-16 scans on.  The spacing inside a doublet overlaps the
+    # spacing between the two heteroduplexes (021123: 8-16 vs 11-16), so a
+    # gap rule cannot tell them apart; pairing the peaks in order can -- the
+    # first with the next one within HET_DOUBLET_SPAN, then the next free
+    # one -- which matches every operator mark (Run01 A05: 2720 + 2733 and
+    # 2770 + 2782, not 2720 and its own stutter).  A small bump just before
+    # a bigger peak is neither (040723 A01 Hetero2 at 2865, not 2854).
+    c4 = [j for j in c4 if not any(0 < k - j <= HET_CLUSTER_GAP and y[j] < 0.4 * y[k] for k in c4)]
     clusters: List[List[int]] = []
     for j in c4:
-        if clusters and j - clusters[-1][-1] <= HET_CLUSTER_GAP:
+        if clusters and len(clusters[-1]) < 2 and j - clusters[-1][0] <= HET_DOUBLET_SPAN:
             clusters[-1].append(j)
         else:
             clusters.append([j])
-    # two doublets spaced like their own peaks merge into one long cluster:
-    # a cluster of three or more peaks over HET_PAIR_SPAN scans is both
-    # heteroduplexes -- split it in the middle
-    split = []
-    for c in clusters:
-        if len(c) >= 3 and c[-1] - c[0] >= HET_PAIR_SPAN:
-            half = (len(c) + 1) // 2
-            split += [c[:half], c[half:]]
-        else:
-            split.append(c)
-    clusters = split
+    # A cluster is a stutter only when it starts about one stutter distance
+    # after another cluster *and* is clearly smaller -- the two
+    # heteroduplexes themselves can sit a stutter apart and are about as
+    # large as each other.
     top = {id(c): max(y[j] for j in c) for c in clusters}
     keep = []
     for c in clusters:
@@ -917,7 +915,7 @@ def species_blocks(y: np.ndarray, mains: Sequence[int],
     a straight line -- as a drag between two points would be.  Neighbours
     that would overlap split at the valley after the first one's stutter:
     if that valley is back near the floor each keeps its own line (a bump
-    between them is neither's); if they truly overlap they share one line
+    between them is neither's); if they have begun to merge they share one line
     from the first's start to the last's end, split by a drop at the valley."""
     y = np.asarray(y, float)
     ys = y - hump_baseline(y)
@@ -933,12 +931,15 @@ def species_blocks(y: np.ndarray, mains: Sequence[int],
         v = int(a + np.argmin(y[a:n - 1])) if n - 1 > a else (c + n) // 2
         low = min(ys[max(0, c - 2):c + 3].max(), ys[max(0, n - 2):n + 3].max())
         bounds[k][1] = v
-        # Neighbours that truly merge (the valley stays above half the
-        # smaller peak) share one line with a drop at the valley; otherwise
-        # each keeps its own straight line split at the valley, as an
-        # operator drags them -- a shared line under well separated
-        # heteroduplexes counted the raised ground between them (Hetero1
-        # +65 % on 010823 A01).
+        # Neighbours that have begun to merge (the valley stays above
+        # MERGED_VALLEY of the smaller peak) are measured as one area under
+        # one line, split by a drop at the valley only to show each -- the
+        # operator's rule: Hetero1 and Hetero2 each count half towards the
+        # homoduplexes, so their split does not matter, and two lines cut
+        # at a raised valley lose what lies below it (more even plates:
+        # robust CV 021123 0.23 -> 0.21, 010823 0.25 -> 0.23, 040723
+        # 0.22 -> 0.20).  Resolved ones (valley near the floor) keep their
+        # own lines, so ground between them is neither's.
         if ys[v] > MERGED_VALLEY * low:
             joined[k] = True
             bounds[k + 1][0] = v + 1
@@ -1013,7 +1014,20 @@ def species_minor_fraction(areas: Sequence[float]) -> Optional[float]:
 
 
 def _fwhm(y: np.ndarray, c: int) -> int:
-    return _width(y, c, 0.5, -1) + _width(y, c, 0.5, 1)
+    """Width at half height, each side stopping at a valley: a peak merged
+    with its neighbour (two heteroduplexes, a doublet) never falls to half
+    height between them and read as a broad bump (021123 Run02 A01 lost its
+    Hetero2), while a true broad bump has no valley inside."""
+    sm = np.convolve(y, np.ones(3) / 3, mode="same")
+    lvl = y[c] * 0.5
+    w = 0
+    for step in (-1, 1):
+        j = c
+        while 0 < j < len(y) - 1 and sm[j] > lvl and not (
+                abs(j - c) > 2 and sm[j + step] > sm[j] and sm[j] < 0.9 * y[c]):
+            j += step
+        w += abs(j - c)
+    return w
 
 
 def present_species(ys: np.ndarray, mains: Sequence[int]):

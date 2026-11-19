@@ -221,3 +221,54 @@ def test_a_bump_on_the_rise_of_homo2_is_not_homo2():
     # ... where the plate expects Homo2: its footprint borrows Homo2's area
     m = ctce.find_species(y, rt.anchor, ctce.SpeciesPattern(r3=bump / pos[0]))
     assert m is not None and abs(m[1] - pos[1]) <= 3
+
+
+def test_merging_heteroduplexes_are_measured_as_one_area():
+    # two heteroduplexes so close the valley between them stays well above
+    # the floor: they count as one area under one line (each half goes to the
+    # homoduplexes, so the split does not matter), not two cut at the valley
+    x = np.arange(N, dtype=float)
+    y = 300.0 + emg(x, 2600, 4.0, 5.0, 1.0e5) + emg(x, 2620, 4.0, 5.0, 1.0e5)
+    c1, c2 = 2602, 2622
+    v = c1 + int(np.argmin(y[c1:c2]))
+    assert (y[v] - 300) > ctce.MERGED_VALLEY * (y[c2] - 300)          # they have begun to merge
+    blocks = ctce.species_blocks(y, [c1, c2], stutter=16)
+    (lo1, hi1, a1, b1), (lo2, hi2, a2, b2) = blocks
+    slope = (b2 - a1) / (hi2 - lo1)
+    assert lo2 == hi1 + 1 and abs(a2 - b1 - slope) < 1e-6             # one line, split at the valley
+    total = sum(ctce.block_area(y, *bl) for bl in blocks)
+    assert abs(total - 2.0e5) / 2.0e5 < 0.08
+
+
+def test_heteroduplex_doublets_are_paired_in_order():
+    # Hetero1 and Hetero2, each with its +A stutter 13 scans on, the second
+    # 50 scans after the first: the stutter (as tall as its main) is not
+    # Hetero2, and the doublets are not split by a gap rule
+    wells = [_species_well(k) for k in range(12)]
+    results = [ctce.WellResult(plate="PL", well=rt.well, runs=[rt], shifts=[], regimes=[],
+                               best=0, method="shape") for rt, _, _ in wells]
+    pattern = ctce.quantify_species(results)
+    x = np.arange(N, dtype=float)
+    rng = np.random.default_rng(99)
+    anchor, h1 = 1900, 2400
+    h2 = int(round(h1 * pattern.r3))
+    y = gauss(x, anchor, 3.0, 2.0e5) + rng.normal(0, 5, N)
+    for c, a in [(h1, 3.0e5), (h2, 3.0e4)]:
+        y += emg(x, c, 2.0, 4.0, 0.7 * a) + emg(x, c + 16, 2.0, 4.0, 0.3 * a)
+    het1 = h2 + 95
+    het2 = het1 + 50
+    for c in (het1, het2):
+        y += emg(x, c, 2.0, 3.0, 1.2e4) + emg(x, c + 13, 2.0, 3.0, 1.2e4)
+    mains = ctce.find_species(y, anchor, pattern)
+    assert mains is not None and len(mains) == 4
+    assert abs(mains[2] - het1) <= 3 and abs(mains[3] - het2) <= 3
+
+
+def test_width_stops_at_a_valley():
+    # two peaks that never fall to half height between them: each is narrow
+    x = np.arange(400, dtype=float)
+    y = gauss(x, 200, 3.0, 1.0e4) + gauss(x, 209, 3.0, 1.0e4)
+    assert y[204] > 0.5 * y[200]                                       # merged above half height
+    assert ctce._fwhm(y, 200) <= 12
+    broad = gauss(x, 200, 25.0, 1.0e4)
+    assert ctce._fwhm(broad, 200) > 40

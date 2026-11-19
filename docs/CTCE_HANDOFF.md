@@ -1,4 +1,4 @@
-# CTCE handoff (2026-11-18, night, from the home PC)
+# CTCE handoff (2026-11-19, work PC)
 
 State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`).
 Everything is on `main`.
@@ -48,7 +48,9 @@ python3 ctce_marks_benchmark.py --data "<folder with the run folders>" \
   - `_back` takes the *tallest* peak near the stutter offset, not the first bump.
   - It then follows the stutter's tail through its own sub-peaks down to a real valley (below 20 % of the stutter peak).
 - **Baseline:** every block has its own straight line, split at the valley, as dragged.
-  - Blocks share a line only if the valley stays above half of the smaller peak (`MERGED_VALLEY`).
+  - Heteroduplexes that have begun to merge (valley above 20 % of the smaller peak, `MERGED_VALLEY`, was 50 %) are **one area under one line**, split at the valley only for display (operator, 2026-11-19: each heteroduplex counts half towards the homoduplexes, so the split does not matter).
+    - Robust CV: 021123 0.23 → 0.21, 010823 0.25 → 0.23, 040723 0.22 → 0.20.
+    - The drags were made as two areas, so the engine now sits a little above them: mean |diff| 0.0116 → 0.0156, mean +0.005.
 - **Heteroduplex candidates:**
   - They are grouped into doublets (gap ≤ 12 scans).
   - A run of 3+ peaks over 18+ scans is both heteroduplexes, split in the middle.
@@ -79,21 +81,38 @@ python3 ctce_marks_benchmark.py --data "<folder with the run folders>" \
      - 010823: 95/96 wells, robust CV 0.28 → 0.25;
      - 040723: robust CV 0.25 → 0.22.
    - **Still to check at work:** whether 021123's colder Homo1 (operator's drag 2307–2375, 68 scans wide) is now right, and whether the flag fires on the wells the operator had in mind.
-2. **021123 Run01 A03:** the heteroduplexes are ~40 % above the drags (17–20 k vs 12.5 k), which gives p 0.138 vs 0.121.
-3. **021123 Run02 A03 / A05:** the operator placed 3 marks. Their Run02 A05 Homo1 of 39 631 looks like another peak. Ask before using them.
-4. **Use the temperature shift between the two runs to *identify* species** (operator's hint), for example to confirm Homo2 in wells where it is weak. Do not use it for quantifying.
+2. **Heteroduplex pairing** (fixed 2026-11-19 at work).
+   - **The shape:** each heteroduplex is a doublet, its main peak plus its +A stutter 8–16 scans on. The gap inside a doublet overlaps the gap between the two doublets (11–16 scans), so the old "≤ 12 scans is one doublet" rule failed:
+     - 021123 Run01 A05 paired Hetero1 with its own stutter;
+     - 021123 Run02 A01 lost Hetero2.
+   - **Pairing fix:** peaks are now paired in order (`HET_DOUBLET_SPAN` = 18), which matches every operator mark.
+   - **Width fix:** `_fwhm` now stops at a valley, so a merged peak is no longer taken for a broad bump.
+   - **021123 robust CV:** 0.21 → **0.15**, 95/96 wells.
+   - **010823:** 0.23 → 0.26. Columns 2–3 rose to about 0.137 now that both heteroduplexes are found; the dilute columns 7–9 stay at about 0.08–0.09 (item 6).
+   - **040723:** 0.20 → 0.21.
+   - **Block ends:** the operator ends heteroduplex drags at the knee where the steep fall meets the slow tail. The engine goes on to the floor.
+     - Knee ends were tried (fall < 2–7 % of the peak per scan). They made every plate less even (010823 0.26 → 0.27–0.34), so the full extent stays.
+     - Because of this the engine reads above the drags (mean +0.008, mean |diff| 0.0175).
+   - **Colder Homo1** (021123 Run01 A01) is no longer too large: the block is 2311–2354 with 318.7 k, against the drag's 2307–2375 with 360.6 k.
+   - **"Temperatures disagree"** on 021123 (before the pairing fix) fired on:
+     - B01 (Hetero1);
+     - C02 and C06 (Homo2 at 56 °C).
+     - Ask the operator whether these are the wells meant.
+3. **021123 Run01 A03:** the heteroduplexes are ~40 % above the drags (17–20 k vs 12.5 k), which gives p 0.138 vs 0.121. The pairing is right; the difference is the block-end convention (item 2): the engine ends at 2751 against the drag's 2735, and its line runs lower. Decide with the operator which convention is right.
+4. **021123 Run02 A03 / A05:** the operator placed 3 marks. Their Run02 A05 Homo1 of 39 631 looks like another peak. Ask before using them.
+5. **Use the temperature shift between the two runs to *identify* species** (operator's hint), for example to confirm Homo2 in wells where it is weak. Do not use it for quantifying.
    - **Caveat:** on 010823 both runs say 55 °C in the files (Temperature 55, comment "CTCE (55-52)").
-5. **Set the detection threshold** (`SPECIES_HET_MIN` = 25 × noise) on the dilute columns (010823 cols 7–12) once there are drags there.
-6. **The CTCE window** (`sequence_analyzer.py`):
+6. **Set the detection threshold** (`SPECIES_HET_MIN` = 25 × noise) on the dilute columns (010823 cols 7–12) once there are drags there. 010823 A05: the operator marked a Hetero1 doublet at 2745–2769 whose peaks (232 and 182) are below the 265 threshold, so the engine finds only Hetero2.
+7. **The CTCE window** (`sequence_analyzer.py`):
    - show the new names, "below detection" and "Hetero1+2" in the table and the graph labels;
    - show the primer peak label.
-7. **rs1695 runs with the internal standard** (OY_rs1695_T1…T10 in "CTCE data") still need testing. These are 4-dye genotyping plates (ET-ROX, FAM, NED, HEX).
-8. **Other plates to try:**
+8. **rs1695 runs with the internal standard** (OY_rs1695_T1…T10 in "CTCE data") still need testing. These are 4-dye genotyping plates (ET-ROX, FAM, NED, HEX).
+9. **Other plates to try:**
    - 040723 dilution (54/55 °C);
    - 110523 PFU (Pfu adds no A, so it is a stutter-free control);
    - 031123 T5 LCM (real samples).
 
 ## Tests
-- `tests/test_ctce.py`: 14 tests (+ Homo1 marked static by the other temperature, a bump on Homo2's rise).
+- `tests/test_ctce.py`: 17 tests (+ Homo1 marked static by the other temperature, a bump on Homo2's rise, merging heteroduplexes as one area, doublets paired in order, width stopping at a valley).
   - The synthetic species test now expects the drag convention for overlapping heteroduplexes (the sum reads low).
 - The full suite passes.

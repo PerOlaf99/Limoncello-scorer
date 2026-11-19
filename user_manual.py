@@ -271,6 +271,11 @@ Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and 
                     before the main peak to 30 after, on a near-flat
                     baseline; touching blocks share the valley after
                     the first one's stutter
+  merging hets    = Hetero1 and Hetero2 whose valley stays above 20 % of
+                    the smaller one are measured as one area under one
+                    line (split at the valley only to show each): each
+                    counts half towards the homoduplexes, so the split
+                    does not matter
   the pattern     = learnt by the plate itself, as migration-time ratios
                     (stable from capillary to capillary): Homo1 the largest
                     species, Homo2 beyond Homo1's cluster at the ratio the
