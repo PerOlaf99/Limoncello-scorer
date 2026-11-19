@@ -3289,10 +3289,14 @@ class DragAreaPicker:
     """
 
     def __init__(self, doc, path, colors=None, base_order=None,
-                 theme_mode="base", show=None, run_name=None):
+                 theme_mode="base", show=None, run_name=None, trace=None):
         self.doc = doc
         self.path = Path(path)
         self.show = show or (lambda col: True)
+        # *trace*: () -> (array, label) of what is measured -- the viewer's
+        # baseline-corrected channels when that is switched on, so a drag
+        # measures exactly what is on screen; default the loaded channels
+        self._trace = trace or (lambda: (self.doc.acgt, "none"))
         self.colors = dict(colors or DEFAULT_COLORS)
         self.base_order = (base_order or "ACTG").upper()
         self.col_color = channel_colors(self.base_order, self.colors,
@@ -3315,7 +3319,7 @@ class DragAreaPicker:
         for col in sorted(self.col_color):
             if not self.show(col):
                 continue
-            res = region_area(self.doc.acgt[:, col], start, stop)
+            res = region_area(self._y()[:, col], start, stop)
             if res and res["area"] > best_area:
                 best, best_area = col, res["area"]
         return best
@@ -3330,10 +3334,18 @@ class DragAreaPicker:
             col = self.best_col(start, stop)
         if col is None or not (0 <= col < self.doc.acgt.shape[1]):
             return None
-        res = region_area(self.doc.acgt[:, col], start, stop)
+        res = region_area(self._y()[:, col], start, stop)
         if res is None:
             return None
-        rec = _Record(
+        rec = _Record(self._fields(res, col))
+        self.records.append(rec)
+        return rec
+
+    def _y(self):
+        return np.asarray(self._trace()[0], dtype=float)
+
+    def _fields(self, res, col):
+        return dict(
             file=str(self.path), run=self.run_name, well=self.well,
             scan=res["midpoint"], start_scan=res["start"],
             end_scan=res["stop"], midpoint=res["midpoint"],
@@ -3343,9 +3355,25 @@ class DragAreaPicker:
             area_Vscan=round(res["area"], 3),
             baseline_left_V=round(res["baseline_left"], 4),
             baseline_right_V=round(res["baseline_right"], 4),
+            baseline_correction=self._trace()[1],
         )
-        self.records.append(rec)
-        return rec
+
+    def remeasure(self):
+        """Measure every recorded span again on the current trace (after
+        baseline correction was switched on or off); a span with nothing
+        above its line any more keeps its old numbers.  Returns how many
+        changed."""
+        n = 0
+        for rec in self.records:
+            col = rec["channel"] - 1
+            res = region_area(self._y()[:, col], rec["start_scan"], rec["end_scan"])
+            if res is None:
+                continue
+            new = self._fields(res, col)
+            if any(rec.get(k) != v for k, v in new.items()):
+                n += 1
+            rec.update(new)
+        return n
 
     def undo_last(self):
         if self.records:
@@ -3396,7 +3424,7 @@ class DragAreaPicker:
         ls = "--" if dashed else "-"
         if col is None or not (0 <= col < self.doc.acgt.shape[1]):
             col = self.best_col(a, b) or 0
-        y = np.asarray(self.doc.acgt[:, col], dtype=float)
+        y = self._y()[:, col]
         xs = np.arange(a, b + 1)
         bl = np.linspace(float(y[a]), float(y[b]), b - a + 1)
         ax.plot(xs, bl, color=color, lw=1.1, ls=ls, alpha=0.9, zorder=4)

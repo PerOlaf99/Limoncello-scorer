@@ -205,6 +205,10 @@ BUTTON_HELP = {
                      "visible scan range.",
     "overlay runs": "Draw every run of the same well in one graph (e.g. the "
                     "temperatures of a CTCE gradient).",
+    "baseline": "Baseline correction: take the slow background (broader than "
+                "the window, View → Baseline window…; 101 scans) off every "
+                "trace. A peak-area drag then measures the corrected trace "
+                "too, and drags already made are measured again.",
     "reset view": "Back to the whole trace, unzoomed (Home key, double-click "
                   "or right-click on a graph).",
     # picking banner
@@ -350,15 +354,27 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._bg_imgs: List[np.ndarray] = []
         self.settings = AnalysisSettings()
         self.base_order_var = tk.StringVar(value=self.settings.base_order)
-        self.n_graphs = tk.IntVar(value=1)
         # View options (View menu + the view bar), remembered across sessions.
         _vp = mark_library.load_prefs().get("view", {})
+        try:
+            _ng = int(_vp.get("n_graphs", 1))
+        except (TypeError, ValueError):
+            _ng = 1
+        self.n_graphs = tk.IntVar(value=max(1, min(MAX_GRAPHS, _ng)))
         self.y_scale = tk.StringVar(
             value=_vp.get("y_scale", "shared") if _vp.get("y_scale") in
             ("shared", "each") else "shared")
         self.fit_y = tk.BooleanVar(value=bool(_vp.get("fit_y", True)))
         self.always_table = tk.BooleanVar(value=bool(_vp.get("always_table", False)))
         self.overlay_runs = tk.BooleanVar(value=bool(_vp.get("overlay_runs", False)))
+        # baseline correction of every trace shown -- and of what a drag measures
+        self.baseline_corr = tk.BooleanVar(value=bool(_vp.get("baseline_correct", False)))
+        try:
+            _bw = int(_vp.get("baseline_window", 101))
+        except (TypeError, ValueError):
+            _bw = 101
+        self.baseline_win = tk.IntVar(value=max(11, min(1001, _bw)))
+        self._bc_cache: dict = {}
         self.view_mode = tk.StringVar(value="processed")
         self.basecaller = tk.StringVar(value="mb1000_accuracy")
         self.status_var = tk.StringVar(value="Ready — add a data folder to begin")
@@ -674,6 +690,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         view_m.add_checkbutton(label="Overlay runs of the same well",
                                variable=self.overlay_runs,
                                command=lambda: self._view_option_changed(redraw=True))
+        view_m.add_checkbutton(label="Baseline correction", variable=self.baseline_corr,
+                               command=self._baseline_changed)
+        view_m.add_command(label="Baseline window…", command=self._ask_baseline_window)
         view_m.add_command(label="Plate map…", command=self.show_plate_map)
         view_m.add_cascade(label="Alignment", menu=self._alignment_menu(view_m))
         view_m.add_checkbutton(label="Always show table under graphs",
@@ -1148,10 +1167,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
         ttk.Label(bar, text="Graphs").pack(side=tk.LEFT)
         spin = tk.Spinbox(bar, from_=1, to=MAX_GRAPHS, textvariable=self.n_graphs,
-                          width=3, command=self.redraw, highlightthickness=0)
+                          width=3, command=self._graphs_changed, highlightthickness=0)
         spin.pack(side=tk.LEFT, padx=(2, 4))
-        spin.bind("<Return>", lambda e: (self.redraw(), "break")[1])
-        spin.bind("<FocusOut>", lambda e: self.redraw())
+        spin.bind("<Return>", lambda e: (self._graphs_changed(), "break")[1])
+        spin.bind("<FocusOut>", lambda e: self._graphs_changed())
         self._page_lbl = ttk.Label(bar, text="", foreground="#1E4E8C")
         self._page_lbl.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -1194,6 +1213,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         ttk.Checkbutton(bar, text="Overlay runs", variable=self.overlay_runs,
                         command=lambda: self._view_option_changed(redraw=True)
                         ).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(bar, text="Baseline", variable=self.baseline_corr,
+                        command=self._baseline_changed).pack(side=tk.LEFT, padx=4)
         ttk.Button(bar, text="⟲ Reset view",
                    command=self._reset_zoom).pack(side=tk.RIGHT, padx=4)
         # Plate map and Align sit in the channel bar, which has room to spare;
@@ -2157,6 +2178,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             window_frac_lo=float(self.wlo.get()),
             window_frac_hi=float(self.whi.get()),
             view_mode=self.view_mode.get(),
+            baseline_correct=bool(self.baseline_corr.get()),
+            baseline_correct_window=self._baseline_window(),
             signal_start=int(self.scan_start.get()),
             signal_end=int(self.scan_end.get()),
         )
@@ -2439,7 +2462,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                 theme_mode=self._theme_mode(),
                                 show=lambda c: self.chan_show[
                                     col2chan.get(c, c)].get(),
-                                run_name=path.parent.name)
+                                run_name=path.parent.name,
+                                trace=lambda d=doc: self._drag_trace(d))
             self._area_pickers[key] = pk
         return pk
 
@@ -2481,7 +2505,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
     def _display_order(self):
         """The order the channel bar is labelled with: the first well on
         screen, else the general setting."""
-        for p in (self.selected or [])[: self._graph_count()]:
+        for p in self._shown_files(self._graph_count()):
             doc = self.docs.get(str(Path(p).resolve()))
             if doc is not None:
                 return self._doc_order(doc)
@@ -2543,9 +2567,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._grab_soon(win)
 
     def _gen_paths(self):
-        n = self._graph_count()
-        sel = [Path(p) for p in (self.selected or [])]
-        return sel[:n]
+        return [Path(p) for p in self._shown_files(self._graph_count())]
 
     def _ensure_picker(self, path):
         from genotyping import PeakPicker
@@ -4336,13 +4358,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if getattr(self, "_auto_table", None) is None:
             return "seq"
         shown_runs = {Path(p).parent.name
-                      for p in (self.selected or [])[: self._graph_count()]}
+                      for p in self._shown_files(self._graph_count())}
         if self.always_table.get() or any(
                 r.get("run") in shown_runs for r in (getattr(self, "_geno_rows", None) or [])):
             return "geno"
         # Nothing genotyped for these runs: the table would be an empty strip.
         # Show the called sequence if a shown well has one, else nothing.
-        for p in (self.selected or [])[: self._graph_count()]:
+        for p in self._shown_files(self._graph_count()):
             doc = self.docs.get(str(Path(p).resolve()))
             if doc is not None and getattr(doc, "sequence", ""):
                 return "seq"
@@ -5946,10 +5968,72 @@ class LimoncelloAnalyzerApp(tk.Tk):
             prefs["view"] = {"y_scale": self.y_scale.get(),
                              "fit_y": bool(self.fit_y.get()),
                              "overlay_runs": bool(self.overlay_runs.get()),
-                             "always_table": bool(self.always_table.get())}
+                             "always_table": bool(self.always_table.get()),
+                             "baseline_correct": bool(self.baseline_corr.get()),
+                             "baseline_window": int(self._baseline_window()),
+                             "n_graphs": int(self._graph_count())}
             mark_library.save_prefs(prefs)
         except Exception:                                  # noqa: BLE001
             pass
+
+    def _graphs_changed(self):
+        """The Graphs box changed: remember it, and show that many files
+        (the next ones in line fill the graphs beyond the selection)."""
+        self._save_view_prefs()
+        self.redraw()
+
+    def _baseline_window(self) -> int:
+        try:
+            return max(11, min(1001, int(self.baseline_win.get())))
+        except (tk.TclError, ValueError):
+            return 101
+
+    def _baseline_changed(self):
+        """Baseline correction on/off (or a new window): every trace is
+        redrawn, and the drags already made are measured again on what is
+        now shown, so the table always matches the screen."""
+        self._bc_cache.clear()
+        self._save_view_prefs()
+        n = 0
+        for pk in list(getattr(self, "_area_pickers", {}).values()):
+            try:
+                n += pk.remeasure()
+            except Exception:                              # noqa: BLE001
+                pass
+        on = self.baseline_corr.get()
+        self.status_var.set(
+            (f"Baseline correction on (background broader than {self._baseline_window()} "
+             f"scans taken off)" if on else "Baseline correction off")
+            + (f"; {n} drag(s) measured again" if n else ""))
+        self.redraw()
+        try:
+            self._sync_pick_table()
+        except Exception:                                  # noqa: BLE001
+            pass
+
+    def _ask_baseline_window(self):
+        from tkinter import simpledialog
+        v = simpledialog.askinteger(
+            "Baseline window",
+            "Background broader than this many scans is taken off\n"
+            "(wider than a peak with its stutter and tail; CTCE: 101).",
+            initialvalue=self._baseline_window(), minvalue=11, maxvalue=1001, parent=self)
+        if v:
+            self.baseline_win.set(v)
+            self._baseline_changed()
+
+    def _drag_trace(self, doc):
+        """(channels, label) a drag measures: the loaded channels, baseline
+        corrected exactly as displayed when that is on."""
+        if not self.baseline_corr.get():
+            return doc.acgt, "none"
+        from analyzer_core import baseline_correct
+        w = self._baseline_window()
+        key = (id(doc), w)
+        y = self._bc_cache.get(key)
+        if y is None:
+            y = self._bc_cache[key] = baseline_correct(np.asarray(doc.acgt, float), w)
+        return y, f"window {w}"
 
     def _view_option_changed(self, redraw=False):
         self._save_view_prefs()
@@ -6844,12 +6928,31 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return f"$\\bf{{{well}}}$   {str(rest).replace('$', '')}"
         return f"{well}   {str(rest).replace('$', '')}"
 
+    def _shown_files(self, n):
+        """The n files on screen: the selected ones, and -- when fewer are
+        selected than there are graphs -- the files next in the list after
+        the last selected one, so raising Graphs adds the next file in line."""
+        sel = list(self.selected or [])[:n]
+        if not sel or len(sel) >= n:
+            return sel
+        keys = {str(Path(p).resolve()) for p in sel}
+        idx = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}
+        last = max((idx[k] for k in keys if k in idx), default=None)
+        if last is None:
+            return sel
+        for p in self.files[last + 1:]:
+            if len(sel) >= n:
+                break
+            if str(Path(p).resolve()) not in keys:
+                sel.append(p)
+        return sel
+
     def _view_groups(self, n):
         """What the viewer draws: n graphs, one file each -- or, with
         "Overlay runs", n wells, each holding every selected run of it."""
         sel = list(self.selected or [])
         if not (self.overlay_runs.get() and not getattr(self, "genotyping_active", False)):
-            return [[p] for p in sel[:n]]
+            return [[p] for p in self._shown_files(n)]
         groups, index = [], {}
         for p in sel:
             key = (self._plate_of(p), self._well_label(p))

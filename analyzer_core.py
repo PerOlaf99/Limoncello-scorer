@@ -118,6 +118,10 @@ class AnalysisSettings:
 
     # View
     view_mode: str = "processed"  # raw | baseline | processed | called
+    # Baseline correction of what is shown (and measured by a drag): the
+    # slow background broader than this many scans is taken off every trace
+    baseline_correct: bool = False
+    baseline_correct_window: int = 101
 
     # AnalysisSettings fields that map 1:1 onto real track_bases kwargs.
     # (Every name here is accepted by the vendored cimarron_basecaller; knobs
@@ -1139,7 +1143,47 @@ def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocumen
     return doc
 
 
+BASELINE_CORRECT_WINDOW = 101
+
+
+def background_baseline(y: np.ndarray, width: int = BASELINE_CORRECT_WINDOW) -> np.ndarray:
+    """The slow background under a trace: a morphological opening *width*
+    scans wide (a running minimum, then a running maximum, so anything
+    narrower than *width* -- a peak with its stutter and tail -- is cut off
+    and anything broader stays), smoothed over half that, never above the
+    trace.  Objective: what is background depends only on *width*, not on
+    where an operator places a drag.  Works on (n,) or (n, k) arrays, column
+    by column."""
+    from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
+    y = np.asarray(y, float)
+    width = max(3, int(width))
+    base = uniform_filter1d(maximum_filter1d(minimum_filter1d(y, width, axis=0), width, axis=0),
+                            max(1, width // 2), axis=0)
+    return np.minimum(base, y)
+
+
+def baseline_correct(y: np.ndarray, width: int = BASELINE_CORRECT_WINDOW) -> np.ndarray:
+    """*y* with its slow background (:func:`background_baseline`) taken off."""
+    y = np.asarray(y, float)
+    if y.size == 0:
+        return y
+    return y - background_baseline(y, width)
+
+
+def _with_baseline(arr: np.ndarray, settings: AnalysisSettings) -> np.ndarray:
+    if getattr(settings, "baseline_correct", False) and np.size(arr):
+        return baseline_correct(arr, getattr(settings, "baseline_correct_window",
+                                             BASELINE_CORRECT_WINDOW))
+    return arr
+
+
 def display_trace(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
+    """See :func:`_display_trace`; with ``settings.baseline_correct`` the slow
+    background is taken off what is returned."""
+    return _with_baseline(_display_trace(doc, settings), settings)
+
+
+def _display_trace(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
     """Return the (n, 4) array to plot for the selected view mode.
 
     * ``raw``      -- the detector signal as loaded (instrument order mapped to
@@ -1165,6 +1209,11 @@ def display_trace(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
 
 
 def display_extra_channels(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
+    """See :func:`_display_extra_channels` (baseline-corrected when asked)."""
+    return _with_baseline(_display_extra_channels(doc, settings), settings)
+
+
+def _display_extra_channels(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray:
     """Physical channels beyond the four A,C,G,T ones (Ch5.., e.g. LIZ), as an
     (n, k) array treated like :func:`display_trace` for the view mode; (n, 0)
     when the document has none."""

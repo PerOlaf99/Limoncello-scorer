@@ -113,3 +113,19 @@ def test_run_note_and_instrument_comment(app, project):
     assert app._read_comment(other) == "re-run B05"
     summary = app._comment_summary(path, Doc())
     assert summary.splitlines() == ["Hel plate 829", "Grad 50_65C", "re-run B05"]
+
+
+def test_graphs_beyond_the_selection_show_the_next_files_in_line():
+    from types import SimpleNamespace
+    import sequence_analyzer as sa
+    files = [Path(f"/r/Run01/{w}.rsd") for w in ("A01", "A02", "A03", "A04", "A05")]
+    app = SimpleNamespace(files=files, selected=[files[1]])
+    shown = sa.LimoncelloAnalyzerApp._shown_files
+    assert shown(app, 1) == [files[1]]                      # the selected one
+    assert shown(app, 3) == files[1:4]                      # + the next ones in line
+    app.selected = [files[0], files[3]]                     # Ctrl-click: those two first
+    assert shown(app, 3) == [files[0], files[3], files[4]]
+    app.selected = list(files)                              # Ctrl+A: the first n
+    assert shown(app, 2) == files[:2]
+    app.selected = [files[4]]                               # end of the list: no wrap
+    assert shown(app, 3) == [files[4]]

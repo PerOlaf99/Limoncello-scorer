@@ -98,6 +98,13 @@ python3 ctce_marks_benchmark.py --data "<folder with the run folders>" \
      - B01 (Hetero1);
      - C02 and C06 (Homo2 at 56 °C).
      - Ask the operator whether these are the wells meant.
+2b. **Baseline correction** (2026-11-19, operator's wish for an objective area):
+   - **The tick box:** "Baseline" in the view bar (also View → Baseline correction, with View → Baseline window…).
+     - It takes the slow background off every trace shown, using `analyzer_core.background_baseline`, the same morphological opening as the engine's `hump_baseline`, 101 scans by default.
+     - Drags measure the corrected trace and are measured again when the box is toggled.
+     - The CSV records it in its `baseline_correction` column.
+   - **Engine:** measuring on hump-corrected traces made no difference: robust CV within ±0.01 at windows 101/201/301. The block lines already follow the background, so the engine is unchanged.
+   - **Next:** the operator re-drags 021123 A01–A05 with the box ticked, then the benchmark is rerun against those drags.
 3. **021123 Run01 A03:** the heteroduplexes are ~40 % above the drags (17–20 k vs 12.5 k), which gives p 0.138 vs 0.121. The pairing is right; the difference is the block-end convention (item 2): the engine ends at 2751 against the drag's 2735, and its line runs lower. Decide with the operator which convention is right.
 4. **021123 Run02 A03 / A05:** the operator placed 3 marks. Their Run02 A05 Homo1 of 39 631 looks like another peak. Ask before using them.
 5. **Use the temperature shift between the two runs to *identify* species** (operator's hint), for example to confirm Homo2 in wells where it is weak. Do not use it for quantifying.

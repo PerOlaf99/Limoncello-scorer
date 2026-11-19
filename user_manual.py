@@ -113,10 +113,11 @@ On the graphs
   double-click, right-click, Home      reset the view
 ```
 The view bar
-• **Graphs** — how many graphs to stack (1–12). Beside it: which wells are on screen; in red when more are selected than fit.
+• **Graphs** — how many graphs to stack (1–12), remembered between sessions. The first selected file is shown first; graphs beyond the selection show the next files in the list, so raising Graphs adds the next file in line. Ctrl-click, Shift-click or Ctrl+A to choose which files are shown together. Beside it: which wells are on screen; in red when more are selected than fit.
 • **Zoom − / +** and **Scans from – to**: type a scan range and press Enter. The boxes always show the scans on screen.
 • **Y scale**: **Shared** — one height scale for all graphs, to compare wells. **Each graph** — every graph scaled to its own peaks, so a weak well is not flattened by a strong one.
 • **Fit Y to view** — the height follows the scans on screen, so zooming into a region also scales up to its peaks.
+• **Baseline** — baseline correction on/off: the slow background (broader than the window, View → Baseline window…, 101 scans by default) is taken off every trace shown. A peak-area drag then measures the corrected trace too, and drags already made are measured again; the saved areas say which (baseline_correction column). The background depends only on the window, not on where a drag starts or stops — a more objective area.
 • **Overlay runs** — one graph per well with every run of that plate on top (Run01 solid, Run02 dashed, Run03 dotted, Run04 dash-dot). Runs of one plate are folders whose names differ only by a trailing RunNN. ↓ / ↑ then page whole wells.
 • **▦ Plate** — the plate map (see View menu).
 • **⟲ Reset view** — back to the whole trace.

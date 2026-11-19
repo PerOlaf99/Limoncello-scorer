@@ -730,10 +730,8 @@ def hump_baseline(y: np.ndarray, width: int = SPECIES_HUMP) -> np.ndarray:
     smoothed, never above the trace.  Taken off before peaks are found and
     ranked; the blocks themselves are measured above a line joining their
     ends, which also follows a tail sloping under them."""
-    from scipy.ndimage import maximum_filter1d, minimum_filter1d, uniform_filter1d
-    y = np.asarray(y, float)
-    base = uniform_filter1d(maximum_filter1d(minimum_filter1d(y, width), width), width // 2)
-    return np.minimum(base, y)
+    from analyzer_core import background_baseline       # the viewer's own recipe
+    return background_baseline(y, width)
 
 
 def _species_peaks(y: np.ndarray, anchor: float, nz: float) -> List[int]:
