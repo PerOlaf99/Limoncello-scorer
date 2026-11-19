@@ -51,8 +51,8 @@ New here? Open a folder (File ▸ Add data folder…), click a well in the Sampl
 
     ("Quick start: base calling", """\
 1. Load the sequencing run and select the wells.
-2. Base calling ▸ Basecall selected (or Basecall all in list). The default caller, mb1000_accuracy, suits MegaBACE 1000 runs.
-3. The letters appear on the peaks (View ▸ Base-called (with peaks)) and the sequence in the table under the graphs — use **Show sequence** there if the genotyping table is showing.
+2. Base calling ▸ Base-call selected wells (or Base-call all wells in the list). The default caller, Accuracy, suits MegaBACE 1000 runs.
+3. The letters appear on the peaks (View ▸ Base-caller trace (its peaks and letters)) and the sequence in the table under the graphs — use **Show sequence** there if the genotyping table is showing.
 4. File ▸ Export sequence (FASTA)… writes the reads for BLAST.
 • Dye order: sequencing runs declare it in their own files, and that is used automatically (Comments ▸ Run info… shows it). For a run that declares none, the general setting applies (⚙ Basecall settings… → Dye / channel → Base order (instrument); DYEnamic runs are TGCA, ET-primer runs ACTG); Comments ▸ Dye order of this run… overrides it for one run.
 • Called a fragment run by mistake? Base calling ▸ Clear base calls (undo) removes the letters; the data files are never changed."""),
@@ -148,8 +148,12 @@ Slide one graph left or right so a feature lines up with the same feature in the
 Plot styles
 ```
   Raw traces                     the detector signal as recorded
-  Processed (ACGT)               colour-separated channels
-  Base-called (with peaks)       letters on the called peaks
+  Processed traces (colour-separated)  the four dye channels
+  Base-caller trace (its peaks and letters)
+                                 the caller's own processed trace (colour-
+                                 separated, sharpened, normalised), a ring on
+                                 every called peak and its letter -- like a
+                                 MegaBACE .esd picture, made by Limoncello
   Sequencing trace (ESD peaks)   the base caller's picture: a ring on every
                                  called peak, in its base's colour; a het is
                                  two rings at one scan
@@ -181,28 +185,31 @@ Paging
 • View ▸ Page forward / View ▸ Page backward step through the list (↓ / ↑); View ▸ Start/stop auto-tour plays it. View ▸ Reset view (X & Y) and View ▸ Redraw do what they say."""),
 
     ("Base calling menu", """\
-• Base calling ▸ Basecall selected — calls the wells on screen.
-• Base calling ▸ Basecall all in list — calls every listed file (asks first above 96).
-• Base calling ▸ ⚙ Basecall settings… — the caller and its tuning; **Apply + redraw** re-runs the shown wells, **Basecall selected with these** calls with the new settings.
+• Base calling ▸ Base-call selected wells — calls the wells on screen.
+• Base calling ▸ Base-call all wells in the list — calls every listed file (asks first above 96).
+• Base calling ▸ ⚙ Basecall settings… — the caller and its tuning; **Apply + redraw** re-runs the shown wells, **Base-call selected wells with these** calls with the new settings.
 
 Dye order — which base each channel carries — is decided per run:
 1. an order chosen for that run (Comments ▸ Dye order of this run…);
 2. otherwise the order the run's files declare (sequencing .rsd files do; genotyping runs leave it out);
 3. otherwise the general setting: ⚙ Basecall settings… → Dye / channel → Base order (instrument). MegaBACE default ACTG; DYEnamic runs TGCA.
 Comments ▸ Run info… says which of the three applies to the well on screen.
-• Base calling ▸ Sequencing trace (ESD peaks) / Base calling ▸ Plain channels (processed) — the two plot styles, so a call and its picture sit together.
+• Base calling ▸ Sequencing trace (ESD peaks) / Base calling ▸ Processed traces (colour-separated) — the two plot styles, so a call and its picture sit together.
 • Base calling ▸ Clear base calls (undo) — removes letters, peak marks and the quality line (e.g. after calling fragment data by mistake). Data files are never changed.
 
 Callers
 ```
-  mb1000_accuracy   MegaBACE 1000 · longest error-free run, highest identity (default)
-  mb1000_length     MegaBACE 1000 · longest read at ≥95 % identity
-  mb4000_accuracy   currently the same as mb1000_accuracy (no MegaBACE 4000
-  mb4000_length     colour matrix is bundled yet) — named for 4000 data
-  pos_bonus07       old name of mb1000_accuracy (kept for saved settings)
-  pos_profile       old name of mb1000_length
-  hz_soften         mb1000_length with milder sharpening
-  raw_peaks         minimal processing, envelope peaks (for checking only)
+  Accuracy (recommended)       fewest errors: the read is trimmed where the
+                               quality drops
+  Length                       longer reads (≥ 95 % identity), more errors
+                               near the end
+  Length, gentler sharpening   as Length, milder sharpening mid-read
+  Quick look (no processing)   tallest channel at each peak; for a first
+                               look, not for results
+  MegaBACE 4000 runs use the same callers (no MB4000 colour matrix yet).
+  Saved settings with the old names (mb1000_accuracy, pos_bonus07, …) load
+  as the matching caller. "Quality" is the called peak's height scaled
+  0–100, not an error probability.
 ```"""),
 
     ("Manual genotyping menu", """\

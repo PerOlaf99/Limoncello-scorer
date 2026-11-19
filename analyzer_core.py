@@ -212,6 +212,9 @@ class TraceDocument:
     sequence: str = ""
     peak_positions: List[int] = field(default_factory=list)
     qualities: List[float] = field(default_factory=list)
+    # the base caller's own processed trace (n, 4; A,C,G,T): colour-separated,
+    # mobility-corrected, normalised and sharpened -- what the calls are made on
+    processed: Optional[np.ndarray] = None
     settings_used: Optional[AnalysisSettings] = None
     source: str = "rsd"  # rsd | abi | scf | text
     meta: str = ""       # free-form instrument/source info for exports
@@ -1131,6 +1134,9 @@ def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocumen
     except (TypeError, ValueError):                     # pragma: no cover
         pass
     try:
+        out: dict = {}
+        if "trace_out" in kw or _accepts(track_bases, "trace_out"):
+            kw["trace_out"] = out
         seq, quals, bands = track_bases(doc.acgt, base_order=order, **kw)
     except TypeError as exc:                            # pragma: no cover
         raise RuntimeError(
@@ -1139,8 +1145,17 @@ def run_basecall(doc: TraceDocument, settings: AnalysisSettings) -> TraceDocumen
     doc.sequence = seq
     doc.peak_positions = [int(b.position) for b in bands]
     doc.qualities = list(quals) if quals is not None else []
+    proc = out.get("processed")
+    doc.processed = proc if proc is not None and np.shape(proc) == np.shape(doc.acgt) else None
     doc.settings_used = settings
     return doc
+
+
+def _accepts(fn, name: str) -> bool:
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):                     # pragma: no cover
+        return False
 
 
 BASELINE_CORRECT_WINDOW = 101
@@ -1205,6 +1220,8 @@ def _display_trace(doc: TraceDocument, settings: AnalysisSettings) -> np.ndarray
                 window=settings.baseline_window)
         except Exception:                               # pragma: no cover
             return doc.acgt
+    if settings.view_mode == "called" and getattr(doc, "processed", None) is not None:
+        return doc.processed          # the caller's own trace, like a MegaBACE .esd picture
     return doc.acgt
 
 

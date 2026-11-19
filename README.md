@@ -200,21 +200,22 @@ Things to know:
 
 ## Basecaller versions
 
-`pos_bonus07` and `pos_profile` are now aliases of the unified
-**instrument × mode** presets (`*_accuracy` / `*_length`). The list lives in
-`analyzer_core.BASECALLER_VERSIONS`; the underlying parameters come from the
-vendored `configs.py`.
+The settings dialog (Base calling → ⚙ Basecall settings…) offers four
+callers by plain name; the internal preset names stay valid in saved settings
+and on the command line (`sequence_analyzer.CALLER_CHOICES` / `CALLER_ALIASES`;
+parameters in `configs.py`).
 
-| Name | Role |
-|------|------|
-| **mb1000_accuracy** | MegaBACE 1000 · longest error-free run, high %ID (deep Q-trim). Default. |
-| **mb1000_length** | MegaBACE 1000 · longest read at ID ≥95% (mid hard-zone) |
-| **mb4000_accuracy** | Currently the same as `mb1000_accuracy` — no MegaBACE 4000 colour matrix is bundled yet |
-| **mb4000_length** | Currently the same as `mb1000_length` (see above) |
-| **pos_bonus07** | legacy alias of `mb1000_accuracy` (kept for saved settings) |
-| **pos_profile** | legacy alias of `mb1000_length` (kept for saved settings) |
-| **hz_soften** | accuracy base + mild mid hard-zone |
-| **raw_peaks** | Envelope peaks only (debug) |
+| Shown as | Preset | Role |
+|---|---|---|
+| **Accuracy (recommended)** | `mb1000_accuracy` | Fewest errors: longest error-free run, deep quality trim. Default. |
+| **Length** | `mb1000_length` | Longest read at ≥ 95 % identity |
+| **Length, gentler sharpening** | `hz_soften` | As Length, milder sharpening mid-read |
+| **Quick look (no processing)** | `raw_peaks` | Tallest channel at each envelope peak (checking only) |
+
+`mb4000_accuracy` / `mb4000_length` are the same callers (no MegaBACE 4000
+colour matrix is bundled yet) and `pos_bonus07` / `pos_profile` are older
+names; all four load as the matching caller. The per-base "quality" is the
+called peak's height scaled 0–100, not an error probability.
 
 > The `mb4000_*` names are kept for MegaBACE 4000 data, but until a 4000
 > spectral (colour-separation) matrix is bundled they run the MB1000 settings.
@@ -277,7 +278,7 @@ together:
   and a mutation as a ring in an unexpected channel. No letters and no
   quality line clutter this view (rings fall back to simple per-channel peak
   detection until the run is called).
-- **Plain channels (processed)** — the standard channel view.
+- **Processed traces (colour-separated)** — the standard channel view.
 
 By default the app no longer overlays the Q (0–100) quality line after a
 call, so the electropherogram stays clean; re-enable it under

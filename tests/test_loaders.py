@@ -311,3 +311,24 @@ def test_real_rsd_files_expose_run_conditions():
         doc = load_trace(p)
         for key, val in want.items():
             assert doc.run_params.get(key) == val, f"{p.name}:{key}"
+
+
+def test_the_callers_processed_trace_is_kept_for_display():
+    """After a call the document holds the trace the calls were made on, and
+    the base-called view shows it (not the loaded channels)."""
+    import numpy as np
+    import analyzer_core as ac
+    rng = np.random.default_rng(0)
+    n = 3000
+    x = np.arange(n)
+    acgt = np.zeros((n, 4)) + 200.0
+    for k, c in enumerate(range(300, 2700, 12)):
+        acgt[:, k % 4] += 800 * np.exp(-0.5 * ((x - c) / 2.5) ** 2)
+    acgt += rng.normal(0, 5, acgt.shape)
+    doc = ac.TraceDocument(path=Path("x/A01.rsd"), well="A01", raw=acgt.copy(),
+                           base_order="ACGT", acgt=acgt.copy())
+    doc = ac.run_basecall(doc, ac.AnalysisSettings(basecaller="mb1000_accuracy"))
+    assert doc.sequence and doc.processed is not None and doc.processed.shape == acgt.shape
+    shown = ac.display_trace(doc, ac.AnalysisSettings(view_mode="called"))
+    assert shown is doc.processed
+    assert ac.display_trace(doc, ac.AnalysisSettings(view_mode="processed")) is doc.acgt

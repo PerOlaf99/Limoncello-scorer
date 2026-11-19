@@ -695,6 +695,7 @@ def track_bases(
     gaussian_recon_sigma_scale: float = 1.0,
     position_adaptive_spectral: bool = False,
     use_combined_channel_score: bool = False,
+    trace_out: dict | None = None,
     channel_peak_bonus: float | tuple[float, float] = 0.5,  # tested across all 12 wells: net negative on
     # balanced accuracy (coverage +6.4pp but identity -4.1pp) -- more false
     # repeat insertions than true ones recovered with current tuning. Left
@@ -796,6 +797,8 @@ def track_bases(
         )
         norm_trace = np.clip(norm_trace, 0, None)
 
+    if trace_out is not None:          # the trace the calls are made on, for display
+        trace_out["processed"] = np.asarray(norm_trace, dtype=float).copy()
     envelope = norm_trace.max(axis=1)
     best_channel = norm_trace.argmax(axis=1)
     n = len(envelope)

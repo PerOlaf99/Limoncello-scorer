@@ -219,7 +219,7 @@ BUTTON_HELP = {
     # dialogs and tool windows
     "apply": "Apply these settings.",
     "apply + redraw": "Apply these settings and redraw the graphs.",
-    "basecall selected with these": "Base-call the selected wells with these settings.",
+    "base-call selected wells with these": "Base-call the selected wells with these settings.",
     "analyse": "Run the analysis on the selected wells.",
     "show well": "Show this well in the main window.",
     "show sequence": "Show the called sequence of this well.",
@@ -244,17 +244,17 @@ BUTTON_HELP = {
     "mark start/end from the 2nd derivative": "Set each peak's start and end "
                                               "where its curvature changes.",
     # base-calling settings
-    "enable baseline": "Subtract a running baseline before calling bases "
-                       "(window set below).",
-    "spectral separation": "Separate the four dyes with the colour matrix "
-                           "before calling (removes dye overlap).",
-    "position-adaptive matrix": "Let the dye matrix change along the run "
-                                "instead of one matrix for the whole trace.",
-    "mobility correction": "Correct the small run-speed differences between "
-                           "the four dyes so bases line up.",
-    "gaussian reconstruction": "Deconvolve overlapping bands into Gaussian "
-                               "peaks before calling (segment size and noise "
-                               "regularisation below).",
+    "colour separation": "Separate the four dyes with the colour matrix "
+                         "before calling (removes dye overlap).",
+    "colour separation adapts along the read": "Let the dye matrix change along "
+                                               "the run instead of one matrix "
+                                               "for the whole trace.",
+    "dye mobility correction": "Correct the small run-speed differences between "
+                               "the four dyes so bases line up.",
+    "sharpen peaks (gaussian deconvolution)": "Deconvolve overlapping bands into "
+                                              "Gaussian peaks before calling "
+                                              "(segment length and noise damping "
+                                              "below).",
     # ladder / sizing dialogs
     "size": "Size the selected wells with these settings.",
     "manage ladders…": "Open the ladder library: add, import, edit or export ladders.",
@@ -301,6 +301,23 @@ def _install_help(win):
         install_tooltips(win, BUTTON_HELP, BUTTON_PATTERNS)
     except Exception:                                      # noqa: BLE001
         pass
+
+
+# The caller choices shown to the user.  The keys are the presets' internal
+# names; several older names are the same caller under another name and are
+# mapped onto these, so saved settings keep working.
+CALLER_CHOICES = [
+    ("mb1000_accuracy", "Accuracy (recommended)",
+     "Fewest errors: the read is trimmed where the quality drops."),
+    ("mb1000_length", "Length",
+     "Longer reads (at least 95 % identity), with more errors near the end."),
+    ("hz_soften", "Length, gentler sharpening",
+     "As Length, with milder peak sharpening in the middle of the read."),
+    ("raw_peaks", "Quick look (no processing)",
+     "The tallest channel at each peak, for a first look, not for results."),
+]
+CALLER_ALIASES = {"pos_bonus07": "mb1000_accuracy", "pos_profile": "mb1000_length",
+                  "mb4000_accuracy": "mb1000_accuracy", "mb4000_length": "mb1000_length"}
 
 
 class LimoncelloAnalyzerApp(tk.Tk):
@@ -656,8 +673,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         view_m = tk.Menu(self, tearoff=0)
         for mode, label in [
             ("raw", "Raw traces"),
-            ("processed", "Processed (ACGT)"),
-            ("called", "Base-called (with peaks)"),
+            ("processed", "Processed traces (colour-separated)"),
+            ("called", "Base-caller trace (its peaks and letters)"),
             ("esd", "Sequencing trace (ESD peaks)"),
             ("wrap", "Wrap (one well, N rows)"),
         ]:
@@ -741,8 +758,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         view_m.add_cascade(label="Trace colors", menu=theme_m)
 
         basecall_m = tk.Menu(self, tearoff=0)
-        basecall_m.add_command(label="Basecall selected", command=self.basecall_selected)
-        basecall_m.add_command(label="Basecall all in list", command=self.basecall_all)
+        basecall_m.add_command(label="Base-call selected wells", command=self.basecall_selected)
+        basecall_m.add_command(label="Base-call all wells in the list", command=self.basecall_all)
         basecall_m.add_separator()
         basecall_m.add_command(label="⚙ Basecall settings…", command=self.open_settings)
         basecall_m.add_separator()
@@ -750,7 +767,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             label="Sequencing trace (ESD peaks)",
             variable=self.view_mode, value="esd", command=self.redraw)
         basecall_m.add_radiobutton(
-            label="Plain channels (processed)",
+            label="Processed traces (colour-separated)",
             variable=self.view_mode, value="processed", command=self.redraw)
         basecall_m.add_separator()
         basecall_m.add_command(label="Clear base calls (undo)", command=self.clear_basecalls)
@@ -1591,12 +1608,17 @@ class LimoncelloAnalyzerApp(tk.Tk):
                      bg="#F2F4F7", activebackground="#DCE4EF", sliderrelief=tk.RAISED
                      ).pack(fill=tk.X)
 
-        f = section("Basecaller version")
-        for key, desc in BASECALLER_VERSIONS.items():
-            tk.Radiobutton(f, text=key, variable=self.basecaller, value=key,
+        f = section("Caller")
+        self.basecaller.set(CALLER_ALIASES.get(self.basecaller.get(), self.basecaller.get()))
+        for key, name, desc in CALLER_CHOICES:
+            tk.Radiobutton(f, text=name, variable=self.basecaller, value=key,
                            bg="#F2F4F7", activebackground="#F2F4F7",
                            selectcolor="#F2F4F7").pack(anchor=tk.W)
-            ttk.Label(f, text=f"  {desc}", foreground="#555").pack(anchor=tk.W)
+            ttk.Label(f, text=f"  {desc}", foreground="#555", wraplength=260
+                      ).pack(anchor=tk.W)
+        ttk.Label(f, text="MegaBACE 4000 runs use the same callers (no MB4000 "
+                          "colour matrix is bundled yet).",
+                  foreground="#777", wraplength=260).pack(anchor=tk.W, pady=(2, 0))
 
         f = section("Dye / channel")
         if not hasattr(self, "base_order_var"):        # keep the one traced
@@ -1609,47 +1631,45 @@ class LimoncelloAnalyzerApp(tk.Tk):
                   foreground="#777", wraplength=250).pack(anchor=tk.W)
 
         f = section("Baseline")
-        self.bl_enable = tk.BooleanVar(value=True)
-        check(f, "Enable baseline", self.bl_enable)
         self.bl_win = tk.IntVar(value=self.settings.baseline_window)
-        ttk.Label(f, text="Window").pack(anchor=tk.W)
+        ttk.Label(f, text="Baseline window (scans)").pack(anchor=tk.W)
         scale(f, self.bl_win, 51, 401, 1)
 
         f = section("Spectral & mobility")
         self.spec_en = tk.BooleanVar(value=True)
         self.spec_adapt = tk.BooleanVar(value=True)
         self.mob_en = tk.BooleanVar(value=True)
-        check(f, "Spectral separation", self.spec_en)
-        check(f, "Position-adaptive matrix", self.spec_adapt)
-        check(f, "Mobility correction", self.mob_en)
+        check(f, "Colour separation", self.spec_en)
+        check(f, "Colour separation adapts along the read", self.spec_adapt)
+        check(f, "Dye mobility correction", self.mob_en)
 
-        f = section("Band filter (deconv)")
+        f = section("Peak sharpening")
         self.gauss_en = tk.BooleanVar(value=True)
         self.gauss_seg = tk.IntVar(value=384)
         self.gauss_reg = tk.DoubleVar(value=0.05)
-        check(f, "Gaussian reconstruction", self.gauss_en)
-        ttk.Label(f, text="Segment size").pack(anchor=tk.W)
+        check(f, "Sharpen peaks (Gaussian deconvolution)", self.gauss_en)
+        ttk.Label(f, text="Segment length (scans)").pack(anchor=tk.W)
         scale(f, self.gauss_seg, 128, 1024, 1)
-        ttk.Label(f, text="Noise reg").pack(anchor=tk.W)
+        ttk.Label(f, text="Noise damping").pack(anchor=tk.W)
         scale(f, self.gauss_reg, 0.01, 0.2, 0.001)
 
-        f = section("Spacing tracker")
+        f = section("Base spacing")
         self.bonus = tk.DoubleVar(value=0.7)
         self.pullback = tk.DoubleVar(value=0.008)
         self.ema = tk.DoubleVar(value=0.08)
         self.wlo = tk.DoubleVar(value=0.70)
         self.whi = tk.DoubleVar(value=1.30)
-        ttk.Label(f, text="Channel peak bonus").pack(anchor=tk.W)
+        ttk.Label(f, text="Prefer a channel's own peak").pack(anchor=tk.W)
         scale(f, self.bonus, 0.0, 1.5, 0.1)
-        ttk.Label(f, text="Pullback weight").pack(anchor=tk.W)
+        ttk.Label(f, text="Pull towards the expected spacing").pack(anchor=tk.W)
         scale(f, self.pullback, 0.0, 0.03, 0.001)
-        ttk.Label(f, text="EMA alpha").pack(anchor=tk.W)
+        ttk.Label(f, text="How fast the expected spacing follows the read").pack(anchor=tk.W)
         scale(f, self.ema, 0.02, 0.25, 0.01)
-        ttk.Label(f, text="Window frac lo / hi").pack(anchor=tk.W)
+        ttk.Label(f, text="Allowed spacing, lowest / highest (× expected)").pack(anchor=tk.W)
         scale(f, self.wlo, 0.5, 0.95, 0.01)
         scale(f, self.whi, 1.05, 1.6, 0.01)
 
-        f = section("Scan region (display)")
+        f = section("Scans shown")
         self.scan_start = tk.IntVar(value=0)
         self.scan_end = tk.IntVar(value=0)
         ttk.Label(f, text="Start (0=auto)").pack(anchor=tk.W)
@@ -1661,7 +1681,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         bf.pack(fill=tk.X, padx=6, pady=8)
         ttk.Button(bf, text="Apply + redraw",
                    command=self.apply_knobs_redraw).pack(fill=tk.X, pady=2)
-        ttk.Button(bf, text="Basecall selected with these",
+        ttk.Button(bf, text="Base-call selected wells with these",
                    command=self.basecall_selected).pack(fill=tk.X, pady=2)
         ttk.Button(bf, text="Close", command=win.withdraw).pack(fill=tk.X, pady=(4, 2))
 
@@ -2300,6 +2320,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 doc.sequence = ""
                 doc.peak_positions = []
                 doc.qualities = []
+                doc.processed = None
                 doc.settings_used = None
                 cleared += 1
         self.status_var.set(
@@ -5550,6 +5571,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         View option is on and the file keeps its physical channels."""
         if not self.dye_corrected.get() or dset.view_mode not in ("raw", "processed", "called"):
             return tr
+        if dset.view_mode == "called" and getattr(doc, "processed", None) is not None:
+            return tr                     # the caller's trace is colour-separated already
         chans = getattr(doc, "channels", None)
         m = self._matrix_for(path) if chans is not None else None
         if m is None or m.is_identity() or np.shape(chans)[1] < m.n:
@@ -5773,13 +5796,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
             self._full_ylim = (float(gy0 - pad), float(gy1 + pad))
         return total
 
-    def _draw_letters(self, ax, doc, s0, s1, colors, force=False):
+    def _draw_letters(self, ax, doc, s0, s1, colors, force=False, tr=None):
         if not doc.sequence or not doc.peak_positions:
             return
         seq = doc.sequence
         pos = np.asarray(doc.peak_positions, dtype=float)
         med_sp = float(np.median(np.diff(pos))) if pos.size > 1 else 0.0
-        tr = doc.acgt
+        tr = doc.acgt if tr is None else tr
         ytop = float(np.nanmax(tr[max(0, s0):min(tr.shape[0], s1)])) if s1 > s0 else 1.0
         tight = (s1 - s0) > 1400
         draw_let = force or (not tight) or med_sp >= 10
@@ -5794,7 +5817,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                         ha="center", va="bottom", fontsize=6.5, zorder=5, clip_on=True)
         return med_sp
 
-    def _draw_esd_peaks(self, ax, doc, s0, s1, channel_lines):
+    def _draw_esd_peaks(self, ax, doc, s0, s1, channel_lines, tr=None):
         """ESD-style view — the MegaBACE basecaller's processed picture: the
         four dye traces with a clear mark on every peak.  When the run is
         base-called the marks sit at the CALLER's peaks, coloured like the
@@ -5802,7 +5825,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         rings at one scan and a mutation as a ring in an unexpected channel.
         Nothing called yet?  Falls back to simple per-channel peak detection
         so the pattern still reads like an ESD."""
-        tr = doc.acgt
+        tr = doc.acgt if tr is None else tr
         if tr is None or tr.size == 0 or s1 <= s0:
             return
         col_color = {col: color for ci, base, col, color in channel_lines}
@@ -6714,7 +6737,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
 
     def _add_volt_label(self):
         """One shared Y-axis label, centred on the whole stack with some air."""
-        self.fig.supylabel("Volt", fontsize=8, x=0.014, color="#333")
+        caller = self.view_mode.get() == "called" and any(
+            getattr(self.docs.get(str(Path(p).resolve())), "processed", None) is not None
+            for p in self._shown_files(self._graph_count()))
+        self.fig.supylabel("Base-caller signal (normalised)" if caller else "Volt",
+                           fontsize=8, x=0.014, color="#333")
 
     def redraw(self):
         """Repaint the graphs, then move the table to match them.
@@ -6876,8 +6903,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 self._draw_esd_peaks(
                     ax, doc, s0, s1, self._channel_lines(dset))
             elif doc.sequence and settings.view_mode == "called" and doc.peak_positions:
+                # the caller's own processed trace is drawn (display_trace):
+                # a ring on every called peak, the letter above it
+                self._draw_esd_peaks(ax, doc, s0, s1, self._channel_lines(dset), tr=tr)
                 if self.show_letters.get():
-                    self._draw_letters(ax, doc, s0, s1, colors, force=False)
+                    self._draw_letters(ax, doc, s0, s1, colors, force=False, tr=tr)
                 ytop = float(np.nanmax(tr[s0:s1])) if s1 > s0 else 1.0
                 if self.show_qnum.get():
                     q = doc.qualities or []
@@ -7416,7 +7446,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         for k, v in data.items():
             if hasattr(self.settings, k):
                 setattr(self.settings, k, v)
-        self.basecaller.set(data.get("basecaller", "mb1000_accuracy"))
+        b = data.get("basecaller", "mb1000_accuracy")
+        self.basecaller.set(CALLER_ALIASES.get(b, b))
         self.base_order_var.set(data.get("base_order", "ACTG"))
         self.bonus.set(data.get("channel_peak_bonus", 0.7))
         self.pullback.set(data.get("pullback_weight", 0.008))
@@ -7561,9 +7592,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             "Serves all instruments that produce CE traces:\n"
             "Formats: .rsd, .scf, ABI .ab1, text/CSV traces\n"
             "Current trace: µA (RSD raw ÷10); fluorescence in Volts.\n"
-            "Basecallers: mb1000/mb4000 × accuracy/length (pos_bonus07 and\n"
-             "            pos_profile are legacy aliases of those; hz_soften,\n"
-             "            raw_peaks remain), see the Basecall settings dialog.\n"
+            "Base callers: Accuracy, Length, Length (gentler sharpening) and\n"
+            "            Quick look -- see Base calling > Basecall settings.\n"
             "Multi-folder load, multi-graph, auto-tour, well sort/filter.\n"
             "ESD-style processed view under Base calling; manual peak picking\n"
             "genotyping (click peaks, +A tagging, sizes via internal standard,\n"
