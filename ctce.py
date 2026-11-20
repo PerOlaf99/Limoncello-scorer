@@ -253,13 +253,19 @@ def anchor_scan(rt: RunTrace) -> Optional[float]:
     return float(min(big, key=lambda p: p.pos).pos) if big else None
 
 
-def internal_standard_scans(rt: RunTrace, is_channel: int) -> Optional[List[float]]:
+def internal_standard_scans(rt: RunTrace, is_channel) -> Optional[List[float]]:
     """Bands of an internal standard on another channel (genotyping's
-    equimolar quartet search), or None."""
+    equimolar quartet search), or None.  *is_channel* "auto": search every
+    channel but the sample's and take the clearest copy (no dye matrix is
+    applied, so the standard bleeds into its neighbours)."""
     try:
         import genotyping
-        y = channel_trace(rt._doc.acgt, rt._order, is_channel)
-        hit = genotyping.find_is_quartet(y)
+        if is_channel == "auto":                    # wherever the standard shows best
+            sample_col = "ACGT".index(rt._order[rt.channel - 1])
+            hit = genotyping.find_is_quartet_any(rt._doc.acgt, sample_col)
+        else:
+            y = channel_trace(rt._doc.acgt, rt._order, is_channel)
+            hit = genotyping.find_is_quartet(y)
     except Exception:                                  # noqa: BLE001
         return None
     return [float(s) for s in hit[0]] if hit else None

@@ -145,6 +145,8 @@ TRIM_FRACTION = 0.05
 IS_PROMINENCE_FRAC = 0.010
 IS_HEIGHT_FRAC = 0.020
 IS_SAT_SKIP = (10, 32)       # a +A tail sits this many scans behind its parent
+# Smoothing before the candidate search: (median, Savitzky-Golay) windows.
+IS_SMOOTH = (5, 9)
 IS_SAT_RATIO = 1.15
 IS_MAX_CANDIDATES = 60       # keep the search bounded
 
@@ -487,7 +489,7 @@ def _is_candidates(trace, cut=1900, geometry=None):
     of the fitted gaps are treated as satellites.
     """
     from scipy.signal import find_peaks, medfilt, savgol_filter
-    y = savgol_filter(medfilt(np.asarray(trace, float), 5), 9, 2, mode="interp")
+    y = savgol_filter(medfilt(np.asarray(trace, float), IS_SMOOTH[0]), IS_SMOOTH[1], 2, mode="interp")
     y = y - float(np.median(y[:400]))            # baseline before prominence
     mx = float(y.max())
     if mx <= 0:
@@ -666,6 +668,45 @@ def find_is_quartet(trace, cut=1900, geometry=None, center=None, center_tol=None
     if core is None:
         return None
     return core
+
+
+def find_is_quartet_any(acgt, sample_col=None, cut=1900, clip=65000.0):
+    """The internal standard found in whichever channel shows it best.
+
+    No dye-overlap matrix is applied to these runs, so the standard bleeds
+    into the neighbouring channels and the operator marked it where it was
+    clearest (a bleed copy when the standard's own channel was saturated).
+    The sample's own channel -- the strongest on the plate; pass
+    *sample_col*, else the strongest channel of this well -- is never
+    searched, because a heterozygous sample also makes four equal peaks.
+    Every other channel is searched; a copy whose band is clipped is
+    skipped; the clean quartet with the strongest weakest band wins.
+
+    Returns (scans, heights, acgt column) or None.  Scored against the
+    operator's GUI clicks (197 wells, 8 plates, 2026-11-20): 155 exact
+    (<= 3 scans) against 38 for one fixed channel."""
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    a = np.asarray(acgt, float)
+    if a.ndim != 2 or a.shape[0] < 500:
+        return None
+    if sample_col is None:
+        sample_col = int(np.argmax(np.percentile(a[min(1500, a.shape[0] // 2):], 99.9, axis=0)))
+    best = None
+    for c in range(a.shape[1]):
+        if c == sample_col:
+            continue
+        raw = a[:, c]
+        y = raw - uniform_filter1d(minimum_filter1d(raw, 151), 151)
+        hit = find_is_quartet(y, cut)
+        if not hit or len(hit[0]) != 4:
+            continue
+        bands = [int(x) for x in hit[0]]
+        if any(raw[max(0, b - 3):b + 4].max() >= clip for b in bands):
+            continue
+        key = min(float(y[b]) for b in bands)
+        if best is None or key > best[0]:
+            best = (key, bands, [float(y[b]) for b in bands], c)
+    return None if best is None else (best[1], best[2], best[3])
 
 
 class PlateISModel:

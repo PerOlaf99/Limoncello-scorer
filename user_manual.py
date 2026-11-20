@@ -256,7 +256,7 @@ Cycling temperature capillary electrophoresis separates the duplexes of a fragme
 
 Auto genotyping ▸ CTCE analysis… finds the peaks of interest of a plate and measures them:
 • **Plate** — the runs of one plate (folders that differ only by RunNN). Each run's temperature is read from its .rsd, and the runs are ordered by it, so a hotter run done first still shifts the right way.
-• **Sample channel** — the analysis uses ONE channel, the strongest by default. **Internal standard** — choose its channel when the plate carries one; its bands then line the runs up (offset and stretch). Without it the runs are lined up on the early primer peak.
+• **Sample channel** — the analysis uses ONE channel, the strongest by default. **Internal standard** — choose its channel when the plate carries one, or **Auto (clearest)**: no dye-overlap matrix is applied, so the standard also shows in the neighbouring channels; Auto searches every channel except the sample's and takes the clearest unclipped copy. Its bands then line the runs up (offset and stretch). Without it the runs are lined up on the early primer peak.
 • How the peaks of interest are found:
 ```
   two or more temperatures   peaks that move LATER as it warms, each by its

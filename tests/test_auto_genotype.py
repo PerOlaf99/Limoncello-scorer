@@ -324,3 +324,22 @@ def test_measured_areas_track_the_ground_truth_fixture():
     # dominant band now reads higher (C07 snr2 889 -> 1615) by design.  Areas
     # are what the fixture pins; significance is covered by the synthetic
     # tests above.
+
+
+def test_the_standard_is_found_in_its_clearest_channel_not_the_samples():
+    # the standard sits in column 1 and bleeds weakly into column 0; the
+    # sample (column 2, much stronger) is heterozygous and also shows four
+    # equal peaks -- it must never be taken for the standard
+    n = 4000
+    x = np.arange(n, dtype=float)
+    def bands(scans, h):
+        return sum(h * np.exp(-0.5 * ((x - s) / 2.5) ** 2) for s in scans)
+    std = [2100, 2130, 2215, 2250]
+    acgt = np.full((n, 4), 100.0)
+    acgt[:, 1] += bands(std, 3000)
+    acgt[:, 0] += bands(std, 400)                              # bleed copy
+    acgt[:, 2] += bands([s - 13 for s in std], 20000)          # heterozygous sample
+    hit = g.find_is_quartet_any(acgt)
+    assert hit is not None
+    scans, _h, col = hit
+    assert col == 1 and all(abs(a - b) <= 2 for a, b in zip(scans, std))

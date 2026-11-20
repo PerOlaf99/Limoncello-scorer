@@ -7181,8 +7181,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                      values=["Auto (strongest)", "1", "2", "3", "4"]).grid(row=1, column=1, sticky="w", padx=6, pady=(6, 0))
         ttk.Label(top, text="Internal standard").grid(row=1, column=2, sticky="w", pady=(6, 0))
         is_var = tk.StringVar(value="None")
-        ttk.Combobox(top, textvariable=is_var, state="readonly", width=8,
-                     values=["None", "1", "2", "3", "4"]).grid(row=1, column=3, sticky="w", padx=6, pady=(6, 0))
+        ttk.Combobox(top, textvariable=is_var, state="readonly", width=16,
+                     values=["None", "Auto (clearest)", "1", "2", "3", "4"]).grid(row=1, column=3, sticky="w", padx=6, pady=(6, 0))
         merge_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="Add stutter to its parent peak", variable=merge_var).grid(
             row=1, column=4, sticky="w", padx=(12, 0), pady=(6, 0))
@@ -7233,7 +7233,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
             plate = names[plate_var.get()]
             folders = plates[plate]
             channel = None if ch_var.get().startswith("Auto") else int(ch_var.get())
-            is_ch = None if is_var.get() == "None" else int(is_var.get())
+            is_ch = (None if is_var.get() == "None" else
+                     "auto" if is_var.get().startswith("Auto") else int(is_var.get()))
             template = None
             picks = self._ctce_picks(folders) if tpl_var.get() else {}
             if picks:
