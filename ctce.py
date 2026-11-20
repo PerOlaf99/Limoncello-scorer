@@ -861,7 +861,12 @@ def _front(ys: np.ndarray, c: int) -> int:
     the peak) or turns up again (the valley after a peak before it)."""
     sm = np.convolve(ys, np.ones(5) / 5, mode="same")
     top = ys[max(0, c - 2):c + 3].max()
-    k = c
+    # start from the smoothed apex: on a sharp, clean peak (Pfu) the 5-scan
+    # mean can peak a scan before the raw apex, and starting on its falling
+    # side stopped the walk at once -- the block began at the main peak and
+    # kept a tenth of a heteroduplex (testis S11 E05: 3.3 k instead of ~35 k)
+    lo = max(1, c - 3)
+    k = lo + int(np.argmax(sm[lo:c + 4]))
     while k > max(1, c - SPECIES_WINDOW[0] - 4) and sm[k] >= 0.01 * top and sm[k - 1] <= sm[k]:
         k -= 1
     return k

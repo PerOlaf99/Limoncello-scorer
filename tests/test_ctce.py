@@ -272,3 +272,14 @@ def test_width_stops_at_a_valley():
     assert ctce._fwhm(y, 200) <= 12
     broad = gauss(x, 200, 25.0, 1.0e4)
     assert ctce._fwhm(broad, 200) > 40
+
+
+def test_a_block_starts_at_the_foot_of_a_sharp_peak():
+    # a sharp peak whose 5-scan mean tops out a scan before the raw apex
+    # (clean Pfu products): the block must still start at the foot of the
+    # rise, not at the peak itself -- that cut heteroduplexes to a tenth
+    ys = np.zeros(200)
+    c = 100
+    ys[c - 6:c + 1] = [50, 200, 500, 800, 900, 950, 1000]
+    ys[c + 1:c + 4] = [100, 50, 20]
+    assert ctce._front(ys, c) <= c - 5
