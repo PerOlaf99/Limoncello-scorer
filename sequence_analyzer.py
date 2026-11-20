@@ -70,6 +70,7 @@ from analyzer_core import (
     run_basecall,
     display_trace,
     run_params_summary,
+    temperature_cycling,
 )
 
 CHANNEL_ORDER = "ACGT"
@@ -5480,6 +5481,12 @@ class LimoncelloAnalyzerApp(tk.Tk):
         else:
             chunks.append("Run conditions")
             add("Voltage / time / temp", "not recoverable from this file")
+        cyc, score, per = temperature_cycling(getattr(doc, "current", None))
+        if cyc != "unknown":
+            add("Temperature cycling", {
+                "cycling": f"yes -- the current ripples every ~{per} scans (CTCE)",
+                "constant": "no -- one temperature (current declines in plain steps)",
+                "check": f"unclear (score {score:.2f}) -- look at the current trace"}[cyc])
         add("Column layout", doc.base_order)
         add("Basecaller", self.basecaller.get())
         if doc.sequence:

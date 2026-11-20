@@ -3,7 +3,44 @@
 State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`).
 Everything is on `main`.
 
-**Latest (home, 2026-11-18 night):** open item 1 below was done at home, committed in `eb1ff7a`.
+**Latest (work PC, 2026-11-19 evening): towards one general engine.** The operator's requirements:
+- The engine must work for any fragment.
+- It reports a **directional variant-2 fraction from 0 to 1**. LCM wells (~30 cells) span the whole heteroplasmy range, and SNP plates are hom1/het/hom2.
+- A lone homoduplex gives 0 or 1.
+- Runs with the internal standard (STD) need no marks.
+
+Findings:
+- **Today's species search is #19_20-specific.** On rs1695 T9 it found 48 of the 306 species the standard marks. It assumes:
+  - Homo1 is the largest peak;
+  - the heteroduplexes lie 1.5–4 Homo1→Homo2 distances after Homo1;
+  - a band around the primer peak.
+- **The block measurement carries over.** Placed by the standard, it gives MF within 0.04 (mean) of `tests/data/rs1695_measured.csv`.
+- **A general fit works.** It learns the plate pattern as spacing ratios between the four species, fits it per well on prominent clusters, snaps to real candidates and checks chemistry (the larger homoduplex is never much smaller than a heteroduplex).
+  - On T9 it gives MF mean |diff| 0.012, with 96 % of wells within 0.05.
+  - On T5 the plate-learned pattern matched T9's, and MF came within 0.05 in 81 % of wells.
+  - T2 did badly in that test, but its pattern (≈1.088 / 1.108) was probably right: the operator's marks at 55 °C give heteroduplexes at 1.076 / 1.086, against 1.134 / 1.174 on T9 at 54 °C, so the spacing moves a lot with temperature. The failure came from wrong simulated "marks", which put Hetero1 and Hetero2 at the same place.
+  - **Agreed design:** the operator clicks Homo1 → Homo2 → Hetero1 → Hetero2 on ~6 wells per fragment and temperature (heterozygous wells on SNP plates). Learn the pattern from those, fit every well.
+  - Scripts: `NVMe Disk/limoncello-data/ctce/scripts_20261119/` (`gfit.py`, `rs_IS.py`, `rs_fitscore.py`).
+- **Standard (STD) detection, scored against the operator's GUI clicks** (197 wells, 8 plates): 155 exact (≤ 3 scans), against 38 for the old single-channel search.
+  - **Rule:** exclude the sample's own channel (the strongest; heterozygous samples also make four peaks), search every other channel (no dye matrix is applied, so the standard bleeds and the operator marked whichever channel showed it best), skip clipped copies, take the strongest clean quartet.
+  - **Still wrong:**
+    - IL10, where the heteroduplex bands are 5–7 scans apart and the 9-point smoothing in `genotyping._is_candidates` merges them;
+    - a weak heteroduplex band, which pulls in a later stray peak (CYBA N1).
+  - **Needs the operator's OK:** the fix goes into `genotyping.py`, which the genotyping auto-caller shares.
+  - **Fragments:** `oy_standard_survey.csv` ranks them; rs1695, ABCC2, CYBA and GSTM1 have the cleanest standards.
+- **Answer key:** only the operator's clicks in Limoncello's Genotyping tool.
+  - Here: `~/Dokumenter/IS.csv`, `RS1695_T9_IS_Peaks.csv`, `CYBA_N1_A01_C04_IS_Peaks.csv`.
+  - At home: `library/*.json`, including a 96-well rs1695 plate. `library/` is gitignored, so bring it over.
+  - **Not usable:** `~/CE/90_genotyping_tools/is_peaks_*.csv`, an older tool that writes the same positions in every well.
+- **Two-temperature test:** T1 is not usable (no standard at 56 °C, smeared traces). Use `OY_rs1695gradient_150910` (57 °C / 59 °C).
+- **LCM failed PCRs** (primer and primer-dimer only) need a rule. On `080419_MIT97_P1F14_96spots_LCM` the peak positions show no clean gap between the primer region and the product, so ask the operator to mark a few failed and a few amplified wells first.
+- **More answer keys:**
+  - `excel_peaks/C276_C528/` (Excel: nine named slots per well, with positions, heights and areas); the raw runs aren't on the disk yet.
+  - `Chris_96` (279 runs): real tumour mutations scored by eye, no standard.
+- **New in the program (uncommitted, tests pass):** `analyzer_core.temperature_cycling` — a cycled run makes the current ripple — shown as "Temperature cycling" in Run info.
+- **Data:** see `NVMe Disk/limoncello-data/README_DATA.md` (catalogue, by-kind index, 110 GB of verified duplicates removed).
+
+**Earlier (home, 2026-11-18 night):** open item 1 below was done at home, committed in `eb1ff7a`.
 - **First thing at work:** pull, then run the benchmark with `--plate "021123_mt_nucl_#19_20"`.
 - **Check 021123's colder Homo1** (the operator's drag at Run01 A01 is 2307–2375).
 - **Check the "temperatures disagree" flag:** see which wells it fires on, and whether those are the ones the operator had in mind.
