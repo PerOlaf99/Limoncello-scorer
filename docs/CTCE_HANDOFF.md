@@ -3,6 +3,56 @@
 State of the CTCE species work (`ctce.py`, CTCE window in `sequence_analyzer.py`).
 Everything is on `main`.
 
+## 2026-11-23: answer keys in place, and the plan for a general engine
+
+**Data** (NVMe disk, `limoncello-data/`; the rules are in `answer_keys/LEGEND_DECISIONS.md`):
+- **Catalogue rebuilt:** 7,770 runs, now including `from_mybook` (348) and `from_sids` (69), which were skipped before.
+  - Script: `tools/answer_keys/merge_catalog.py`.
+  - The content fingerprint reads only the first 64 KB, so it can't tell a renamed copy from the original. For example, `120618_#1_P7F9_STD#2_Arstad Run02` (MyBook) is `120618_#2…`'s data under a new name. **The sample is #2.**
+- **Rulings on the paper sheets (operator):**
+  - red "0.0" = WT;
+  - "Dårlig PCR" = no PCR, the block is not scored;
+  - "OBS template" = the call is kept;
+  - a strike-out = re-evaluation (crossed out with nothing instead = WT).
+- **Lavage 2015 + Christian's Excel** (`add_lavage_excel.py`):
+  - The paper is the primary record; an empty Excel cell = not entered.
+  - Excel code 3 "neg" = no PCR product.
+  - The key now carries a sample ID per well.
+  - **P1F5:** Excel put plate 2's failed PCR under plate 1, and the runs confirm the paper.
+- **Expert quantitative keys: fractions from peak heights picked by hand** (the operator and Paulo, every electropherogram):
+  - `testis5_3d_p2f1/p2f2_scoring.csv`, ~3,100 spots (M1 = WT, M2… = mutants, up to 3 per spot);
+  - `tumor_3d_scoring.csv`, ~4,900 spots: T170 breast tumour + N170 node + L170 liver met (P1F1), T231 bladder + LN231 node
+    (= M231/Met231; P2F6, P5F6), Liver13 (P1F15). Excel "Fractions" = the WT share.
+  - Builders: `tools/answer_keys/build_testis_3d.py`, `build_tumor_3d.py`.
+  - LN231 P2F6 S41/S46 and P5F6 S46 share ~30 identical values, probably copy-paste; they are flagged.
+  - The workbooks space slices evenly; sections are 12 µm apart (`z_by_section`).
+
+**Height vs area (operator):** a correctly drawn area = the molecules that passed the detector, and is more accurate than height.
+Plan:
+1. The engine measures **both** on the same peaks.
+2. Check its *height* fraction against the hand heights. This tests the peak picking.
+3. Then measure area vs height, to get a correction per fragment.
+
+**Design for the general engine** (agreed direction; no end-to-end ML):
+1. **Signal:** baseline, sample channel, alignment on the STD (or on each well's own main peak; without a STD, peaks drift by up to 300 scans between capillaries).
+2. **Product present?** Main-peak height and cleanliness against the plate.
+3. **WT shape from the plate itself:** the median of its most ordinary wells. This works when every sample carries a *different* mutation (mutation scans), which a fixed list of peak positions cannot handle. Fall back to a library WT shape when most wells are mutant (LCM tumour plates).
+4. **Extra peaks beyond the WT shape:**
+   - 2–3 sharp peaks after the main peak = mutant;
+   - heteroduplexes only = low MF;
+   - stutter and the +A shoulder must not count.
+5. **Fit and quantify:** areas and heights → p.
+6. **Call:** WT / LOW / MUT / no PCR, from a small classifier on those numbers, trained on the paper keys. Validate leaving out a whole study at a time.
+7. **GUI:** a review queue sorted by confidence; corrections feed the library and the training set.
+8. **First:** a harness that scores the engine against every answer key.
+
+**Prototype** `ctce_consensus_prototype.py` (steps 2–4 only; Lavage plates, against the paper key):
+- **No PCR vs WT** by main-peak height: AUC 0.83–0.99 on 8 of 9 plates.
+- **MUT/LOW vs WT:** AUC 0.57–0.96 (P1F13 p1 0.96, P2F2 p2 0.87, P2F6 p2 0.80).
+- **Why it misses:** messy no-PCR wells crowd out the mutants, so the product test must come first. Stutter-aware extra-peak scoring is the main thing left.
+- **P1F13 plate 2 is inverted** (the paper's no-PCR wells have *taller* product than WT, AUC 0.008), so a plate mix-up is suspected. Check it in the GUI.
+- **The 090215 P2F1/P2F2 Lavage runs** may not be the runs that were scored: the sheets are dated 19.03.15.
+
 **Latest (work PC, 2026-11-19 evening): towards one general engine.** The operator's requirements:
 - The engine must work for any fragment.
 - It reports a **directional variant-2 fraction from 0 to 1**. LCM wells (~30 cells) span the whole heteroplasmy range, and SNP plates are hom1/het/hom2.
