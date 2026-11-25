@@ -658,6 +658,8 @@ How it works, and what to watch:
   The rescued bands must stand taller than the other peaks between them
   (1.5×), so a channel of small equal peaks cannot be made into a ladder. A
   rescued well says so in its warnings.
+  The check of detection and rescue against all 167 runs, with per-run
+  findings, is in [`docs/FRAGMENT_SIZING_QC.md`](docs/FRAGMENT_SIZING_QC.md).
 - **Matching is order-based.** Only peaks of ladder-band height are offered
   (dye bleed from the sample channels sits far lower), and they are aligned to
   the kit's lengths monotonically (a Needleman–Wunsch alignment), so a missing
