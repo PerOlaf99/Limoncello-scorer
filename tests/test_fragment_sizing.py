@@ -195,3 +195,93 @@ def test_size_trace_records_channels_and_base_letter():
     assert res.rows[0]["base"] == "C"      # Ch2 under ACTG
     summary = res.summary()
     assert summary["ladder_channel"] == 4 and summary["sample_channel"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# the whole plate: automatic ladder/channel, plate-guided rescue
+# --------------------------------------------------------------------------- #
+ET550 = fs.load_ladder("et550r").lengths
+# MegaBACE-like spread: ~9 scans/bp at the short end, ~6 at 550 bp, so the
+# 300/310 pair is two peaks as on the real plates
+MIG = lambda bp: 900.0 + 9.0 * bp - 0.003 * bp ** 2  # noqa: E731
+
+
+def plate_doc(*, ladder_ch=1, bleed=0.12, seed=0, stretch=1.0, junk=()):
+    """ET550-R in *ladder_ch* (bleeding into the next channel), alleles in
+    channel 3, optional *junk* scans (taller than the bands) in the ladder
+    channel; *stretch* slows this capillary."""
+    acgt = np.zeros((N_SCANS, 4))
+    put = lambda ch, y: acgt.__setitem__((slice(None), acgt_index_for_channel("ACTG", ch)), y)  # noqa: E731
+    lad = [500 + stretch * (MIG(b) - 500) for b in ET550]
+    lc = synth_channel(lad, height=1200.0, noise=2.0, seed=seed)
+    if junk:
+        lc = lc + synth_channel(junk, height=2500.0, seed=seed + 7) - BASELINE
+    put(ladder_ch, lc)
+    nxt = ladder_ch % 4 + 1
+    put(nxt, BASELINE + bleed * (lc - BASELINE) + np.random.default_rng(seed + 3).normal(0, 2, N_SCANS))
+    others = [c for c in (1, 2, 3, 4) if c not in (ladder_ch, nxt)]
+    put(others[0], synth_channel([MIG(b) for b in (112, 116, 180, 184, 231, 239)],
+                                 height=900.0, noise=2.0, seed=seed + 1))
+    put(others[1], synth_channel([], noise=2.0, seed=seed + 2))
+    return FakeDoc(acgt, well=f"W{seed:02d}", path=f"W{seed:02d}.rsd")
+
+
+def test_detect_ladder_finds_kit_and_channel_not_the_bleed():
+    docs = [plate_doc(ladder_ch=1, seed=s) for s in range(4)]
+    det = fs.detect_ladder(docs)
+    assert det["ladder"] == "et550r"          # not ILS600/ILS500, which share many lengths
+    assert det["channel"] == 1                # not channel 2, which holds 12 % bleed
+    assert det["wells_ok"] == 4
+    assert det["rivals"] == []                # a clean plate leaves no doubt about the kit
+
+
+def test_detect_ladder_finds_a_ladder_in_channel_four():
+    det = fs.detect_ladder([plate_doc(ladder_ch=4, seed=s) for s in range(3)])
+    assert (det["ladder"], det["channel"]) == ("et550r", 4)
+
+
+def test_detect_ladder_reports_none_without_a_size_standard():
+    rng = np.random.default_rng(5)
+    docs = []
+    for s in range(3):
+        acgt = np.zeros((N_SCANS, 4))
+        for k in range(4):     # busy sample channels, no ladder anywhere
+            acgt[:, k] = synth_channel(sorted(rng.uniform(1500, 5800, 60)),
+                                       height=float(rng.uniform(200, 900)), noise=2.0, seed=s * 4 + k)
+        docs.append(FakeDoc(acgt))
+    assert fs.detect_ladder(docs)["ladder"] is None
+
+
+def test_sample_peaks_in_the_ladder_channel_are_flagged():
+    # a sample's peaks bleeding into the ladder channel: scattered, mixed heights
+    rng = np.random.default_rng(11)
+    doc = plate_doc(junk=sorted(rng.uniform(MIG(60), MIG(550), 40)))
+    res = fs.size_trace(doc, "et550r", ladder_channel=1, sample_channels=[3])
+    assert res.quality["unexplained_tall"] > fs.MAX_UNEXPLAINED
+    assert any("does not explain" in w for w in res.warnings)
+
+
+def test_template_rescues_a_ladder_under_taller_junk():
+    good = [fs.size_trace(plate_doc(seed=s, stretch=1.0 + 0.02 * s), "et550r",
+                          ladder_channel=1, sample_channels=[3]) for s in range(4)]
+    tmpl = fs.plate_template(good)
+    assert tmpl and len(tmpl) == len(ET550)
+    lad = [500 + 1.06 * (MIG(b) - 500) for b in ET550]
+    junk = [s + 0.5 * (t - s) for s, t in zip(lad, lad[1:])][::2]   # between bands, taller
+    bad = plate_doc(seed=9, stretch=1.06, junk=junk)
+    pk = fs.detect_peaks(bad.acgt[:, acgt_index_for_channel("ACTG", 1)],
+                         min_prominence_frac=fs.DEFAULT_LADDER_PROMINENCE_FRAC,
+                         min_height_frac=fs.DEFAULT_LADDER_HEIGHT_FRAC)
+    got = fs.align_to_template([p.scan for p in pk], ET550, tmpl)
+    assert len(got) >= 0.8 * len(ET550)
+    for scan, bp in got:
+        assert abs(scan - (500 + 1.06 * (MIG(bp) - 500))) < 4
+
+
+def test_template_refuses_a_channel_of_equal_small_peaks():
+    good = [fs.size_trace(plate_doc(seed=s), "et550r", ladder_channel=1,
+                          sample_channels=[3]) for s in range(4)]
+    tmpl = fs.plate_template(good)
+    scans = list(range(1500, 5900, 9))         # a peak every 9 scans, all alike
+    got = fs.align_to_template(scans, ET550, tmpl, {s: 6.0 for s in scans})
+    assert got == []

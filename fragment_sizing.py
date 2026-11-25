@@ -131,6 +131,7 @@ class SizingResult:
     warnings: List[str] = field(default_factory=list)
     standards: List[dict] = field(default_factory=list)   # the ladder bands found
     matrix: str = ""                                       # dye-overlap correction used
+    detection: str = ""                                    # how the ladder/channel was chosen
     sample_channels: List[int] = field(default_factory=list)
 
     def summary(self) -> dict:
@@ -977,6 +978,279 @@ def ladder_fit_quality(scans: Sequence[int],
 
 
 # --------------------------------------------------------------------------- #
+# the whole plate: which ladder, in which channel, and where its bands sit
+# --------------------------------------------------------------------------- #
+# A share of the kit's bands this large, fitted this tightly, is a ladder.
+MIN_BAND_SHARE = 0.8
+
+# A ladder channel holds the ladder and little else: tall peaks inside the
+# ladder's span that the kit does not account for, per band of the kit.
+# Measured (2026-11-25, cell ID and non-ladder runs): ET550-R in its own
+# channel 0-0.09; a wrong kit on that ladder (ILS600/ILS500 on ET550-R)
+# 0.19-0.41; sample and noise channels of runs without a ladder 1.9-20.
+MAX_UNEXPLAINED = 0.25
+
+
+def unexplained_tall(peaks: Sequence[Peak], anchors: Sequence[Tuple[int, float]],
+                     n_bands: int) -> Optional[float]:
+    """Tall peaks (at least half the median matched band) inside the anchors'
+    span that are not anchors, per band of the kit."""
+    if not anchors or not n_bands:
+        return None
+    h = {p.scan: p.height for p in peaks}
+    ms = {int(s) for s, _ in anchors}
+    band = float(np.median([h.get(s, 0.0) for s in ms]))
+    lo, hi = min(ms), max(ms)
+    n = sum(1 for sc, ht in h.items() if lo <= sc <= hi and sc not in ms and ht >= 0.5 * band)
+    return n / float(n_bands)
+
+
+# Kits tried when the ladder is "auto": the ROX-channel standards a MegaBACE
+# lab is likely to have used.  LIZ kits need a fifth channel and are left out.
+DETECT_KITS = ("et400r", "et550r", "et900r", "promega_ils600", "promega_ils500",
+               "genescan500_rox", "genescan400hd_rox", "mapmarker1000",
+               "beckman_ss400")
+
+
+# a run's kit/channel needs a clean fit in at least this many test wells
+MIN_DETECT_WELLS = 3
+
+
+def ladder_fit_ok(quality: Dict[str, object], n_bands: int) -> bool:
+    """Most of the kit's bands found, each predicted from the others to a
+    small part of a band spacing, and (when measured) few tall peaks in the
+    channel left unexplained by the kit (:data:`MAX_UNEXPLAINED`)."""
+    n = int(quality.get("anchors") or 0)
+    rel = quality.get("rms_error_spacing")
+    unexpl = quality.get("unexplained_tall")
+    return (n >= max(MIN_LADDER_ANCHORS + 1, MIN_BAND_SHARE * n_bands)
+            and rel is not None and rel <= MAX_LADDER_RMS_SPACING
+            and (unexpl is None or unexpl <= MAX_UNEXPLAINED))
+
+
+def fit_ladder_channel(trace, ladder, peaks: Optional[List[Peak]] = None) -> Dict[str, object]:
+    """Ladder fit of one channel alone (no sample sizing): the anchors, their
+    leave-one-out quality, and the median height of the matched bands.
+    *peaks*: the channel's :func:`detect_peaks` at ladder settings, if known."""
+    if isinstance(ladder, str):
+        ladder = load_ladder(ladder)
+    if peaks is None:
+        peaks = detect_peaks(trace, min_prominence_frac=DEFAULT_LADDER_PROMINENCE_FRAC,
+                             min_height_frac=DEFAULT_LADDER_HEIGHT_FRAC)
+    noise = _baseline_noise(trace)
+    top = max((p.height for p in peaks), default=0.0)
+    out = {"anchors": [], "quality": ladder_fit_quality([], []), "band_height": 0.0,
+           "ok": False}
+    if not peaks or noise <= 0 or top < MIN_LADDER_SNR * noise:
+        return out
+    cand = ladder_candidates(peaks, len(ladder.lengths))
+    n = len(ladder.lengths)
+    if len(cand) > (1.0 + MAX_UNEXPLAINED) * n + 12:
+        # far more band-height peaks than the kit has bands: whatever fits,
+        # too many tall peaks would be left unexplained -- skip the alignment
+        out["crowded"] = True
+        return out
+    matched = align_peaks([p.scan for p in cand], ladder.lengths)
+    anchors = [(s, b) for s, b in matched
+               if not any(abs(b - x) < 1e-6 for x in ladder.exclude)]
+    q = ladder_fit_quality([s for s, _ in anchors], [b for _, b in anchors])
+    q["unexplained_tall"] = unexplained_tall(peaks, anchors, len(ladder.lengths))
+    h = {p.scan: p.height for p in cand}
+    out.update(anchors=anchors, quality=q,
+               band_height=float(np.median([h[s] for s, _ in anchors])) if anchors else 0.0,
+               ok=ladder_fit_ok(q, len(ladder.lengths) - len(ladder.exclude)))
+    return out
+
+
+def detect_ladder(docs, *, matrix=None, kits: Sequence = DETECT_KITS,
+                  channels: Optional[Sequence[int]] = None,
+                  base_order: Optional[str] = None,
+                  enough: Optional[int] = None, min_docs: int = 8) -> Dict[str, object]:
+    """Which size standard a run used, and in which physical channel.
+
+    Every channel of each document is fitted against every kit.  The run's
+    answer is the channel and kit that give a clean fit (:func:`ladder_fit_ok`)
+    in the most wells.  ROX bleeds into its neighbours, so a neighbouring
+    channel can fit the same ladder just as cleanly at a fraction of the
+    height: among channels that fit about as often, the one with the tallest
+    bands is the ladder's own.  With *enough*, documents are read in turn
+    and the search stops once *min_docs* have been read and one combination
+    is clean in *enough* of them (pass a lazy iterable to load no more than
+    needed).  Returns ``ladder`` (kit key, or None),
+    ``channel``, ``wells``, ``wells_ok``, ``rivals`` (other kits clean in at
+    least half as many wells in that channel) and ``table`` (every
+    combination's count of clean wells and median band height).
+    """
+    ladders = {(k if isinstance(k, str) else k.name): (load_ladder(k) if isinstance(k, str) else k)
+               for k in kits}
+    tally: Dict[Tuple[int, str], List[Tuple[float, float]]] = {}
+    n_docs = 0
+    for doc in docs:
+        order = base_order or getattr(doc, "base_order", None) or DEFAULT_BASE_ORDER
+        _, corr = _channels_for_sizing(doc, order, matrix)
+        n_docs += 1
+        for c in (channels or range(1, corr.shape[1] + 1)):
+            y = corr[:, c - 1]
+            pk = detect_peaks(y, min_prominence_frac=DEFAULT_LADDER_PROMINENCE_FRAC,
+                              min_height_frac=DEFAULT_LADDER_HEIGHT_FRAC)
+            noise = _baseline_noise(y)
+            if not pk or noise <= 0 or max(p.height for p in pk) < MIN_LADDER_SNR * noise:
+                continue                       # nothing standing clear of the noise
+            for key, lad in ladders.items():
+                r = fit_ladder_channel(y, lad, pk)
+                if r["ok"]:
+                    tally.setdefault((c, key), []).append(
+                        (r["band_height"], float(r["quality"]["rms_error_spacing"]),
+                         float(r["quality"]["unexplained_tall"] or 0.0)))
+        if enough and n_docs >= min_docs and tally and \
+                max(len(v) for v in tally.values()) >= enough:
+            break
+    table = [{"channel": c, "ladder": k, "wells_ok": len(v),
+              "band_height": float(np.median([t[0] for t in v])),
+              "rms_spacing": float(np.median([t[1] for t in v])),
+              "unexplained": float(np.median([t[2] for t in v]))}
+             for (c, k), v in tally.items()]
+    res = {"ladder": None, "channel": None, "wells": n_docs, "wells_ok": 0,
+           "table": sorted(table, key=lambda t: (-t["wells_ok"], t["rms_spacing"]))}
+    # one or two clean wells out of dozens is chance, not a size standard
+    table = [t for t in table if t["wells_ok"] >= min(MIN_DETECT_WELLS, n_docs)]
+    if not table:
+        return res
+    best = max(t["wells_ok"] for t in table)
+    near = [t for t in table if t["wells_ok"] >= 0.75 * best]
+    channel = max(near, key=lambda t: t["band_height"])["channel"]
+    # kits sharing many lengths (ET550-R, ILS600, ILS500) can all fit one
+    # ladder -- the aligner bends the curve to absorb 20 vs 25 bp steps.  Of
+    # the kits clean in at least half as many wells as the most, the right
+    # one leaves the fewest tall peaks unexplained and fits tightest.
+    here = [t for t in table if t["channel"] == channel]
+    most = max(t["wells_ok"] for t in here)
+    contenders = [t for t in here if t["wells_ok"] >= 0.5 * most]
+    pick = min(contenders, key=lambda t: (round(t["unexplained"], 2), t["rms_spacing"]))
+    res.update(ladder=pick["ladder"], channel=channel, wells_ok=pick["wells_ok"])
+    # a kit that explains the channel as well and fits about as tightly is a
+    # real doubt on a weak plate: say so rather than pretend
+    res["rivals"] = [t["ladder"] for t in contenders if t is not pick
+                     and t["unexplained"] <= pick["unexplained"] + 0.05
+                     and t["rms_spacing"] <= 2.0 * pick["rms_spacing"]]
+    return res
+
+
+def plate_template(results: Sequence["SizingResult"]) -> Optional[Dict[float, float]]:
+    """Median scan of each ladder band over the wells whose own fit is clean:
+    where a band of this run is expected (``{bp: scan}``), or None when fewer
+    than three wells fit."""
+    good = [r for r in results if r.anchors and
+            ladder_fit_ok(r.quality, len(r.ladder.lengths) - len(r.ladder.exclude))]
+    if len(good) < 3:
+        return None
+    per: Dict[float, List[int]] = {}
+    for r in good:
+        for s, b in r.anchors:
+            per.setdefault(float(b), []).append(int(s))
+    need = max(2, len(good) // 2)
+    return {b: float(np.median(v)) for b, v in sorted(per.items()) if len(v) >= need}
+
+
+# a rescued ladder's bands must be this many times the other peaks in their span
+RESCUE_HEIGHT_RATIO = 1.5
+
+
+def align_to_template(scans: Sequence[int], lengths: Sequence[float],
+                      template: Dict[float, float],
+                      heights: Optional[Dict[int, float]] = None) -> List[Tuple[int, float]]:
+    """Find a well's ladder bands from where the plate's other wells have them.
+
+    Capillaries of one run differ in speed, so the well's band ``b`` is
+    looked for at ``a * template[b] + c``: every stretch ``a`` from 0.75 to
+    1.33 and shift ``c`` is voted on by the peaks it lines up with bands, the
+    best is refined with a quadratic on the matches, and the bands missed are
+    grown one by one from the trusted ones (:func:`_extend`).  With *heights*
+    ({scan: height}) a fit whose bands are no taller than the other peaks
+    between them is refused as a chance match."""
+    scans = sorted(int(s) for s in scans)
+    lengths = [float(b) for b in lengths]
+    tb = np.asarray([b for b in lengths if b in template], float)
+    if len(scans) < 3 or tb.size < 4:
+        return []
+    ts = np.asarray([template[b] for b in tb], float)
+    sc = np.asarray(scans, float)
+    tol0 = 0.3 * float(np.min(np.diff(ts)))
+
+    def match(pred, tol):
+        pairs, used = [], set()
+        for j in np.argsort([np.min(np.abs(sc - p)) for p in pred]):
+            d = np.abs(sc - pred[j])
+            i = int(np.argmin(d))
+            if d[i] <= tol and i not in used:
+                used.add(i)
+                pairs.append((i, int(j)))
+        return sorted(pairs, key=lambda p: p[1])
+
+    best, best_key = None, None
+    for a in np.linspace(0.75, 1.33, 59):
+        # vote: each (peak, band) pair proposes a shift; shifts that line up
+        # many bands land in the same bin.  Only the best few bins are tried.
+        off = (sc[:, None] - a * ts[None, :]).ravel()
+        w = tol0 * a
+        bins = np.floor(off / w).astype(int)
+        u, cnt = np.unique(bins, return_counts=True)
+        if u.size == 0:
+            continue
+        both = {}
+        for b, n in zip(u, cnt):
+            both[b] = both.get(b, 0) + n
+            both[b + 1] = both.get(b + 1, 0) + n     # a shift straddling two bins
+        top = sorted(both, key=both.get, reverse=True)[:4]
+        for b in top:
+            sel = off[(bins == b) | (bins == b - 1)]
+            if sel.size == 0:
+                continue
+            c = float(np.median(sel))
+            pairs = match(a * ts + c, w)
+            if len(pairs) < 3:
+                continue
+            err = sum(abs(sc[i] - (a * ts[j] + c)) for i, j in pairs)
+            key = (len(pairs), -err)
+            if best_key is None or key > best_key:
+                best, best_key = (a, c), key
+    if best is None:
+        return []
+    pred = best[0] * ts + best[1]
+    pairs = match(pred, tol0 * best[0])
+    # chance check: in a channel crowded with small peaks any template finds
+    # a peak near every band.  Real bands of one kit stand above the other
+    # peaks between them (dye bleed, pull-up, noise); chance matches are just
+    # more of the same peaks.  Measured on cell ID plates: rescued ladders
+    # 1.5-7x the other peaks in their span, chance matches on noise 1.0x.
+    if heights is not None and pairs:
+        hs = np.asarray([heights.get(int(sc[i]), 0.0) for i, _ in pairs], float)
+        lo, hi = sc[pairs[0][0]], sc[pairs[-1][0]]
+        used = {i for i, _ in pairs}
+        rest = [heights.get(int(x), 0.0) for k, x in enumerate(sc) if lo <= x <= hi and k not in used]
+        if rest and float(np.median(hs)) < RESCUE_HEIGHT_RATIO * float(np.median(rest)):
+            return []
+    for _ in range(3):                      # follow the capillary's own curvature
+        if len(pairs) < 4:
+            break
+        coef = np.polyfit(ts[[j for _, j in pairs]], sc[[i for i, _ in pairs]], 2)
+        pairs = match(np.polyval(coef, ts), 0.6 * tol0 * best[0])
+    # back to indices into the kit's own table, then grow from the trusted
+    idx = {b: k for k, b in enumerate(lengths)}
+    full = [(i, idx[float(tb[j])]) for i, j in pairs]
+    full = sorted(full, key=lambda p: p[1])
+    mono = []
+    for i, j in full:                       # bands come out in order of length
+        if not mono or i > mono[-1][0]:
+            mono.append((i, j))
+    full = mono
+    good = _trusted(scans, lengths, full)
+    if len(good) >= 4:
+        full = _extend(scans, lengths, good)
+    return [(scans[i], lengths[j]) for i, j in full]
+
+
+# --------------------------------------------------------------------------- #
 # top-level sizing
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
@@ -1105,7 +1379,8 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                sample_height_frac: float = DEFAULT_SAMPLE_HEIGHT_FRAC,
                matrix=None, sample_channels: Optional[Sequence[int]] = None,
                min_height: float = DEFAULT_MIN_PEAK_HEIGHT,
-               min_bp: Optional[float] = None) -> SizingResult:
+               min_bp: Optional[float] = None,
+               template: Optional[Dict[float, float]] = None) -> SizingResult:
     """Size the sample peaks of one loaded trace against *ladder*.
 
     ``ladder_channel`` / ``sample_channel`` are *physical* channels, 1..N --
@@ -1168,11 +1443,25 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                      f"against noise {noise:.1f}, needs {MIN_LADDER_SNR:g}x); no "
                      "lengths were sized")
 
+    all_peaks = ladder_peaks
     ladder_peaks = ladder_candidates(ladder_peaks, len(ladder.lengths))
     matched = align_peaks([p.scan for p in ladder_peaks], ladder.lengths)
     excluded = lambda b: any(abs(b - x) < 1e-6 for x in ladder.exclude)  # noqa: E731
     anchors = [(sc, b) for sc, b in matched if not excluded(b)]
     quality = ladder_fit_quality([sc for sc, _ in anchors], [b for _, b in anchors])
+    quality["unexplained_tall"] = unexplained_tall(all_peaks, anchors, len(ladder.lengths))
+    if template is not None and not ladder_fit_ok(quality, len(ladder.lengths)):
+        # the well's own fit failed: let the plate's other wells say where the
+        # bands should be, and look for them among every peak of the channel
+        # (a ladder buried under pull-up is shorter than the junk above it)
+        rescued = align_to_template([p.scan for p in all_peaks], ladder.lengths, template,
+                                    {p.scan: p.height for p in all_peaks})
+        r_anchors = [(sc, b) for sc, b in rescued if not excluded(b)]
+        r_quality = ladder_fit_quality([sc for sc, _ in r_anchors], [b for _, b in r_anchors])
+        if ladder_fit_ok(r_quality, len(ladder.lengths)):
+            matched, anchors, quality = rescued, r_anchors, r_quality
+            warnings.append("ladder found with help from the plate's other wells "
+                            "(its own peaks alone did not give a clean fit)")
 
     if len(anchors) < MIN_LADDER_ANCHORS:
         warnings.append(
@@ -1192,6 +1481,12 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
             f"poor ladder fit: each band is predicted from the others to only "
             f"{quality['rms_error_bp']:.1f} bp RMS ({rel:.0%} of a band spacing); "
             "the lengths are not reliable -- is there a ladder in this well?")
+    unexpl = quality.get("unexplained_tall")
+    if unexpl is not None and unexpl > MAX_UNEXPLAINED:
+        warnings.append(
+            f"the ladder channel holds {unexpl * len(ladder.lengths):.0f} tall peaks "
+            f"the {ladder.name} table does not explain; the bands may be sample "
+            "peaks that happen to fit -- is this the ladder channel and the right kit?")
 
     curve = None
     if len(anchors) >= 2:
@@ -1334,20 +1629,27 @@ def plate_matrix_for(paths, base_order: Optional[str] = None, prefer: str = "aut
     return m
 
 
-def size_files(paths, ladder, *, ladder_channel: Optional[int] = None,
+def size_files(paths, ladder="auto", *, ladder_channel: Optional[int] = None,
                sample_channels: Optional[Sequence[int]] = None,
                base_order: Optional[str] = None, matrix="auto",
                min_height: float = DEFAULT_MIN_PEAK_HEIGHT, load=None,
-               on_error=None) -> List[SizingResult]:
+               on_error=None, plate_rescue: bool = True,
+               detect_sample: int = 8) -> List[SizingResult]:
     """Size many files, run folder by run folder, each run with its own
     dye-overlap matrix (*matrix*: "auto" / "run" / "plate" / "none", or a
     :class:`spectral.SpectralMatrix`).  *sample_channels* None sizes every
     channel but the ladder's.  *load* (path -> document) defaults to
-    :func:`analyzer_core.load_trace`."""
+    :func:`analyzer_core.load_trace`.
+
+    *ladder* "auto" (or None) finds the kit per run, and a *ladder_channel*
+    of None finds the channel (:func:`detect_ladder`, on *detect_sample* wells
+    spread over the run).  With *plate_rescue*, a well whose own ladder fit
+    fails is fitted again guided by where the run's clean wells have their
+    bands (:func:`plate_template`)."""
     from analyzer_core import load_trace, n_channels
-    if isinstance(ladder, str):
+    auto_kit = ladder is None or (isinstance(ladder, str) and ladder.lower() == "auto")
+    if not auto_kit and isinstance(ladder, str):
         ladder = load_ladder(ladder)
-    lch = ladder_channel or ladder.default_channel or 4
     if load is None:
         def load(p):
             return load_trace(Path(p), base_order=base_order) if base_order \
@@ -1366,15 +1668,80 @@ def size_files(paths, ladder, *, ladder_channel: Optional[int] = None,
                 m = None
         else:
             m = matrix
+        docs: Dict[Path, object] = {}
         for p in ps:
             try:
-                doc = load(p)
-                chans = list(sample_channels) if sample_channels else \
-                    [c for c in range(1, n_channels(doc) + 1) if c != lch]
-                out.append(size_trace(doc, ladder, ladder_channel=lch,
-                                      sample_channels=chans, base_order=base_order,
-                                      matrix=m, min_height=min_height))
+                docs[p] = load(p)
             except Exception as exc:                       # noqa: BLE001
                 if on_error:
                     on_error(p, exc)
+        if not docs:
+            continue
+        run_lad, lch, note = ladder, ladder_channel, ""
+        if auto_kit or lch is None:
+            # wells spread over the plate (A01, then the middle, then the
+            # gaps): an unlucky first few -- empty, overloaded -- must not
+            # decide the run, so keep going until one kit/channel is clean in
+            # several wells or *detect_sample* x 4 wells have been tried
+            keys = list(docs)
+            order, step = [], len(keys)
+            while step >= 1 and len(order) < len(keys):
+                order += [k for k in keys[::step] if k not in order]
+                step //= 2
+            pick = order[:4 * detect_sample]
+            det = detect_ladder((docs[k] for k in pick), matrix=m, base_order=base_order,
+                                kits=DETECT_KITS if auto_kit else (ladder,),
+                                channels=None if lch is None else [lch],
+                                enough=6, min_docs=detect_sample)
+            if det["ladder"] is None and not auto_kit:
+                # the kit is known; its channel just did not stand out: use
+                # the kit's usual channel and let each well's own fit decide
+                lch = lch or ladder.default_channel or 4
+                note = (f"ladder channel not recognised automatically in {det['wells']} "
+                        f"test wells; using channel {lch}, the {ladder.name}'s usual one")
+            elif det["ladder"] is None:
+                note = (f"no size standard recognised in {det['wells']} test wells of this run "
+                        "(tried " + ", ".join(DETECT_KITS) + "); lengths below rest on "
+                        "an ET550-R guess in channel 1 and are not reliable")
+                run_lad = load_ladder("et550r")
+                lch = lch or run_lad.default_channel or 1
+            else:
+                run_lad = load_ladder(det["ladder"]) if auto_kit else ladder
+                lch = det["channel"]
+                note = (f"ladder {run_lad.name} in channel {lch}, found automatically "
+                        f"(clean in {det['wells_ok']} of {det['wells']} test wells)")
+                if det.get("rivals"):
+                    note += ("; kit uncertain: " + ", ".join(load_ladder(k).name for k in det["rivals"])
+                             + " fits nearly as well -- name the kit if you know it")
+        lch = lch or run_lad.default_channel or 4
+
+        def one(doc, template=None):
+            chans = list(sample_channels) if sample_channels else \
+                [c for c in range(1, n_channels(doc) + 1) if c != lch]
+            r = size_trace(doc, run_lad, ladder_channel=lch, sample_channels=chans,
+                           base_order=base_order, matrix=m, min_height=min_height,
+                           template=template)
+            if note:
+                r.detection = note
+                if note.startswith(("no size", "ladder channel not")):
+                    r.warnings.insert(0, note)
+            return r
+
+        res: Dict[Path, SizingResult] = {}
+        for p, doc in docs.items():
+            try:
+                res[p] = one(doc)
+            except Exception as exc:                       # noqa: BLE001
+                if on_error:
+                    on_error(p, exc)
+        tmpl = plate_template(list(res.values())) if plate_rescue else None
+        if tmpl:
+            nb = len(run_lad.lengths) - len(run_lad.exclude)
+            for p, r in list(res.items()):
+                if not ladder_fit_ok(r.quality, nb):
+                    try:
+                        res[p] = one(docs[p], tmpl)
+                    except Exception:                      # noqa: BLE001
+                        pass
+        out.extend(res[p] for p in ps if p in res)
     return out

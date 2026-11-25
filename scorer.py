@@ -866,7 +866,8 @@ def _cmd_ladders(args) -> int:
 def _cmd_size(args) -> int:
     from fragment_sizing import load_ladder, size_files, table_rows
     try:
-        ladder = load_ladder(args.lengths or args.ladder)
+        spec = args.lengths or args.ladder
+        ladder = "auto" if str(spec).lower() == "auto" else load_ladder(spec)
     except (ValueError, OSError, json.JSONDecodeError) as exc:  # noqa: BLE001
         print(f"ladder: {exc}", file=sys.stderr)
         return 2
@@ -879,6 +880,9 @@ def _cmd_size(args) -> int:
         on_error=lambda p, e: print(f"{p}: {e}", file=sys.stderr))
     shown = set()
     for res in results:
+        if res.detection and res.detection not in shown:
+            shown.add(res.detection)
+            print(res.detection)
         if res.matrix and res.matrix not in shown:
             shown.add(res.matrix)
             print(f"dye-overlap correction: {res.matrix}")
@@ -923,13 +927,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("size", help="size fragment peaks against a ladder")
     s.add_argument("inputs", nargs="+", help=".rsd / .scf / .ab1 / text traces")
-    s.add_argument("--ladder", default="genescan500_rox",
-                   help="ladder name, JSON path or lengths (default genescan500_rox)")
+    s.add_argument("--ladder", default="auto",
+                   help="ladder name, JSON path or lengths (default auto: the kit is "
+                        "found per run among the bundled ROX standards)")
     s.add_argument("--lengths",
                    help="comma-separated ladder lengths (overrides --ladder)")
     s.add_argument("--ladder-channel", type=int, default=None,
-                   help="ladder channel 1..4 (default: the ladder's usual "
-                        "channel, else 4)")
+                   help="ladder channel 1..4 (default: found per run -- the "
+                        "channel where the ladder fits cleanly with the tallest bands)")
     s.add_argument("--sample-channel", type=int, default=None,
                    help="size only this sample channel (default: every channel "
                         "but the ladder's)")

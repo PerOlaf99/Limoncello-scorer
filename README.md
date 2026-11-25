@@ -617,6 +617,9 @@ python scorer.py ladders
 python scorer.py size well.rsd --ladder geneflo1000_rox \
     --ladder-channel 4 --sample-channel 2 --out sizes.csv --report sizes.html
 
+# a whole run: the ladder kit and channel are found automatically
+python scorer.py size run_folder/*.rsd --out sizes.csv --report sizes.html
+
 # a MegaBACE genotyping plate: ET400-R in ET-ROX on Ch1, FAM sample on Ch2
 python scorer.py size plate/*.rsd --ladder et400r \
     --ladder-channel 1 --sample-channel 2 --out sizes.csv
@@ -630,11 +633,31 @@ How it works, and what to watch:
 
 - **Channels are physical.** Ladder and sample live on different channels of
   the same well. They are given as 1–4 in the plate's dye order (`--base-order`,
-  default `ACTG`), the *same* convention as the basecaller and the picker. The
-  default is sample on Ch2 and ladder on Ch4, which is the common
-  FAM-sample / ROX-ladder layout, but the pair is a property of the **kit** —
-  it cannot be guessed from the trace, so a run whose channels differ must say
-  so. `python scorer.py ladders` and `size` print the channels used.
+  default `ACTG`), the *same* convention as the basecaller and the picker.
+- **The ladder and its channel are found per run** (`--ladder auto`, the
+  default, and no `--ladder-channel`). Wells spread over the run are fitted in
+  every channel against the bundled ROX kits (ET400-R, ET550-R, ET900-R,
+  ILS 500/600, GeneScan 400HD/500, MapMarker 1000, Beckman SS400) until one
+  kit/channel is clean in six of them (at most 32 wells; fewer than three clean
+  wells names no kit). ROX bleeds into the
+  neighbouring dye and fits there just as well at a fraction of the height,
+  so the channel with the tallest bands wins. A clean fit needs most bands
+  found, each predicted from the others to a small part of a band spacing,
+  **and** few tall peaks left that the kit does not explain — the test that
+  tells a ladder from a busy sample channel (a run of 50+ sample peaks can be
+  fitted to any kit) and one kit from another that shares most of its
+  lengths (ET550-R and ILS600 share 16 of 22). Measured on the lab's 167
+  fragment runs (2026-11-25): a true ladder leaves 0–0.09 unexplained tall
+  peaks per band, a wrong kit 0.19–0.41, sample channels 1.9–20. The cell ID
+  plates are ET550-R, in Ch1 on most runs and Ch3 on some. When two kits fit a
+  weak plate about equally the run's note says the kit is uncertain. Naming a
+  kit and/or channel restricts the search.
+- **Weak wells get help from the plate.** A well whose own fit fails (ladder
+  under pull-up, a band missing) is fitted again from where the run's clean
+  wells have their bands, allowing for its capillary running faster or slower.
+  The rescued bands must stand taller than the other peaks between them
+  (1.5×), so a channel of small equal peaks cannot be made into a ladder. A
+  rescued well says so in its warnings.
 - **Matching is order-based.** Only peaks of ladder-band height are offered
   (dye bleed from the sample channels sits far lower), and they are aligned to
   the kit's lengths monotonically (a Needleman–Wunsch alignment), so a missing
