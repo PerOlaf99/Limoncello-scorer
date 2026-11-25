@@ -660,6 +660,15 @@ How it works, and what to watch:
   rescued well says so in its warnings.
   The check of detection and rescue against all 167 runs, with per-run
   findings, is in [`docs/FRAGMENT_SIZING_QC.md`](docs/FRAGMENT_SIZING_QC.md).
+- **A band off its listed length is corrected per run.** Ladder lots differ:
+  in the lab's ET550-R runs from September 2012 on, the 125 bp band migrates
+  ~2 bp long in nearly every well. When a run has at least 8 clean wells, each
+  band is measured against its neighbours (local cubic) across the run. A band
+  that sits off by 0.75 to 4 bp, the same way in at least 75 % of the wells,
+  gets the length the run measures; at most 3 bands per run, worst first, and
+  only if it lowers the run's typical sizing error. The run's note lists the
+  corrections; the band table has `band_bp` (listed) and `band_used_bp`.
+  `band_correct=False` turns it off.
 - **Matching is order-based.** Only peaks of ladder-band height are offered
   (dye bleed from the sample channels sits far lower), and they are aligned to
   the kit's lengths monotonically (a Needleman–Wunsch alignment), so a missing

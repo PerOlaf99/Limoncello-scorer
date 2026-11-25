@@ -133,6 +133,7 @@ class SizingResult:
     matrix: str = ""                                       # dye-overlap correction used
     detection: str = ""                                    # how the ladder/channel was chosen
     sample_channels: List[int] = field(default_factory=list)
+    band_corrections: Dict[float, float] = field(default_factory=dict)  # listed bp -> bp used
 
     def summary(self) -> dict:
         return {
@@ -1251,6 +1252,119 @@ def align_to_template(scans: Sequence[int], lengths: Sequence[float],
 
 
 # --------------------------------------------------------------------------- #
+# per-run band correction
+# --------------------------------------------------------------------------- #
+# A ladder lot can carry a band that migrates off its listed length: in the
+# lab's ET550-R runs from September 2012 on, the 125 bp band sits ~2 bp long
+# against its neighbours in nearly every well, while 2011-12 runs agree with
+# the table (docs/FRAGMENT_SIZING_QC.md).  The sizing curve passes through
+# every anchor, so such a band bends the sizes around it.  A run with enough
+# clean wells measures each band against its neighbours; a band that is off
+# the same way across the run gets the length the run says it has.
+BAND_CORRECT_MIN_WELLS = 8      # clean wells measuring a band
+BAND_CORRECT_MIN_BP = 0.75      # smaller offsets are left alone (noise ~0.6 bp)
+BAND_CORRECT_MAX_BP = 4.0       # larger ones are a mismatch, not a lot quirk
+BAND_CORRECT_MAX_BANDS = 3      # isolated bands only
+BAND_CORRECT_AGREE = 0.75       # share of wells whose offset has the same sign
+
+
+def local_band_offsets(anchors: Sequence[Tuple[int, float]], *, k: int = 3,
+                       deg: int = 3) -> Dict[float, float]:
+    """For each anchor with at least two anchors on either side: the length a
+    local cubic (in scan, through up to *k* anchors per side) predicts for it
+    from its neighbours, minus its own length."""
+    pts = sorted((float(s), float(b)) for s, b in anchors)
+    sc = np.array([p[0] for p in pts])
+    bp = np.array([p[1] for p in pts])
+    out: Dict[float, float] = {}
+    for i in range(2, len(pts) - 2):
+        nb = [j for j in range(max(0, i - k), min(len(pts), i + k + 1)) if j != i]
+        x = (sc[nb] - sc[i]) / 100.0
+        coef = np.polyfit(x, bp[nb], deg)
+        out[bp[i]] = float(coef[-1] - bp[i])
+    return out
+
+
+def run_band_corrections(results: Sequence["SizingResult"]) -> Dict[float, float]:
+    """``{listed bp: length to use}`` for the bands of this run's ladder that
+    sit off their listed length the same way across its clean wells (empty
+    when none do, or when the run has too few clean wells to say).
+
+    Bands are corrected one at a time, the worst first, because one band off
+    pulls its neighbours' offsets the other way.  The result is kept only if
+    it makes the run's wells fit their ladder better."""
+    good = [r for r in results if r.anchors and
+            ladder_fit_ok(r.quality, len(r.ladder.lengths) - len(r.ladder.exclude))]
+    if len(good) < BAND_CORRECT_MIN_WELLS:
+        return {}
+    corr: Dict[float, float] = {}
+
+    def used(b):
+        return corr.get(float(b), float(b))
+
+    for _ in range(BAND_CORRECT_MAX_BANDS):
+        per: Dict[float, List[float]] = {}
+        for r in good:
+            back = {used(b): float(b) for _, b in r.anchors}
+            for u, off in local_band_offsets([(s, used(b)) for s, b in r.anchors]).items():
+                per.setdefault(back[u], []).append(off)
+        best = None
+        for b, offs in per.items():
+            if len(offs) < BAND_CORRECT_MIN_WELLS:
+                continue
+            med = float(np.median(offs))
+            same = np.mean(np.sign(offs) == np.sign(med))
+            if abs(med) >= BAND_CORRECT_MIN_BP and same >= BAND_CORRECT_AGREE \
+                    and (best is None or abs(med) > abs(best[1])):
+                best = (b, med)
+        if best is None:
+            break
+        new = used(best[0]) + best[1]
+        if abs(new - best[0]) > BAND_CORRECT_MAX_BP:
+            break
+        corr[best[0]] = round(new, 2)
+    if not corr:
+        return {}
+
+    def run_rms(c):
+        vals = []
+        for r in good:
+            q = ladder_fit_quality([s for s, _ in r.anchors],
+                                   [c.get(float(b), float(b)) for _, b in r.anchors])
+            if q.get("rms_error_bp") is not None:
+                vals.append(q["rms_error_bp"])
+        return float(np.median(vals)) if vals else float("inf")
+
+    return corr if run_rms(corr) < run_rms({}) else {}
+
+
+def apply_band_corrections(res: "SizingResult", corr: Dict[float, float]) -> None:
+    """Re-size *res* in place with the corrected band lengths *corr*: its
+    anchors, sizing curve, sample lengths, fit quality and band table."""
+    if not corr or len(res.anchors) < 2:
+        return
+    fix = lambda b: corr.get(float(b), float(b))  # noqa: E731
+    res.anchors = [(s, fix(b)) for s, b in res.anchors]
+    q = ladder_fit_quality([s for s, _ in res.anchors], [b for _, b in res.anchors])
+    q["unexplained_tall"] = res.quality.get("unexplained_tall")
+    res.quality = q
+    curve = SizeCurve([s for s, _ in res.anchors], [b for _, b in res.anchors])
+    rms = q.get("rms_error_bp")
+    for r in res.rows:
+        r["length_bp"] = round(float(curve.bp([r["scan"]])[0]), 2)
+        r["ladder_rms_bp"] = None if rms is None else round(float(rms), 3)
+    for r in res.standards:
+        u = fix(r["band_bp"])
+        r["band_used_bp"] = u
+        others = [(s, b) for s, b in res.anchors if s != r["scan"]]
+        if len(others) >= 2:
+            pred = float(SizeCurve([o[0] for o in others], [o[1] for o in others]).bp([r["scan"]])[0])
+            r["predicted_bp"] = round(pred, 2)
+            r["residual_bp"] = round(pred - u, 2)
+    res.band_corrections = dict(corr)
+
+
+# --------------------------------------------------------------------------- #
 # top-level sizing
 # --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
@@ -1514,7 +1628,8 @@ def size_trace(doc, ladder, *, ladder_channel: int = 4,
                 "file": file_name, "well": well, "kind": "standard",
                 "channel": ladder_channel,
                 "dye": channel_dye(doc, ladder_channel) or ladder.dye,
-                "band_bp": b, "scan": int(sc), "height": round(float(lz[sc]), 1),
+                "band_bp": b, "band_used_bp": b, "scan": int(sc),
+                "height": round(float(lz[sc]), 1),
                 "width": round(float(wd), 2),
                 "predicted_bp": None if pred is None else round(pred, 2),
                 "residual_bp": None if pred is None else round(pred - b, 2),
@@ -1634,7 +1749,7 @@ def size_files(paths, ladder="auto", *, ladder_channel: Optional[int] = None,
                base_order: Optional[str] = None, matrix="auto",
                min_height: float = DEFAULT_MIN_PEAK_HEIGHT, load=None,
                on_error=None, plate_rescue: bool = True,
-               detect_sample: int = 8) -> List[SizingResult]:
+               detect_sample: int = 8, band_correct: bool = True) -> List[SizingResult]:
     """Size many files, run folder by run folder, each run with its own
     dye-overlap matrix (*matrix*: "auto" / "run" / "plate" / "none", or a
     :class:`spectral.SpectralMatrix`).  *sample_channels* None sizes every
@@ -1645,7 +1760,9 @@ def size_files(paths, ladder="auto", *, ladder_channel: Optional[int] = None,
     of None finds the channel (:func:`detect_ladder`, on *detect_sample* wells
     spread over the run).  With *plate_rescue*, a well whose own ladder fit
     fails is fitted again guided by where the run's clean wells have their
-    bands (:func:`plate_template`)."""
+    bands (:func:`plate_template`).  With *band_correct*, a band that sits
+    off its listed length the same way across the run's clean wells is given
+    the length the run measures (:func:`run_band_corrections`)."""
     from analyzer_core import load_trace, n_channels
     auto_kit = ladder is None or (isinstance(ladder, str) and ladder.lower() == "auto")
     if not auto_kit and isinstance(ladder, str):
@@ -1743,5 +1860,12 @@ def size_files(paths, ladder="auto", *, ladder_channel: Optional[int] = None,
                         res[p] = one(docs[p], tmpl)
                     except Exception:                      # noqa: BLE001
                         pass
+        corr = run_band_corrections(list(res.values())) if band_correct else {}
+        if corr:
+            msg = ("band lengths corrected for this run's ladder lot: " +
+                   ", ".join(f"{b:g} -> {u:g} bp" for b, u in sorted(corr.items())))
+            for r in res.values():
+                apply_band_corrections(r, corr)
+                r.detection = (r.detection + "; " if r.detection else "") + msg
         out.extend(res[p] for p in ps if p in res)
     return out

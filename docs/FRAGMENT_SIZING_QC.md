@@ -1,7 +1,7 @@
 # Fragment sizing QC — automatic ladder detection (2026-11-25)
 
 This file records how the automatic ladder detection in `fragment_sizing.py`
-(commit 337feda) was checked against the MegaBACE archive. The sizing method
+(commit 337feda; band correction added later) was checked against the MegaBACE archive. The sizing method
 itself is described in `README.md` under *Fragment sizing → How it works*.
 
 Raw outputs are kept outside the repository, in
@@ -101,11 +101,88 @@ The rerun named a kit for them, sometimes an exotic one (Beckman, ILS 500).
 The rule that a kit needs at least 3 test wells was added after this rerun.
 With it, these runs report no ladder or *kit uncertain*.
 
+## ET550-R band lengths against the clean wells
+
+**Method.** The check used 4,099 clean ET550-R cell ID wells from 82 runs. A
+well counts if it shows at least 20 of the 22 bands. For each band, the engine
+predicted its length from a local cubic in scan, fitted through the three bands
+on each side. It then averaged the difference between that prediction and the
+listed length.
+
+A single band that sits off also pulls its neighbours' residuals the other
+way. To separate that, the offsets were solved together, with a ridge penalty.
+Smooth trends cannot be seen this way, because the per-well curve absorbs
+them. Only a band that sits out of line with its neighbours shows up.
+
+**250–550 bp: the listed lengths hold.** Every band is within ±0.26 bp in
+every period, and the spread between runs is tight. The largest offsets are a
+regular +0.18 at 450 and −0.26 at 475. Both are well below the 0.6 bp typical
+sizing error, so no change is needed.
+
+**100–175 bp: two ladder behaviours, split by date.**
+
+| Runs | 125 bp | 150 bp | 175 bp |
+|---|---|---|---|
+| 2011 to June 2012 (28 runs) | 0.0 | −0.1 | −0.3 |
+| September 2012 to 2013 (50 runs) | **+1.4** (raw +2.3) | −0.9 | −0.7 |
+
+In the later runs the 125 bp band migrates about 2 bp long. In 130213, for
+example, 100→125→150→175 sit about 180, 160 and 183 scans apart; in 2011
+runs the gaps are an even 134, 140 and 143. The 125 band is also lower
+relative to its neighbours: 0.87 against 1.18 of the well's median band.
+
+The peaks are clean and single in both periods. Overlays are in
+`band125.png` in the QC folder. Run settings do not explain the split:
+almost all runs in both periods used 10 kV, 75 min and 60 °C. That points to
+a change of ladder lot, or of polymer, in summer 2012.
+
+The split is not perfectly clean:
+
+- 220513 and 22032013 are 2013 runs but behave like the early runs;
+- 090511 Run02 and 050311 are early runs with 125 running −2.5 bp;
+- 280411 sits at +0.9.
+
+**Effect.** The sizing curve passes through every anchor. In the later runs it
+is therefore bent by about 2 bp around 125 bp. A sample fragment near 125 bp
+is sized up to about 2 bp short of where the neighbouring bands put it; at
+110–140 bp the error is smaller. Sizes outside 100–175 bp are not affected.
+
+**Fix: per-run band correction (`run_band_corrections`, on by default).**
+The fix needs a run with at least 8 clean wells. In such a run, each band is
+measured against its neighbours in every clean well, with at least two
+neighbours on each side. A band is corrected when two things hold:
+
+- its median offset is at least 0.75 bp and at most 4 bp;
+- at least 75% of the wells agree on the direction.
+
+Bands are corrected one at a time, the worst first, up to 3 per run. That
+order matters, because one band off pulls its neighbours' offsets the other
+way. The correction is kept only if it lowers the run's typical
+(leave-one-out) sizing error.
+
+The corrected lengths are used for the curve, the sizes and the fit quality.
+The band table keeps `band_bp` (listed) and adds `band_used_bp` (used). The
+run's note lists the corrections, e.g. `125 -> 127.17 bp`.
+
+| Run | Bands corrected | Typical sizing error |
+|---|---|---|
+| 130213 (2013) | 125 → 127.17 | 0.64 → 0.28 bp |
+| 151112 Run02 (2012) | 125 → 128.54 | — |
+| 050311 (2011) | 150 → 152.97, 175 → 176.20, 125 → 124.09 | 0.91 → 0.33 bp |
+| 090511 Run02 (2011) | 150 → 153.95, 175 → 176.46, 100 → 100.99 | 1.21 → 0.42 bp |
+| 090611 (2011) | none | 0.25 bp |
+| 220513 (2013, early pattern) | none | 0.48 bp |
+
+In 130213, sample sizes between 100 and 180 bp move by up to 2.2 bp. The two
+odd 2011 runs turned out to have the 150 bp band about 3–4 bp long, rather
+than 125 short.
+
+`size_files(..., band_correct=False)` gives the uncorrected sizes.
+
 ## Open points
 
-- **Per-band calibration.** `auto_bands.csv` holds about 4,000 clean cell ID
-  wells. It can show whether any ET550-R band runs consistently off its
-  listed length.
+- **Lot-level confirmation.** Lab records of when the ET550-R lot changed in
+  2012 would confirm the cause.
 - **Detection speed.** Detection takes about 2–5 minutes per 96-well run. The
   GUI (`sequence_analyzer.py`) still uses a fixed ladder and channel. To use
   auto detection there, the result should be cached per run.

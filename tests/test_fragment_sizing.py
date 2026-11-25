@@ -206,13 +206,14 @@ ET550 = fs.load_ladder("et550r").lengths
 MIG = lambda bp: 900.0 + 9.0 * bp - 0.003 * bp ** 2  # noqa: E731
 
 
-def plate_doc(*, ladder_ch=1, bleed=0.12, seed=0, stretch=1.0, junk=()):
+def plate_doc(*, ladder_ch=1, bleed=0.12, seed=0, stretch=1.0, junk=(), shift=None):
     """ET550-R in *ladder_ch* (bleeding into the next channel), alleles in
     channel 3, optional *junk* scans (taller than the bands) in the ladder
-    channel; *stretch* slows this capillary."""
+    channel; *stretch* slows this capillary; *shift* ({bp: offset}) makes a
+    band migrate as if it were that much longer (a ladder-lot quirk)."""
     acgt = np.zeros((N_SCANS, 4))
     put = lambda ch, y: acgt.__setitem__((slice(None), acgt_index_for_channel("ACTG", ch)), y)  # noqa: E731
-    lad = [500 + stretch * (MIG(b) - 500) for b in ET550]
+    lad = [500 + stretch * (MIG(b + (shift or {}).get(b, 0.0)) - 500) for b in ET550]
     lc = synth_channel(lad, height=1200.0, noise=2.0, seed=seed)
     if junk:
         lc = lc + synth_channel(junk, height=2500.0, seed=seed + 7) - BASELINE
@@ -285,3 +286,49 @@ def test_template_refuses_a_channel_of_equal_small_peaks():
     scans = list(range(1500, 5900, 9))         # a peak every 9 scans, all alike
     got = fs.align_to_template(scans, ET550, tmpl, {s: 6.0 for s in scans})
     assert got == []
+
+
+# --- per-run band correction ------------------------------------------------
+
+def test_local_band_offsets_are_zero_on_a_smooth_ladder():
+    anchors = [(MIG(b), b) for b in ET550]
+    offs = fs.local_band_offsets(anchors)
+    assert set(offs) == set(ET550[2:-2])          # interpolation only, ends skipped
+    assert max(abs(v) for v in offs.values()) < 0.05
+
+
+def _sized_run(n, shift=None, band_correct=True):
+    docs = {f"W{s:02d}.rsd": plate_doc(seed=s, stretch=1.0 + 0.01 * (s % 5), shift=shift)
+            for s in range(n)}
+    return fs.size_files(list(docs), ladder="et550r", ladder_channel=1, matrix="none",
+                         load=lambda p: docs[str(p)], band_correct=band_correct)
+
+
+def test_run_corrects_a_band_that_runs_long_in_every_well():
+    res = _sized_run(10, shift={125: 2.5})
+    corr = res[0].band_corrections
+    assert list(corr) == [125.0] and abs(corr[125.0] - 127.5) < 0.6
+    assert all(r.band_corrections == corr for r in res)
+    assert "125 -> " in res[0].detection
+    std = {r["band_bp"]: r for r in res[0].standards}
+    assert std[125.0]["band_used_bp"] == corr[125.0]
+    assert std[150.0]["band_used_bp"] == 150.0
+    # the allele at 116 bp sits under the bent part of the curve: corrected,
+    # it is sized closer to its true length than without the correction
+    def allele(rr):
+        return min((r["length_bp"] for r in rr[0].rows if r["channel"] == 3),
+                   key=lambda v: abs(v - 116))
+    off = _sized_run(10, shift={125: 2.5}, band_correct=False)
+    assert abs(allele(res) - 116) < abs(allele(off) - 116)
+    assert res[0].quality["rms_error_bp"] < off[0].quality["rms_error_bp"]
+
+
+def test_run_leaves_a_ladder_that_matches_its_table_alone():
+    res = _sized_run(10)
+    assert res[0].band_corrections == {}
+    assert "corrected" not in res[0].detection
+
+
+def test_too_few_wells_give_no_correction():
+    res = _sized_run(fs.BAND_CORRECT_MIN_WELLS - 1, shift={125: 2.5})
+    assert res[0].band_corrections == {}
