@@ -183,6 +183,40 @@ The best test is the two 2013 runs without the shift, 22032013 (−0.5 bp) and
 220513 (−0.8 bp). Both have clean error logs. If they ran on the other
 instrument, or with an older ladder or polymer lot, that names the cause.
 
+**Temperature is ruled out (checked 2026-11-27).** The `.rsd` file stores only
+the first temperature setting. A cycled run is started at the high
+temperature, and the cycling is done by a macro file that is not linked to the
+run file. So a run named `…_54-51C` shows 54 °C in its file. A cycled run can
+only be recognised by a regular ripple in the current during the first ~20
+minutes. `temperature_cycling` in `analyzer_core.py` looks for exactly that.
+
+- **No cell ID run was cycled.** All 83 runs come out "constant" on their
+  first 4 wells (score ≤ 0.23; cycling needs ≥ 0.30). That includes the
+  `cell_id_probemacro` runs of September and October 2012.
+- **The set temperature does not follow the shift:**
+
+  | Period | Set temperature | 125 bp offset |
+  |---|---|---|
+  | Mar–Aug 2011 | 55 °C | about 0 |
+  | Dec 2011 – Jun 2012 | 60 °C | about 0 |
+  | Sep 2012 on | 60 °C (three runs at 50 °C, one at 55 °C) | about +2 |
+
+  Going from 55 to 60 °C in late 2011 did not move the band. After September
+  2012 it is shifted at 50, 55 and 60 °C alike. The two unshifted 2013 runs,
+  22032013 and 220513, were at 60 °C like their neighbours.
+- The `54-51C` runs in the logbook (rs11730582, October 2012 onward) are SNP
+  assays cycled from 54 °C. They are not cell ID runs.
+
+The logbook has no ladder change marked for summer 2012. That leaves something
+that changed then and stayed changed: the ladder lot (a new tube under the same
+catalogue number may not have been logged), the polymer or buffer, or the
+capillary array. The burst of capillary detection errors from September to
+November 2012 fits an array or polymer change best.
+
+Still to check: the `191112_test_av_rox_std_46-56C` runs (Run01–03) look like
+a test of the size standard at several temperatures. Measuring the 125 band in
+them would show directly how much temperature moves it.
+
 **Effect.** The sizing curve passes through every anchor. In the later runs it
 is therefore bent by about 2 bp around 125 bp. A sample fragment near 125 bp
 is sized up to about 2 bp short of where the neighbouring bands put it; at
