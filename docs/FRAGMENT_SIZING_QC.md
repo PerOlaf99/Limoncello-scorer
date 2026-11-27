@@ -179,10 +179,110 @@ than 125 short.
 
 `size_files(..., band_correct=False)` gives the uncorrected sizes.
 
+## The ladder engine, hardened (engine version 8)
+
+The goal was ladder recognition that is solid for any kit and any user, not
+only for this lab's ET550-R plates.
+
+**Synthetic benchmark** (`tools/fragment_sizing_qc/benchmark_detection.py`).
+The benchmark covers 6 plates of 12 wells for each of the 19 bundled kits,
+plus 6 plates with no ladder. The plates vary:
+
+- 4- and 5-channel instruments, with the ladder in any channel;
+- capillary speed per well, curvature, and runs that stop before the kit's
+  last bands;
+- fading long bands, a dropped band, and 4–15% dye bleed;
+- pull-up from the sample, and sparse, allele-pair or busy (45 peaks)
+  sample channels.
+
+| | First run (4 plates per kit) | Final (6 plates per kit) |
+|---|---|---|
+| Kit and channel right | 54 of 76 plates | **114 of 114** |
+| No-ladder plates named "none" | 4 of 4 | 6 of 6 |
+| "Kit uncertain" on a right answer | 13 | 0 |
+| Time per 12-well plate | 45–70 s before the speed-up | 2.5–14 s |
+
+In the first run, every wrong answer was a nested kit (ET550-R for ET900-R,
+ILS 500 for ILS 600, SS400 vs MapMarker 400, MapMarker 1000 vs 1500).
+
+What fixed it:
+
+- **Speed.** The alignment step now runs in plain Python and gives identical
+  results (checked on 20,000 random cases); it was 7× slower before. Kits
+  with too few band-height peaks are skipped. Kits with identical tables are
+  fitted once. Once one combination is clean in 2 wells, later wells only
+  try the combinations that have fitted.
+- **Nested kits.** ET550-R sits inside ET900-R, ILS 500 inside ILS 600,
+  SS400 inside SS600, and MapMarker 1000 inside 1500. Tall peaks after the
+  last matched band now count as unexplained. Among kits that explain the
+  channel equally, the engine leaves out fits more than 3× looser than the
+  tightest, then prefers the most bands matched (within one band), then
+  the fewest kit bands. A kit with the same lengths over the bands seen is
+  not reported as a doubt.
+- **Runs that stop early.** A kit is judged on the bands the run reached,
+  if that is at least 60% of the kit. The alignment no longer pays for
+  bands past the end of the trace. Without this, an evenly spaced kit
+  (GeneFlo 1000) slid by six bands, and ILS 600 was bent onto it.
+- **Dyes.** A LIZ kit is only tried in channel 5 of a five-dye instrument.
+  Between identical tables, the dye decides.
+- **Weak plates.** When the leading answer has fewer than 6 clean test
+  wells, detection reads the rest of the plate before deciding. This also
+  tells the ladder's channel from its bleed on weak plates.
+- **One engine.** A run's *ladder profile* is worked out once from all its
+  wells: kit, channel, band template and band corrections
+  (`find_run_ladder`, `RunLadder`). It is cached in
+  `~/.cache/limoncello-scorer/ladders/`. The GUI's sizing now goes through
+  the same `size_files` as `scorer.py size`. Its dialog offers "Automatic"
+  for the kit and for the channel, and reports each run's profile.
+- **All kits for all users.** "Automatic" tries every bundled kit and every
+  ladder in the user's own library. The MegaBACE-only list survives as
+  `MEGABACE_KITS`.
+
+**The real runs.** This is the 160 runs that sized, compared with the
+earlier engine (`tools/fragment_sizing_qc/compare_runs.py`, output in
+`v8_wells.csv`):
+
+| Measure | Result |
+|---|---|
+| Runs with the same kit, channel and clean wells | 147 |
+| Runs that changed | 13 |
+| Clean cell ID wells | 4,229 → **4,330** (486 of them rescued) |
+| Leave-one-out sizing error, median | 0.30 bp |
+| Leave-one-out sizing error, 90th percentile | 0.65 bp |
+| Wells outside cell ID runs passed with a named ladder | **0** |
+| Runs with band corrections | 54 |
+
+The error was 0.61 and 0.95 bp before the band corrections.
+
+ET550-R is found in 80 runs, 3 of them in channel 3. 76 runs report no size
+standard.
+
+What changed, run by run:
+
+| Run | What happened |
+|---|---|
+| 220213 buffer test | ILS 600 with 1 clean well → ET550-R with 59 |
+| Cell_id_test_av_ILS600 | ILS 500 → **ILS 600** (9 clean wells), as its name says |
+| 050213 | 0 → 43 clean wells |
+| 070411, 23012012, 151112 Run01, 220413_CWOT_PCR | → none: at most 2 clean wells on the whole plate |
+| 251012 Run01, 280411, 060912_GFØ | Same kit; about 5 fewer clean wells each, because fits are now stricter |
+| 21122011 | ILS 600 "kit uncertain", 18 wells; an earlier pass said ET550-R in channel 3 |
+| 050313 | ILS 500 vs ILS 600 vs ET550-R; still unresolved |
+
+21122011 and 050313 are weak plates where kits that share lengths fit about
+equally. Both say so in their notes.
+
+**Known weakness.** 170611cellid is a short run, about 3,970 scans, so the
+ladder reaches only about 375 bp. ET550-R fits some of its wells exactly,
+but on others its alignment fails, and ILS 500 fits instead. The run is
+named ILS 500 and is most likely ET550-R. Short runs on kits that share
+lengths remain the hardest case.
+
 ## Open points
 
 - **Lot-level confirmation.** Lab records of when the ET550-R lot changed in
   2012 would confirm the cause.
-- **Detection speed.** Detection takes about 2–5 minutes per 96-well run. The
-  GUI (`sequence_analyzer.py`) still uses a fixed ladder and channel. To use
-  auto detection there, the result should be cached per run.
+- **Real data from other kits.** Every non-ET550-R result above is
+  synthetic. LIZ, Beckman and MapMarker runs from other labs would test the
+  engine on real ladders.
+- **170611cellid** (see *Known weakness* above).

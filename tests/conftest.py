@@ -24,3 +24,11 @@ for path in (SUBPROJECT, REPO_ROOT):
 if sys.path[0] != str(SUBPROJECT):
     sys.path.remove(str(SUBPROJECT))
     sys.path.insert(0, str(SUBPROJECT))
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _private_cache(tmp_path_factory, monkeypatch):
+    """Keep caches the code writes (e.g. run ladder profiles) out of $HOME."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache")))

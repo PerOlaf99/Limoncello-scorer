@@ -635,11 +635,34 @@ How it works, and what to watch:
   the same well. They are given as 1–4 in the plate's dye order (`--base-order`,
   default `ACTG`), the *same* convention as the basecaller and the picker.
 - **The ladder and its channel are found per run** (`--ladder auto`, the
-  default, and no `--ladder-channel`). Wells spread over the run are fitted in
-  every channel against the bundled ROX kits (ET400-R, ET550-R, ET900-R,
-  ILS 500/600, GeneScan 400HD/500, MapMarker 1000, Beckman SS400) until one
-  kit/channel is clean in six of them (at most 32 wells; fewer than three clean
-  wells names no kit). ROX bleeds into the
+  default, and no `--ladder-channel`; in the GUI, "Automatic" in the sizing
+  dialog). Wells spread over the run are fitted in every channel against
+  every bundled kit (ROX, LIZ, CXR, WEN, TAMRA, WellRED; `python scorer.py
+  ladders` lists them) and every ladder in your own library, until one
+  kit/channel is clean in six of them (at most 32 wells; fewer than three
+  clean wells names no kit; a plate where the leading answer has fewer than
+  six reads its remaining wells first). LIZ kits are tried only in channel 5
+  of a five-dye instrument. On 114 synthetic plates covering all 19 bundled
+  kits (4- and 5-channel, any ladder channel, early-stopping runs, fading and
+  missing bands, busy samples) the kit and channel are right on every plate,
+  and none of 6 no-ladder plates is given one
+  (`tools/fragment_sizing_qc/benchmark_detection.py`).
+- **A run is worked out once.** The run's kit, channel, band template and
+  band corrections (its *ladder profile*) come from all of its wells, so
+  sizing three selected wells gives the same answer as sizing the plate. The
+  profile is cached in `~/.cache/limoncello-scorer/ladders/`, keyed to the
+  run's files and the settings; a changed file or a new engine version
+  redoes it. A 96-well run takes about 10–60 s the first time; the same run again is instant.
+- **Nested kits.** A short kit fits the bands it shares with a longer one
+  (ET550-R inside ET900-R, ILS 500 inside ILS 600, MapMarker 1000 inside
+  1500), so tall peaks after the last matched band count as unexplained, and
+  among kits that explain the channel equally the one matching more bands
+  wins, then the one with fewer bands missing (MapMarker 400 over SS400 when
+  60 and 420 are absent). Kits listing the same lengths over the bands seen
+  size identically and are not reported as doubts; between identical tables
+  the dye decides (LIZ only in channel 5 of a five-dye instrument). A run that
+  stops before a kit's last bands is judged on the bands it reached (at least
+  60 % of the kit). ROX bleeds into the
   neighbouring dye and fits there just as well at a fraction of the height,
   so the channel with the tallest bands wins. A clean fit needs most bands
   found, each predicted from the others to a small part of a band spacing,

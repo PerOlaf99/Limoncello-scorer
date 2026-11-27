@@ -326,7 +326,10 @@ class SizingSetup(tk.Toplevel):
     """Pick a ladder, its channel, the sample channels and the dye-overlap
     correction.  ``result`` is ``{"key", "ladder", "ladder_channel",
     "sample_channel" (None: every channel but the ladder's), "matrix"}``
-    or None."""
+    or None.  ``key`` "auto" / ``ladder`` None: find the kit per run;
+    ``ladder_channel`` None: find the channel per run."""
+
+    AUTO_LABEL = "Automatic — find the size standard in each run (recommended)"
 
     def __init__(self, parent, last: Optional[dict] = None, n_channels: int = 4):
         super().__init__(parent)
@@ -349,8 +352,12 @@ class SizingSetup(tk.Toplevel):
         top = self.n_channels
         ttk.Label(frm, text=f"Ladder channel (1-{top}, physical):").grid(
             row=2, column=0, sticky="w")
-        ttk.Spinbox(frm, from_=1, to=top, width=4, textvariable=self.lch,
-                    state="readonly").grid(row=2, column=1, sticky="w")
+        self.lch_spin = ttk.Spinbox(frm, from_=1, to=top, width=4, textvariable=self.lch,
+                                    state="readonly")
+        self.lch_spin.grid(row=2, column=1, sticky="w")
+        self.lch_auto = tk.BooleanVar(value=last.get("ladder_channel") in (None, 0, "auto"))
+        ttk.Checkbutton(frm, text="find it automatically", variable=self.lch_auto,
+                        command=self._auto_changed).grid(row=2, column=2, sticky="w")
         ttk.Label(frm, text="Sample channels:").grid(row=3, column=0, sticky="w")
         self.ALL = "all but the ladder's"
         sval = last.get("sample_channel")
@@ -377,15 +384,22 @@ class SizingSetup(tk.Toplevel):
         ttk.Button(btn, text="Cancel", command=self.destroy).pack(side=tk.LEFT)
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.destroy())
-        self._fill(select=str(last.get("ladder") or ""))
+        self._fill(select=str(last.get("ladder") or "auto"))
+        self._auto_changed()
         _modal(self, parent)
 
+    def _auto_changed(self):
+        self.lch_spin.configure(state="disabled" if self.lch_auto.get() else "readonly")
+
     def _fill(self, select: str = ""):
-        self._rows = lib.all_ladders()
-        self.box["values"] = [describe(r["ladder"]) for r in self._rows]
+        self._rows = [{"key": "auto", "ladder": None}] + list(lib.all_ladders())
+        self.box["values"] = [self.AUTO_LABEL if r["ladder"] is None else describe(r["ladder"])
+                              for r in self._rows]
         idx = 0
         sel = select.strip().lower()
         for i, r in enumerate(self._rows):
+            if r["ladder"] is None:
+                continue
             if sel and (r["key"] == sel or r["ladder"].name.lower() == sel
                         or r["key"] == lib.key_of(sel)):
                 idx = i
@@ -400,14 +414,18 @@ class SizingSetup(tk.Toplevel):
 
     def _update_hint(self):
         row = self._row()
-        if row:
+        if row and row["ladder"] is None:
+            self.hint.configure(text="Every bundled ROX/LIZ kit is tried in every channel of "
+                                     "wells spread over each run; the run's note says what "
+                                     "was found.")
+        elif row:
             lad = row["ladder"]
             src = f"Source: {lad.source}" if lad.source else ""
             self.hint.configure(text=src[:110])
 
     def _ladder_changed(self, _e=None):
         row = self._row()
-        if row and row["ladder"].default_channel \
+        if row and row["ladder"] is not None and row["ladder"].default_channel \
                 and row["ladder"].default_channel <= self.n_channels:
             self.lch.set(row["ladder"].default_channel)
         self._update_hint()
@@ -424,6 +442,13 @@ class SizingSetup(tk.Toplevel):
         if row is None:
             return
         sch = None if self.sch.get() == self.ALL else int(self.sch.get())
+        lch = None if self.lch_auto.get() else int(self.lch.get())
+        if lch is None:
+            self.result = {"key": row["key"], "ladder": row["ladder"],
+                           "ladder_channel": None, "sample_channel": sch,
+                           "matrix": self.MATRIX.get(self.mat.get(), "auto")}
+            self.destroy()
+            return
         if not (1 <= self.lch.get() <= self.n_channels
                 and (sch is None or 1 <= sch <= self.n_channels)):
             messagebox.showerror("Fragment sizing", "These files have channels "

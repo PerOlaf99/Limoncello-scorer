@@ -5099,7 +5099,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                 "Select one or more wells first.")
             return
         import ladder_gui
-        from fragment_sizing import size_trace
 
         # the last ladder and channels used: a lab sizes plate after plate
         # with the same kit, so retyping them each time is only a chance to
@@ -5140,29 +5139,42 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return
 
         from scorer import sizing_html, write_rows
-        from fragment_sizing import plate_matrix_for, table_rows
-        from analyzer_core import n_channels
+        from fragment_sizing import size_files, table_rows
 
-        results, failures = [], []
+        failures = []
         if not hasattr(self, "_matrix_cache"):
             self._matrix_cache = {}
-        self.status_var.set("Sizing… (finding the dye-overlap correction)")
+        self.status_var.set("Sizing… (finding each run's size standard; the first "
+                            "time a run is sized this reads all of its wells)")
         self.update_idletasks()
-        for path in list(self.selected):
+
+        def load(p):
+            return self._ensure_doc(Path(p))
+
+        # wells grouped by the dye order the GUI uses for their run
+        by_order: dict = {}
+        for p in sorted(Path(x) for x in self.selected):
             try:
-                path = Path(path)
-                matrix = plate_matrix_for([path], prefer=matrix_pref,
-                                          cache=self._matrix_cache)
-                doc = self._ensure_doc(path)
-                chans = [sample_channel] if sample_channel else \
-                    [c for c in range(1, n_channels(doc) + 1) if c != ladder_channel]
-                res = size_trace(doc, ladder, ladder_channel=ladder_channel,
-                                 sample_channels=chans, matrix=matrix,
-                                 base_order=self._doc_order(doc))
-                results.append(res)
-                self._sizing[str(path.resolve())] = res
+                order = self._doc_order(self._ensure_doc(p))
             except Exception as e:                          # noqa: BLE001
-                failures.append(f"{Path(path).name}: {e}")
+                failures.append(f"{p.name}: {e}")
+                continue
+            by_order.setdefault(order, []).append(p)
+        profiles: dict = {}
+        results = []
+        # the same engine as `scorer.py size`: each run's ladder is worked out
+        # once from all its wells (and cached), then the selection is sized
+        for order, paths in by_order.items():
+            results += size_files(
+                paths, ladder if ladder is not None else "auto",
+                ladder_channel=ladder_channel,
+                sample_channels=[sample_channel] if sample_channel else None,
+                base_order=order, matrix=matrix_pref, load=load,
+                matrix_cache=self._matrix_cache, profiles=profiles,
+                on_error=lambda p, e: failures.append(f"{Path(p).name}: {e}"))
+        for res in results:
+            if res.path:
+                self._sizing[str(Path(res.path).resolve())] = res
         if not results:
             messagebox.showerror(
                 "Fragment sizing",
@@ -5194,7 +5206,11 @@ class LimoncelloAnalyzerApp(tk.Tk):
         messagebox.showinfo(
             "Fragment sizing",
             f"Sized {n_peaks} peak(s) across {len(results)} well(s) "
-            f"against {ladder.name} ({n_good} with quality >= 50).\n"
+            f"({n_good} with quality >= 50).\n" +
+            "".join(f"{Path(f).name}: {prof.note or prof.ladder.name + ' in channel ' + str(prof.channel)}"
+                    f" — {prof.wells_clean} of {prof.wells} wells with a clean ladder"
+                    f"{' (cached)' if prof.from_cache else ''}.\n"
+                    for f, prof in profiles.items()) +
             f"Dye-overlap correction: {', '.join(mats) or 'none'}.\n"
             "The sizes are now marked on the traces (Fragment analysis ▸ "
             "Show fragment sizes on traces).\n" +

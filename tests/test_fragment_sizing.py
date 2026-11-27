@@ -10,6 +10,7 @@ Everything here is headless -- ``fragment_sizing`` must stay importable by the
 scorer without Tk or matplotlib.
 """
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -332,3 +333,86 @@ def test_run_leaves_a_ladder_that_matches_its_table_alone():
 def test_too_few_wells_give_no_correction():
     res = _sized_run(fs.BAND_CORRECT_MIN_WELLS - 1, shift={125: 2.5})
     assert res[0].band_corrections == {}
+
+
+# --- the run's ladder: nested kits, profile, cache ----------------------------
+
+LONG = lambda bp: 800.0 + 6.0 * bp - 0.002 * bp ** 2  # noqa: E731  (runs to ~950 bp)
+
+
+def kit_doc(kit, *, seed=0, ladder_ch=1, drop=()):
+    """*kit*'s bands (minus *drop*) in *ladder_ch*, a few alleles in channel 3."""
+    lad = fs.load_ladder(kit)
+    acgt = np.zeros((N_SCANS, 4))
+    put = lambda ch, y: acgt.__setitem__((slice(None), acgt_index_for_channel("ACTG", ch)), y)  # noqa: E731
+    put(ladder_ch, synth_channel([LONG(b) for b in lad.lengths if b not in drop],
+                                 height=1200.0, noise=2.0, seed=seed))
+    for c in (1, 2, 3, 4):
+        if c != ladder_ch:
+            put(c, synth_channel([LONG(b) for b in (130, 250)] if c == 3 else [],
+                                 height=900.0, noise=2.0, seed=seed + c))
+    return FakeDoc(acgt, well=f"W{seed:02d}", path=f"W{seed:02d}.rsd")
+
+
+@pytest.mark.parametrize("true,nested", [("et900r", "et550r"),
+                                         ("promega_ils600", "promega_ils500"),
+                                         ("mapmarker1500", "mapmarker1000")])
+def test_detect_prefers_the_full_kit_over_one_nested_in_it(true, nested):
+    det = fs.detect_ladder([kit_doc(true, seed=s) for s in range(4)],
+                           kits=(true, nested))
+    assert det["ladder"] == true
+
+
+def test_detect_takes_the_kit_without_missing_bands_when_two_explain_the_peaks():
+    # MapMarker 400 is Beckman SS400 without its 60 and 420 bp bands
+    det = fs.detect_ladder([kit_doc("mapmarker400", seed=s) for s in range(4)],
+                           kits=("beckman_ss400", "mapmarker400"))
+    assert det["ladder"] == "mapmarker400"
+    assert det["rivals"] == []
+
+
+def test_run_ladder_round_trips_through_json():
+    prof = fs.RunLadder(ladder=fs.load_ladder("et550r"), channel=3, status="found",
+                        note="n", template={60.0: 1700.0, 75.0: 1800.5},
+                        corrections={125.0: 127.2}, wells=96, wells_clean=40)
+    back = fs.RunLadder.from_json(json.loads(json.dumps(prof.to_json())))
+    assert back.ladder == prof.ladder and back.channel == 3
+    assert back.template == prof.template and back.corrections == prof.corrections
+    assert back.from_cache and back.reliable
+
+
+def _run_on_disk(tmp_path, n=10):
+    docs = {}
+    for s in range(n):
+        p = tmp_path / f"W{s:02d}.rsd"
+        p.write_bytes(b"x")
+        docs[p] = plate_doc(ladder_ch=3, seed=s, stretch=1.0 + 0.01 * (s % 5))
+    calls = []
+
+    def load(p):
+        calls.append(Path(p))
+        return docs[Path(p)]
+    return sorted(docs), load, calls
+
+
+def test_a_selection_is_sized_with_the_whole_runs_ladder(tmp_path):
+    paths, load, _ = _run_on_disk(tmp_path)
+    profs = {}
+    one = fs.size_files(paths[:1], matrix="none", load=load, profiles=profs)
+    prof = profs[str(tmp_path)]
+    assert (prof.ladder.name, prof.channel, prof.wells) == ("MegaBACE ET550-R", 3, 10)
+    assert prof.wells_clean == 10 and prof.template
+    full = fs.size_files(paths, matrix="none", load=load)
+    assert one[0].rows == full[0].rows
+
+
+def test_run_ladder_is_cached_and_redone_when_a_file_changes(tmp_path):
+    paths, load, calls = _run_on_disk(tmp_path)
+    first = fs.find_run_ladder(paths, matrix=None, load=load)
+    assert not first.from_cache and calls
+    calls.clear()
+    again = fs.find_run_ladder(paths, matrix=None, load=load)
+    assert again.from_cache and not calls          # nothing re-read
+    assert (again.ladder, again.channel) == (first.ladder, first.channel)
+    paths[0].write_bytes(b"changed")
+    assert not fs.find_run_ladder(paths, matrix=None, load=load).from_cache

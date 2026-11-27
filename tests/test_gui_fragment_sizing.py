@@ -103,6 +103,9 @@ def _patch_dialogs(monkeypatch, *, ladder="genescan500_rox",
         calls["last"].append(dict(last or {}))
         if askstring_cancel:
             return None
+        if ladder == "auto":
+            return {"key": "auto", "ladder": None, "ladder_channel": channels[0],
+                    "sample_channel": channels[1], "matrix": "auto"}
         return {"key": ladder, "ladder": fs.load_ladder(ladder),
                 "ladder_channel": channels[0], "sample_channel": channels[1],
                 "matrix": "auto"}
@@ -178,3 +181,21 @@ def test_the_last_ladder_and_channels_are_offered_next_time(monkeypatch, stub_ap
     sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
     assert again["last"] == [{"ladder": "et400r", "ladder_channel": 1,
                               "sample_channel": 3, "matrix": "auto"}]
+
+
+def test_automatic_finds_the_kit_and_channel_and_says_so(monkeypatch, stub_app, tmp_path):
+    out = str(tmp_path / "sizes.csv")
+    calls = _patch_dialogs(monkeypatch, ladder="auto", channels=(None, None), out=out)
+    sa.LimoncelloAnalyzerApp.size_selected_fragments(stub_app)
+    assert not calls["error"]
+    res = list(stub_app._sizing.values())
+    assert len(res) == 2
+    # GeneScan 500 ROX and MapMarker 500 share every length; a four-channel
+    # instrument rules out the LIZ twin
+    assert res[0].ladder.lengths == fs.load_ladder("genescan500_rox").lengths
+    assert res[0].ladder.dye.upper() != "LIZ"
+    assert res[0].ladder_channel == 4
+    sized = sorted(r["length_bp"] for r in res[0].rows if r["channel"] == 2)
+    assert all(min(abs(s - t) for s in sized) < 1.5 for t in TRUE_BP)
+    message = calls["info"][-1][1]
+    assert "channel 4" in message and "found automatically" in message
