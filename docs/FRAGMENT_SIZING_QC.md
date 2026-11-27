@@ -213,9 +213,12 @@ catalogue number may not have been logged), the polymer or buffer, or the
 capillary array. The burst of capillary detection errors from September to
 November 2012 fits an array or polymer change best.
 
-Still to check: the `191112_test_av_rox_std_46-56C` runs (Run01–03) look like
-a test of the size standard at several temperatures. Measuring the 125 band in
-them would show directly how much temperature moves it.
+The `191112_test_av_rox_std_46-56C` runs (Run01–03), `221012_rs11_rox_std_test`
+and `260213_rs11730582_ET-ROX` looked like tests of the size standard at other
+temperatures, but they cannot answer the question. Like the other rs11730582
+SNP runs, they are short CTCE runs (50 min, about 4,000–5,400 scans) with only
+a few ROX peaks between scans ~1,600 and ~2,900, not a full ladder.
+Automatic detection rightly finds no size standard in any of the 30 runs.
 
 **Effect.** The sizing curve passes through every anchor. In the later runs it
 is therefore bent by about 2 bp around 125 bp. A sample fragment near 125 bp
