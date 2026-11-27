@@ -36,6 +36,7 @@ if __name__ == "__main__" and "--check" in sys.argv[1:]:
     sys.exit(environment_report())
 
 import argparse
+import os
 from types import SimpleNamespace
 import json
 import random
@@ -324,6 +325,17 @@ CALLER_ALIASES = {"pos_bonus07": "mb1000_accuracy", "pos_profile": "mb1000_lengt
 class LimoncelloAnalyzerApp(tk.Tk):
     def __init__(self, initial_folders: Optional[List[Path]] = None):
         super().__init__()
+        # Tk asks the desktop's input method (IBus, fcitx) for an input
+        # context for every window it creates; with IBus under Wayland each
+        # request is slow, and the main window's ~80 widgets took ~40 s to
+        # show.  Off, they show at once.  Plain keys (æ ø å on a Norwegian
+        # layout) still type; composing with dead keys in text boxes may
+        # not.  LIMONCELLO_INPUT_METHODS=1 keeps the input method.
+        if os.environ.get("LIMONCELLO_INPUT_METHODS", "") != "1":
+            try:
+                self.tk.call("tk", "useinputmethods", "0")
+            except tk.TclError:
+                pass
         self.title("Limoncello CE Analyzer")
         self.minsize(1040, 720)
         self.configure(bg="#F2F4F7")
@@ -369,7 +381,6 @@ class LimoncelloAnalyzerApp(tk.Tk):
         # Data folders is only listed there until it is opened (double-click)
         self.active_runs: set[str] = set()
         self._bg_checked = False
-        self._bg_imgs: List[np.ndarray] = []
         self.settings = AnalysisSettings()
         self.base_order_var = tk.StringVar(value=self.settings.base_order)
         # View options (View menu + the view bar), remembered across sessions.
@@ -1034,6 +1045,13 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                     activestyle="none")
         self.file_list.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
         self.file_list.bind("<<ListboxSelect>>", self.on_file_select)
+        # which kind of click made the selection: a Ctrl/Shift click is a
+        # hand-picked set (shown exactly as picked), a plain click a start
+        # point (the next files fill the remaining graphs)
+        self._list_click = "plain"
+        self.file_list.bind("<Button-1>", lambda e: setattr(self, "_list_click", "plain"))
+        self.file_list.bind("<Control-Button-1>", lambda e: setattr(self, "_list_click", "pick"))
+        self.file_list.bind("<Shift-Button-1>", lambda e: setattr(self, "_list_click", "pick"))
         self.file_list.bind("<space>", lambda e: self.toggle_tour())
         self.file_list.bind("<Down>", self._page_key)
         self.file_list.bind("<Up>", self._page_key)
@@ -1613,7 +1631,10 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.settings_win = win
 
         frm = ttk.Frame(win)
-        frm.pack(fill=tk.BOTH, expand=True)
+        # Packed only when the window is first opened: every shown Tk widget
+        # costs time on some X/Wayland set-ups (~0.3 s each on Per's PC),
+        # hidden or not, and this rarely-used window has ~50 of them.
+        self._settings_frame = frm
         canvas = tk.Canvas(frm, highlightthickness=0, bg="#F2F4F7")
         sb = ttk.Scrollbar(frm, orient=tk.VERTICAL, command=canvas.yview)
         inner = ttk.Frame(canvas)
@@ -1724,6 +1745,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         ttk.Button(bf, text="Close", command=win.withdraw).pack(fill=tk.X, pady=(4, 2))
 
     def open_settings(self):
+        frm = getattr(self, "_settings_frame", None)
+        if frm is not None and not frm.winfo_manager():
+            frm.pack(fill=tk.BOTH, expand=True)
         self.settings_win.deiconify()
         self.settings_win.lift()
 
@@ -2059,6 +2083,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self.selected = [self.files[i] for i in idxs if i < len(self.files)]
         if self.selected:
             self.cycle_pos = 0  # manual selection resets any tour position
+        # Ctrl/Shift-click: exactly the files picked (A01, B03, G05, H12 ...),
+        # one graph each; a plain click starts a run of files instead
+        self._hand_picked = getattr(self, "_list_click", "plain") == "pick"
+        self._list_click = "plain"
+        if self._hand_picked and self.selected:
+            if self.overlay_runs.get():
+                n = len({(self._plate_of(p), self._well_label(p)) for p in self.selected})
+            else:
+                n = len(self.selected)
+            self.n_graphs.set(max(1, min(MAX_GRAPHS, n)))
         self.redraw()
 
     # ------------------------------------------------------------------ page
@@ -2090,6 +2124,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
                 start = m - n
             idxs = list(range(start, start + n))
         self.cycle_pos = idxs[0] if idxs else 0
+        self._hand_picked = False
         self.selected = [self.files[i] for i in idxs]
         self.file_list.selection_clear(0, tk.END)
         for i in idxs:
@@ -5966,41 +6001,43 @@ class LimoncelloAnalyzerApp(tk.Tk):
         axb.tick_params(axis="y", labelsize=6, colors="#555")
 
     def _background_image(self):
-        """Lazy-load every Background*/BG* picture shipped with the app (its own
-        folder) or sitting next to it, and return one at random for the empty
-        view.  Own-folder copies win, so a shared/zipped copy is self-contained."""
+        """A Background*/BG* picture shipped with the app (its own folder) or
+        sitting next to it, chosen at random for the empty view.  Only the
+        chosen picture is read (decoding all of them cost ~2 s at start-up);
+        own-folder copies win, so a shared/zipped copy is self-contained."""
         if not self._bg_checked:
             self._bg_checked = True
-            try:
-                from PIL import Image, ImageOps
-            except Exception:
-                return None
             here = Path(__file__).resolve().parent
-            seen_names = set()
+            seen, self._bg_paths = set(), []
             for root in (here, here.parent):
                 if not root.is_dir():
                     continue
                 for p in sorted(root.iterdir()):
-                    if not p.is_file():
-                        continue
                     stem = p.stem.lower()
-                    if not (stem.startswith("background") or stem.startswith("bg")):
+                    if not (p.is_file() and (stem.startswith("background") or stem.startswith("bg"))):
                         continue
                     if p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"):
                         continue
-                    key = p.name.lower()
-                    if key in seen_names:
-                        continue
-                    seen_names.add(key)
-                    try:
-                        img = ImageOps.exif_transpose(Image.open(p)).convert("RGB")
-                        img.thumbnail((1600, 1600))
-                        self._bg_imgs.append(np.array(img))
-                    except Exception:
-                        continue
-        if not self._bg_imgs:
-            return None
-        return random.choice(self._bg_imgs)
+                    if p.name.lower() not in seen:
+                        seen.add(p.name.lower())
+                        self._bg_paths.append(p)
+        paths = list(getattr(self, "_bg_paths", []))
+        random.shuffle(paths)
+        cache = getattr(self, "_bg_cache", None)
+        if cache is None:
+            cache = self._bg_cache = {}
+        for p in paths:
+            if p in cache:
+                return cache[p]
+            try:
+                from PIL import Image, ImageOps
+                img = ImageOps.exif_transpose(Image.open(p)).convert("RGB")
+                img.thumbnail((1600, 1600))
+                cache[p] = np.array(img)
+                return cache[p]
+            except Exception:
+                continue
+        return None
 
     def _on_right_click(self, _evt=None):
         """Right-click on the plot/axis bars resets the shared view."""
@@ -6082,6 +6119,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             return                      # box being edited, no number yet
         if self._graph_count() == getattr(self, "_graphs_drawn", None):
             return
+        self._hand_picked = False           # more graphs: fill from the selection
         self._save_view_prefs()
         self.redraw()
 
@@ -7049,6 +7087,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
         and every "selected files" action agree."""
         n = self._graph_count()
         self._graphs_drawn = n
+        if getattr(self, "_hand_picked", False):
+            return                      # a hand-picked set stays exactly as picked
         if getattr(self, "genotyping_active", False):
             shown = self._shown_files(n)
         else:
@@ -7076,7 +7116,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         selected than there are graphs -- the files next in the list after
         the last selected one, so raising Graphs adds the next file in line."""
         sel = list(self.selected or [])[:n]
-        if not sel or len(sel) >= n:
+        if not sel or len(sel) >= n or getattr(self, "_hand_picked", False):
             return sel
         keys = {str(Path(p).resolve()) for p in sel}
         idx = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}
@@ -7104,7 +7144,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
             elif len(groups) < n:
                 index[key] = len(groups)
                 groups.append([p])
-        if groups and len(groups) < n:
+        if groups and len(groups) < n and not getattr(self, "_hand_picked", False):
             # more graphs than wells selected: the next wells in the list,
             # each with every run of it, fill the rest
             pos = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}

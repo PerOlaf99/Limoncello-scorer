@@ -219,3 +219,20 @@ def test_a_placement_far_from_the_plate_is_placed_again():
     rows = sg.genotype_plate(arrs, ORDER)
     h1 = np.array([int(r["std_scans"].split("/")[0]) for r in rows.values() if r["std_scans"]])
     assert np.all(np.abs(h1 - np.median(h1)) <= sg.POSITION_WINDOW)
+
+
+def test_a_well_without_its_standard_is_not_called():
+    """Per's "no STD": product but (almost) no standard -> no call; a weak
+    standard keeps the call and flags it."""
+    truth, arrs = _plate(seed=14)
+    col = sg.acgt_index_for_channel(ORDER, 3)
+    rng = np.random.default_rng(14)
+    gone, weak = "A01", "B01"                    # both hom1 wells
+    for w, k in ((gone, 0.002), (weak, 0.12)):
+        a = arrs[w]
+        base = np.median(a[:, col])
+        a[:, col] = base + (a[:, col] - base) * k + rng.normal(0, 5, len(a))   # same noise
+    rows = sg.genotype_plate(arrs, ORDER)
+    assert rows[gone]["call"] == "no-call" and "no internal standard" in rows[gone]["reason"]
+    assert rows[weak]["call"] == "hom1" and "weak-std" in rows[weak]["flags"]
+    assert all(0.5 < rows[w]["std_rel"] < 2 for w in ("C01", "D01", "E01"))

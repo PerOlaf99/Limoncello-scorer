@@ -609,6 +609,15 @@ limoncello-scorer     # the scorer/QC CLI above
 limoncello-basecall   # standalone FASTA/FASTQ basecaller
 ```
 
+**Start-up time and input methods.** Tk asks the desktop's input method
+(IBus, fcitx) for an input context for every window it creates. On a
+Wayland desktop with IBus each request is slow: the main window took about
+40 s to show on Per's PC, and opens in about 2 s without it. So Limoncello
+switches Tk's input methods off.
+- Plain keys still type, including æ, ø and å on a Norwegian layout.
+- Composing characters with dead keys in text boxes may not work.
+- To keep the input method, start with `LIMONCELLO_INPUT_METHODS=1 limoncello`.
+
 Confidence is a documented **heuristic**, not a calibrated probability: 70% of
 the score is how far the minor-allele fraction sits from the call boundary, 30%
 is how well the two alleles stand clear of the noise, and an internal-standard

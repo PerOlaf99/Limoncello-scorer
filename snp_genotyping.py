@@ -71,6 +71,8 @@ ANCHOR_BONUS = 2.0         # placement score for a sample peak beside a homodupl
 PARTNER_BONUS = 1.5        # ...and for the partner heteroduplex where the plate puts it
 MAX_BLEED = 0.5            # never take off more than this x the standard
 POSITION_WINDOW = 450      # scans; Homo1 further than this from the plate's median is re-placed
+STD_ABSENT_REL = 0.05     # standard under this share of the plate's -> no call (Per's "no STD")
+STD_WEAK_REL = 0.22       # ...under this share -> the call is flagged weak-std
 MIN_WELLS_AGREE = 0.20     # share of wells that must reproduce the standard's spacing
 MERGED_BELOW = 8           # scans; a narrower heteroduplex pair is one band
 GAP_SD = 0.18              # log-ratio spread of a well's gaps around the plate's
@@ -143,6 +145,7 @@ class WellCall:
     homo2: float = 0.0
     hetero: List[float] = field(default_factory=list)
     sample_sigma: float = 0.0
+    std_rel: float = float("nan")    # this well's standard vs the plate's typical one
 
     def as_row(self, run=""):
         return {"run": run, "well": self.well, "call": self.call,
@@ -150,7 +153,8 @@ class WellCall:
                 "flags": ",".join(self.flags), "reason": self.reason,
                 "std_scans": "/".join(str(s) for s in self.std_scans),
                 "homo1": round(self.homo1, 1), "homo2": round(self.homo2, 1),
-                "hetero": "/".join(f"{h:.1f}" for h in self.hetero)}
+                "hetero": "/".join(f"{h:.1f}" for h in self.hetero),
+                "std_rel": None if np.isnan(self.std_rel) else round(self.std_rel, 3)}
 
 
 # ---------------------------------------------------------------- the vote
@@ -329,6 +333,14 @@ def unbleed(s, y, bands):
         return s
     k = min(min(ratios), MAX_BLEED)
     return s - k * np.clip(y, 0.0, None)
+
+
+def std_strength(y, bands):
+    """How strong a well's standard is: the median height of its bands (in
+    the standard channel, baseline removed), in noise units."""
+    sig = noise_sigma(y)
+    hs = [max(float(y[max(0, p - 2):p + 3].max()), 0.0) / sig for p in bands]
+    return float(np.median(hs)) if hs else 0.0
 
 
 def _check_offset(ys, ss, gaps, n=32):
@@ -510,10 +522,13 @@ def genotype_plate(docs, base_order="ACTG", is_channel=None, sample_channel=None
                 y, s = chans[w]
                 placed[w] = place_standard(y, noise_sigma(y), ps.gaps, s, noise_sigma(s),
                                            window=(mid - POSITION_WINDOW, mid + POSITION_WINDOW))
+    strength = {}
     for w, (y, s) in chans.items():
         if placed[w]:
+            strength[w] = std_strength(y, placed[w])
             s = unbleed(s, y, placed[w])
         ss[w] = (s, noise_sigma(s), float(s[CUT:].max()))
+    plate_std = float(np.median(list(strength.values()))) if strength else 0.0
     ps.offset = _sample_offset({w: h for w, h in placed.items() if w in ss}, ss)
     ps.note += f"; sample runs {ps.offset:+.0f} scans from the standard"
     g1 = ps.gaps[0]
@@ -540,6 +555,16 @@ def genotype_plate(docs, base_order="ACTG", is_channel=None, sample_channel=None
             else:
                 wc.hetero = [peak(x, max(4, half_h)) for x in hits[2:]]
             call, frac2, flags, reason = call_well(wc.homo1, wc.homo2, wc.hetero)
+            rel = strength.get(w, 0.0) / plate_std if plate_std > 0 else 0.0
+            wc.std_rel = rel
+            if rel < STD_ABSENT_REL:
+                # Per's "no STD": without its own standard a well cannot be
+                # placed or trusted, however clear its product looks
+                call, frac2, flags = "no-call", float("nan"), []
+                reason = (f"no internal standard in this well ({100 * rel:.0f}% of the "
+                          f"plate's typical standard)")
+            elif rel < STD_WEAK_REL:
+                flags = flags + ["weak-std"]
             wc.call, wc.frac2, wc.reason = call, frac2, reason
             wc.flags = flags + [f for f in wc.flags if f not in flags]
         row = wc.as_row(run_name)

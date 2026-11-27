@@ -143,7 +143,7 @@ runs are read from `/run/media/per/78B0C7DE1FA7081C/OY`.
 |---|---|---|
 | `genotyping.auto_genotype`, no marks | 238/1,138 = 21% | – |
 | old plate model seeded by a plate vote | 644/1,138 = 57% | – |
-| **`snp_genotyping`** | **1,078/1,138 = 94.7%** | **963/1,111 = 86.7%** |
+| **`snp_genotyping`** | **1,079/1,138 = 94.8%** | **963/1,111 = 86.7%** |
 
 The call thresholds were chosen with each plate left out in turn, and came out
 the same for 10 of the 12 plates. That leave-one-plate-out score is 94.3%.
@@ -188,8 +188,19 @@ Most of the disagreements left are of four kinds:
   (product beside the standard, not on it) was tried and dropped: it also
   no-called 47 of rs1695 T1's hand-called wells, where the standard is weak
   at 56 °C.
-- **No call when the standard is weak or absent in a well.** Per marks such
-  wells "no STD".
+- **Per-well standard check, done (2026-11-27).** Each well's standard
+  strength is measured relative to the plate's typical standard (`std_rel`
+  in every row).
+  - Under 5%: no-call, "no internal standard in this well". That's Per's
+    "no STD". All 38 wells it no-calls on the 12 plates are wells Per left
+    uncalled.
+  - Under 22%: the call stands but is flagged `weak-std`. 8 of the 19
+    flagged wells disagree with Per, against 5% elsewhere, so the flag
+    points at wells worth a look.
+  - A stricter cut-off would cost as much as it gains: Per calls wells with
+    a weak standard when the product is clear (ABCC2 N11 A01 and B01, with
+    standards at 7% of the plate's).
+  - Calls agree on 1,079/1,138 = 94.8%.
 - **Areas next to heights.** Per's rule is that a correctly drawn area is
   the better measure.
 - **Dye-overlap matrix.** `genotype_plate(..., matrix="peaks")` removes the

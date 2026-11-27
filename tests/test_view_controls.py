@@ -175,6 +175,37 @@ def test_overlay_runs_fills_with_the_next_wells(app):
     assert sel == {str(p) for p in app.selected}
 
 
+def _click_pick(app, idxs):
+    """Ctrl-click each of *idxs* in the file list, as the user does."""
+    app.file_list.selection_clear(0, tk.END)
+    for i in idxs:
+        app._list_click = "pick"
+        app.file_list.selection_set(i)
+        app.on_file_select()
+    app.update()
+
+
+def test_ctrl_click_shows_exactly_the_wells_picked(app):
+    """A01, A03 of Run01 and A02 of Run02, not in running order: exactly
+    those, one graph each, nothing filled in between."""
+    app.n_graphs.set(4)
+    app._graphs_changed()
+    _click_pick(app, [0, 2, 4])
+    assert sorted(app.file_list.curselection()) == [0, 2, 4]
+    assert [str(p) for p in app.selected] == [str(app.files[i]) for i in (0, 2, 4)]
+    assert app._graph_count() == 3 and len(app._plot_axes) == 3
+
+
+def test_plain_click_after_a_pick_fills_again(app):
+    _click_pick(app, [0, 2])
+    app.file_list.selection_clear(0, tk.END)
+    app.file_list.selection_set(1)
+    app._list_click = "plain"
+    app.on_file_select()
+    app.update()
+    assert list(app.file_list.curselection()) == [1, 2]      # Graphs is 2 after the pick
+
+
 def test_wheel_on_the_graph_zooms_x_about_the_cursor(app):
     _select(app, [0], 1)
     ax = app._plot_axes[0]
