@@ -1191,6 +1191,9 @@ class LimoncelloAnalyzerApp(tk.Tk):
         spin.pack(side=tk.LEFT, padx=(2, 4))
         spin.bind("<Return>", lambda e: (self._graphs_changed(), "break")[1])
         spin.bind("<FocusOut>", lambda e: self._graphs_changed())
+        # a number typed into the box takes effect after a short pause, so the
+        # graphs and the selection follow without needing Enter
+        self.n_graphs.trace_add("write", lambda *_: self._graphs_typed())
         self._page_lbl = ttk.Label(bar, text="", foreground="#1E4E8C")
         self._page_lbl.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -6056,9 +6059,29 @@ class LimoncelloAnalyzerApp(tk.Tk):
         except Exception:                                  # noqa: BLE001
             pass
 
+    def _graphs_typed(self):
+        job = getattr(self, "_graphs_job", None)
+        if job is not None:
+            self.after_cancel(job)
+        self._graphs_job = self.after(400, self._graphs_changed)
+
     def _graphs_changed(self):
         """The Graphs box changed: remember it, and show that many files
-        (the next ones in line fill the graphs beyond the selection)."""
+        (the next ones in line fill the graphs beyond the selection, and the
+        file list selects them)."""
+        job = getattr(self, "_graphs_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._graphs_job = None
+        try:
+            int(self.n_graphs.get())
+        except (tk.TclError, ValueError):
+            return                      # box being edited, no number yet
+        if self._graph_count() == getattr(self, "_graphs_drawn", None):
+            return
         self._save_view_prefs()
         self.redraw()
 
@@ -7020,12 +7043,16 @@ class LimoncelloAnalyzerApp(tk.Tk):
         """The file list highlights exactly the files on screen.
 
         With more graphs than files selected, the graphs are filled with the
-        next files in line (see :meth:`_shown_files`); those become the
-        selection too, counted from the first selected file down, so the
-        list, the graphs and every "selected files" action agree."""
-        if self.overlay_runs.get() or getattr(self, "genotyping_active", False):
-            return
-        shown = self._shown_files(self._graph_count())
+        next files in line (see :meth:`_shown_files`; with "Overlay runs" the
+        next wells, each with all its runs); those become the selection too,
+        counted from the first selected file down, so the list, the graphs
+        and every "selected files" action agree."""
+        n = self._graph_count()
+        self._graphs_drawn = n
+        if getattr(self, "genotyping_active", False):
+            shown = self._shown_files(n)
+        else:
+            shown = [p for g in self._view_groups(n) for p in g]
         if not shown:
             return
         keys = [str(Path(p).resolve()) for p in shown]
@@ -7077,6 +7104,20 @@ class LimoncelloAnalyzerApp(tk.Tk):
             elif len(groups) < n:
                 index[key] = len(groups)
                 groups.append([p])
+        if groups and len(groups) < n:
+            # more graphs than wells selected: the next wells in the list,
+            # each with every run of it, fill the rest
+            pos = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}
+            last = max((pos.get(str(Path(p).resolve()), -1) for p in sel), default=-1)
+            for p in self.files[last + 1:]:
+                if len(groups) >= n:
+                    break
+                key = (self._plate_of(p), self._well_label(p))
+                if key in index:
+                    continue
+                index[key] = len(groups)
+                groups.append([q for q in self.files
+                               if (self._plate_of(q), self._well_label(q)) == key])
         return groups
 
     def _overlay_run(self, ax, path, settings, style, primary=None):

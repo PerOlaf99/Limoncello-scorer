@@ -195,3 +195,27 @@ def test_alignment_lines_up_the_sample_across_wells():
     assert np.std(raw) > 50                                # capillaries drift ~100 scans
     assert np.std(lined) < 4                               # one plate axis
     assert abs(np.median(lined) - (ref[0] - 12)) < 4       # beside the reference Homo1
+
+
+def test_failed_pcr_plate_is_all_no_calls():
+    """Standard and dye front in every well, no product anywhere: the
+    standard is found without the sample and nothing is called."""
+    truth, arrs = _plate(seed=12, genotypes=["none"] * 96)
+    # the unused primers carry the sample's dye: the tallest peaks of the plate
+    col = sg.acgt_index_for_channel(ORDER, 2)
+    t = np.arange(N, dtype=float)
+    for a in arrs.values():
+        a[:, col] += _peak(t, 1580, 30000.0) + _peak(t, 1600, 20000.0)
+    rows = sg.genotype_plate(arrs, ORDER)
+    assert "no sample product" in next(iter(rows.values()))["plate_note"]
+    assert all(r["call"] == "no-call" for r in rows.values())
+    assert sum(bool(r["std_scans"]) for r in rows.values()) >= 90
+
+
+def test_a_placement_far_from_the_plate_is_placed_again():
+    """A well whose bands fit the spacing on the dye front as well as on the
+    standard is placed where the rest of the plate has its standard."""
+    truth, arrs = _plate(seed=13)
+    rows = sg.genotype_plate(arrs, ORDER)
+    h1 = np.array([int(r["std_scans"].split("/")[0]) for r in rows.values() if r["std_scans"]])
+    assert np.all(np.abs(h1 - np.median(h1)) <= sg.POSITION_WINDOW)

@@ -145,10 +145,34 @@ def test_last_files_fill_only_as_far_as_the_list_goes(app):
     assert list(app.file_list.curselection()) == [n - 1]
 
 
-def test_overlay_runs_keeps_its_own_selection(app):
+def test_typing_a_graph_count_extends_the_selection(app):
+    """A number typed into the box (no Enter) takes effect after a pause."""
+    import time
+    _select(app, [0], 1)
+    app.n_graphs.set(3)                          # as typing does
+    t = time.time()
+    while time.time() - t < 1.5:
+        app.update()
+        time.sleep(0.05)
+    assert list(app.file_list.curselection()) == [0, 1, 2]
+    assert len(app._plot_axes) == 3
+
+
+def test_overlay_runs_fills_with_the_next_wells(app):
     app.overlay_runs.set(True)
-    _select(app, [0, 1], 2)
-    assert sorted(app.file_list.curselection()) == [0, 1]
+    _select(app, [0], 1)
+    first = app.files[0]
+    app.n_graphs.set(2)
+    app._graphs_changed()
+    app.update()
+    assert len(app._plot_axes) == 2
+    wells = {p.stem for p in app.selected}
+    assert first.stem in wells and len(wells) == 2
+    nxt = (wells - {first.stem}).pop()
+    runs = {p.parent.name for p in app.selected if p.stem == nxt}
+    assert runs == {"PLATE_X_Run01", "PLATE_X_Run02"}    # every run of the added well
+    sel = {str(app.files[i]) for i in app.file_list.curselection()}
+    assert sel == {str(p) for p in app.selected}
 
 
 def test_wheel_on_the_graph_zooms_x_about_the_cursor(app):

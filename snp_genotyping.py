@@ -70,6 +70,7 @@ MIN_OFFSET = 3             # scans; a sample at the standard's own scan is a fro
 ANCHOR_BONUS = 2.0         # placement score for a sample peak beside a homoduplex
 PARTNER_BONUS = 1.5        # ...and for the partner heteroduplex where the plate puts it
 MAX_BLEED = 0.5            # never take off more than this x the standard
+POSITION_WINDOW = 450      # scans; Homo1 further than this from the plate's median is re-placed
 MIN_WELLS_AGREE = 0.20     # share of wells that must reproduce the standard's spacing
 MERGED_BELOW = 8           # scans; a narrower heteroduplex pair is one band
 GAP_SD = 0.18              # log-ratio spread of a well's gaps around the plate's
@@ -97,6 +98,14 @@ def noise_sigma(y: np.ndarray) -> float:
     return float(1.4826 * np.median(np.abs(d - np.median(d))) / np.sqrt(2)) + 1e-9
 
 
+def _strong_peaks_within(y, sig, lo, hi):
+    """The strongest standard-channel peaks between scans *lo* and *hi*."""
+    p, pr = find_peaks(y, prominence=PLACE_PROMINENCE * sig, distance=2)
+    keep = (p >= max(CUT, lo)) & (p <= hi)
+    p, pr = p[keep], pr["prominences"][keep]
+    return np.sort(p[np.argsort(-pr)[:PLACE_PEAKS]])
+
+
 def _strong_peaks(y, sig, prominence, k):
     p, pr = find_peaks(y, prominence=prominence * sig, distance=2)
     keep = p >= CUT
@@ -115,6 +124,7 @@ class PlateStandard:
     wells_total: int
     offset: float = 0.0              # sample scan - standard scan
     note: str = ""
+    anchored: bool = True            # False: found without a sample product (failed PCR?)
 
     @property
     def merged(self) -> bool:
@@ -251,7 +261,7 @@ def _partner(y, p3, he, g3, ref):
     return None
 
 
-def place_standard(y, sig, gaps, s=None, s_sig=1.0) -> Optional[List[int]]:
+def place_standard(y, sig, gaps, s=None, s_sig=1.0, window=None) -> Optional[List[int]]:
     """The standard's bands in one well: [H1, H2, Het1(, Het2)] or None.
 
     Every ordered (H1, H2, Het) set among the well's strongest peaks is
@@ -259,8 +269,12 @@ def place_standard(y, sig, gaps, s=None, s_sig=1.0) -> Optional[List[int]]:
     off the plate's, plus a bonus when the sample sits beside a homoduplex
     and -- on a plate whose heteroduplexes separate -- when the partner
     heteroduplex is where the plate puts it.  A primer or dye front can
-    mimic three bands; it rarely has the pair."""
-    P = _strong_peaks(y, sig, PLACE_PROMINENCE, PLACE_PEAKS)
+    mimic three bands; it rarely has the pair.
+
+    *window* ``(lo, hi)`` limits where Homo1 may be (the plate's position
+    check); the other bands follow it."""
+    P = _strong_peaks(y, sig, PLACE_PROMINENCE, PLACE_PEAKS) if window is None else \
+        _strong_peaks_within(y, sig, window[0], window[1] + float(np.sum(gaps)) + 60)
     if len(P) < 3:
         return None
     H = np.log1p(np.maximum(y[P], 0.0) / sig)
@@ -422,6 +436,7 @@ def find_plate_standard(arrs: Dict[str, np.ndarray], base_order="ACTG",
                + ("merged" if ps.merged else f"{gaps[2]:.0f}")
                + f" scans, found in {n} of {len(arrs)} wells")
     if unanchored:
+        ps.anchored = False
         ps.note += " (no sample product to check it against)"
     return ps
 
@@ -475,13 +490,27 @@ def genotype_plate(docs, base_order="ACTG", is_channel=None, sample_channel=None
             row["plate_note"] = "no internal standard found on this plate"
             out[w] = row
         return out
-    placed, ss = {}, {}
+    placed, ss, chans = {}, {}, {}
     for w, a in arrs.items():
         if a.ndim != 2 or a.shape[0] <= CUT + 100:
             placed[w] = None
             continue
         y = flatten(a[:, ps.is_col]); s = flatten(a[:, ps.sample_col])
+        chans[w] = (y, s)
         placed[w] = place_standard(y, noise_sigma(y), ps.gaps, s, noise_sigma(s))
+    # Position check: the standard drifts from capillary to capillary, but a
+    # placement far from where the rest of the plate has it is a primer or
+    # dye front that happened to fit the spacing.  Such wells are placed
+    # again, searching only near the plate's own position.
+    h1s = [h[0] for h in placed.values() if h]
+    if len(h1s) >= 5:
+        mid = float(np.median(h1s))
+        for w, h in placed.items():
+            if h and abs(h[0] - mid) > POSITION_WINDOW:
+                y, s = chans[w]
+                placed[w] = place_standard(y, noise_sigma(y), ps.gaps, s, noise_sigma(s),
+                                           window=(mid - POSITION_WINDOW, mid + POSITION_WINDOW))
+    for w, (y, s) in chans.items():
         if placed[w]:
             s = unbleed(s, y, placed[w])
         ss[w] = (s, noise_sigma(s), float(s[CUT:].max()))

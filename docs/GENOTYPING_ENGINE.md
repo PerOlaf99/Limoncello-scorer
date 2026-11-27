@@ -143,7 +143,7 @@ runs are read from `/run/media/per/78B0C7DE1FA7081C/OY`.
 |---|---|---|
 | `genotyping.auto_genotype`, no marks | 238/1,138 = 21% | – |
 | old plate model seeded by a plate vote | 644/1,138 = 57% | – |
-| **`snp_genotyping`** | **1,073/1,138 = 94.3%** | **959/1,111 = 86.3%** |
+| **`snp_genotyping`** | **1,078/1,138 = 94.7%** | **963/1,111 = 86.7%** |
 
 The call thresholds were chosen with each plate left out in turn, and came out
 the same for 10 of the 12 plates. That leave-one-plate-out score is 94.3%.
@@ -153,17 +153,17 @@ Calls per plate:
 | Plate | Agree |
 |---|---|
 | rs1695 T5 | 96/96 |
-| ABCC2 N1 | 94/96 |
 | IL10 N2 | 95/96 |
+| ABCC2 N1 | 94/96 |
 | CYBA N1 Run01 | 87/89 |
+| CYBA N1 Run02 | 88/91 |
 | rs1695 T9 | 92/96 |
-| CYBA N2 59 °C | 91/96 |
 | GSTA1 N1 | 90/94 |
-| rs1695 N1 | 90/96 |
+| rs1695 N1 | 91/96 |
 | ABCC2 N11 | 88/96 |
-| CYBA N1 Run02 | 84/91 |
-| CYBA N2 60 °C | 85/96 |
-| rs1695 T1 | 81/96 |
+| CYBA N2 59 °C | 87/96 |
+| rs1695 T1 | 87/96 |
+| CYBA N2 60 °C | 83/96 |
 
 Most of the disagreements left are of four kinds:
 
@@ -177,10 +177,17 @@ Most of the disagreements left are of four kinds:
 
 ## Open
 
-- **A failed-PCR plate (ABCC2 N2 160910) still gets 16 false calls from 96
-  wells.** In those wells the standard is placed on the primer front, where
-  the sample's own primer peaks sit. A position check against the plate's
-  typical standard position should fix it.
+- **Failed-PCR plate, fixed (2026-11-27).** ABCC2 N2 160910 had 16 false
+  calls: in those wells the standard was placed on the primer front, where
+  the sample's own primer peaks sit. Now any well whose Homo1 lands more
+  than 450 scans from the plate's median Homo1 is placed again within that
+  window (`POSITION_WINDOW`; Per's marks show real standards up to ~490
+  scans off, the fronts ~800). The plate now has 1 call left (E09, a large
+  sample peak right at Homo2, possibly a well that worked), and the standard
+  is placed as marked in 84 of 93 wells (was 75). A stricter per-well test
+  (product beside the standard, not on it) was tried and dropped: it also
+  no-called 47 of rs1695 T1's hand-called wells, where the standard is weak
+  at 56 °C.
 - **No call when the standard is weak or absent in a well.** Per marks such
   wells "no STD".
 - **Areas next to heights.** Per's rule is that a correctly drawn area is
