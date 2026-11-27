@@ -544,6 +544,14 @@ matplotlib. It does three jobs:
 
 There is also a third job, still library-only:
 
+- **SNP genotyping with no marks** (`snp_genotyping.genotype_plate`, new,
+  not yet in the GUI) — finds the four-peak internal standard on each plate
+  by a plate vote, places it in every well, and calls hom1 / hom2 / het (with
+  an AI flag and a directional Homo2 fraction). On 12 plates hand-scored by
+  Per (rs1695, ABCC2, CYBA, GSTA1, IL10; 1,138 wells) it agrees with 94%, and
+  it places the standard where Per marked it in 86% of 1,111 marked wells. See
+  [docs/GENOTYPING_ENGINE.md](docs/GENOTYPING_ENGINE.md).
+
 - **Batch auto-genotyping** — **Auto genotyping ▸ Auto-genotype
   sample window…** calls every selected well with no clicking:
   `auto_genotype()` locates the internal-standard quartet with
