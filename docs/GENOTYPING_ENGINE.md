@@ -80,6 +80,40 @@ the standard. The calls are:
    Each row also has `frac2`, the Homo2 share of the homoduplexes. It runs
    from 0 to 1 and is directional, as the LCM work needs.
 
+## Alignment on the standard
+
+`align_plate(arrays, rows, method)` resamples every well onto the plate's
+reference axis, using the standard bands the engine placed in each well. The
+reference is the plate's median position of each band. `align_map` gives a
+single well's mapping. The methods are:
+
+- **piecewise** (default): exact through every band, straight lines between
+  them, and the affine slope beyond them.
+- **affine**: a shift plus a stretch, fitted to the bands.
+- **scale**: Per's 2005 CEQ 8000 normalisation (`KINGSTON/Report.pdf`,
+  "Calculations"): each time divided by the sum of the four standard peak
+  times, so one factor per well.
+
+The check uses things the alignment doesn't fit: how tightly the sample's
+main peak lines up across the hom1 and hom2 wells, and how well three bands
+predict the fourth. Means over the 12 scored plates:
+
+| Method | Sample peak spread (MAD, scans) | 4th band from 3 (median error, scans) |
+|---|---|---|
+| none | 84.9 | – |
+| shift (Homo1 only) | 5.4 | – |
+| scale (2005) | 9.5 | 10.4 |
+| affine | 5.8 | 7.0 |
+| **piecewise** | **2.3** | **6.6** |
+
+A single scale assumes migration time starts at zero. On the MegaBACE plates
+the capillary-to-capillary drift is mostly an offset plus a stretch, so even
+a plain shift beats it. Piecewise wins.
+
+`tools/genotyping_qc/overlay_plate.py RUN OUT.png` draws a plate before and
+after alignment, coloured by call. On T9 the 96 wells go from an 800-scan
+spread to one stack per species.
+
 ## Answer keys
 
 Two files in `limoncello-data/answer_keys/`:
@@ -167,9 +201,6 @@ Most of the disagreements left are of four kinds:
   - **Still worse with the matrix:** rs1695 T1 (71/96 against 83/96), and
     standard placement on several ABCC2 plates (72% overall against 86%).
     So raw traces stay the default.
-- **Alignment on the standard** (Per's elution-time normalisation from a
-  Beckman report, not found yet): warp each well's time axis onto a plate
-  reference through its standard peaks.
 - **GUI:** an "Automatic" mode in Auto genotyping that uses this engine.
 - **More keys:** the old GUI's `genotypes_OY_*.csv` cover about 10 genes but
   are not usable as a key (same positions in every well). More of Per's hand

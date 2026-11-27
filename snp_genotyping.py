@@ -517,3 +517,94 @@ def genotype_plate(docs, base_order="ACTG", is_channel=None, sample_channel=None
         row["plate_note"] = ps.note
         out[w] = row
     return out
+
+
+# ---------------------------------------------------------------- alignment
+# Every well carries the same standard, so its bands give each well's time
+# axis against the plate's.  Capillaries run at slightly different
+# temperatures, and the same fragment then arrives at a different time in
+# each (Per's 2005 CEQ 8000 report: peak elution times normalised to the sum
+# of the four standard peaks).  Aligning on the standard puts every well on
+# one plate axis, so wells overlay and a peak's place is comparable plate-wide.
+ALIGN_METHODS = ("scale", "affine", "piecewise")
+
+
+def _common(std, ref):
+    """The bands a well and the reference share (Hetero2 only when both have it)."""
+    n = min(len(std), len(ref))
+    return np.asarray(std[:n], float), np.asarray(ref[:n], float)
+
+
+def align_map(std, ref, method="piecewise"):
+    """A function taking a well's scans to the plate's reference scans.
+
+    *std*: the well's standard bands; *ref*: the plate's.  *method*:
+    "scale" -- one factor, the ratio of the band times' sums (Per's 2005
+    normalisation); "affine" -- shift and stretch fitted to the bands;
+    "piecewise" -- exact through every band, straight between them and the
+    affine slope beyond them."""
+    s, r = _common(std, ref)
+    if method == "scale":
+        k = r.sum() / s.sum()
+        return lambda t: np.asarray(t, float) * k
+    b, a = np.polyfit(s, r, 1)
+    if method == "affine" or len(s) < 2:
+        return lambda t: a + b * np.asarray(t, float)
+    if method != "piecewise":
+        raise ValueError(f"unknown alignment method {method!r}")
+
+    def f(t):
+        t = np.asarray(t, float)
+        out = np.interp(t, s, r)
+        lo, hi = t < s[0], t > s[-1]
+        out[lo] = r[0] + b * (t[lo] - s[0])
+        out[hi] = r[-1] + b * (t[hi] - s[-1])
+        return out
+    return f
+
+
+def plate_reference(std_by_well):
+    """The plate's reference band positions: the median of each band over the
+    wells where the standard was placed (Hetero2 over the wells that have it)."""
+    sets = [list(v) for v in std_by_well.values() if v]
+    if not sets:
+        return None
+    n = max(len(v) for v in sets)
+    ref = []
+    for k in range(n):
+        vals = [v[k] for v in sets if len(v) > k]
+        if len(vals) < max(3, len(sets) // 3):
+            break
+        ref.append(float(np.median(vals)))
+    return ref
+
+
+def std_from_rows(rows):
+    return {w: [int(x) for x in str(r.get("std_scans") or "").split("/") if x]
+            for w, r in rows.items()}
+
+
+def align_plate(arrs, rows, method="piecewise", ref=None):
+    """Every well's traces resampled onto the plate's reference axis.
+
+    *arrs* is ``{well: (scans, channels)}``, *rows* the :func:`genotype_plate`
+    rows (their ``std_scans``).  Returns ``(aligned, ref)``: ``aligned`` maps
+    well -> array on the reference scan grid (same length as the well's
+    trace), for wells whose standard was placed."""
+    std = std_from_rows(rows)
+    ref = ref or plate_reference(std)
+    out = {}
+    if not ref:
+        return out, ref
+    for w, a in arrs.items():
+        s = std.get(w)
+        if not s or len(s) < 3:
+            continue
+        a = np.asarray(getattr(a, "acgt", a), float)
+        f = align_map(s, ref, method)
+        mapped = f(np.arange(len(a)))              # where each scan lands
+        grid = np.arange(len(a), dtype=float)
+        # resample: value at reference scan g is the trace where f(t) = g
+        out[w] = np.column_stack([np.interp(grid, mapped, a[:, c], left=0.0, right=0.0)
+                                  for c in range(a.shape[1])])
+    return out, ref
