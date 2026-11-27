@@ -142,6 +142,47 @@ The split is not perfectly clean:
 - 090511 Run02 and 050311 are early runs with 125 running −2.5 bp;
 - 280411 sits at +0.9.
 
+**Looking for the cause (instrument, array, ladder lot).** The per-run
+offsets are in `band125_by_run.csv` in the QC folder, together with each
+run's backup folder and the size of its `CDErr.txt` and `TotalErr.txt`
+logs. The lab ran two MegaBACEs, MB1 and MB2. Cell ID was run by Geir Frode
+Øy ("gfø" in run names).
+
+- **Last unshifted run:** `cell_id_12.06.2012` (−0.9 bp). **First shifted
+  run:** `050912_cell_id_gfø` (+1.5 bp). There are no ET550-R runs in between,
+  so the change happened between 12 June and 5 September 2012.
+- **The instrument cannot be read from the data.** The `.rsd` files name only
+  the dye set (GT DyeSet2: ET-ROX, FAM, NED, HEX). The backup folders are
+  mixed: runs named "MB2" (`17022012_MB2_Cell_Id`, `22122011mb2gfø`) sit in
+  `Data_MB1`. Early runs in `Data_MB1` and in `OLD DATA MB2` both sit near
+  0 bp. All later runs (`MB2_ALL_DATA…/ALL RUNs Backup`, `MagaBace2_Paulo`)
+  sit near +2 bp.
+- **Capillary detection errors, September to November 2012.** From 050912
+  (about 25,000 lines in `CDErr.txt`) to 211112, almost every run has
+  10,000–460,000 capillary detection errors. Before that, runs had 2 to a few
+  thousand. From December 2012 the logs are clean again, but the 125 band
+  stays at +2 bp. So the errors do not cause the shift, but they point to a
+  physical change on the instrument in late summer 2012: a new capillary
+  array, polymer or service work.
+- **Run settings** are the same before and after (10 kV, 75 min, 60 °C as
+  set). The actual temperature is not logged. A single band moving while its
+  neighbours stay put fits a change in how that fragment folds, which
+  depends on the polymer, the denaturing conditions and the real
+  temperature, or a ladder lot made differently. A plain temperature or
+  voltage change would shift every band a little.
+
+To settle it, the lab logbook should be checked for 12 June – 5 September
+2012:
+
+1. which MegaBACE (MB1 or MB2) ran cell ID before and after;
+2. capillary array changes or service visits;
+3. polymer (LPA) type or lot, and buffer;
+4. the ET550-R lot.
+
+The best test is the two 2013 runs without the shift, 22032013 (−0.5 bp) and
+220513 (−0.8 bp). Both have clean error logs. If they ran on the other
+instrument, or with an older ladder or polymer lot, that names the cause.
+
 **Effect.** The sizing curve passes through every anchor. In the later runs it
 is therefore bent by about 2 bp around 125 bp. A sample fragment near 125 bp
 is sized up to about 2 bp short of where the neighbouring bands put it; at
