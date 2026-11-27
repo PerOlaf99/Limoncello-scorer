@@ -1861,7 +1861,7 @@ def plate_matrix_for(paths, base_order: Optional[str] = None, prefer: str = "aut
     if cache is not None and key in cache:
         return cache[key]
     chans = {}
-    if prefer in ("auto", "plate"):
+    if prefer in ("auto", "plate", "peaks"):
         for f in sorted(folder.iterdir()):
             if f.suffix in SUPPORTED_EXTS and f.is_file():
                 try:
@@ -1881,7 +1881,7 @@ def plate_matrix_for(paths, base_order: Optional[str] = None, prefer: str = "aut
 # --------------------------------------------------------------------------- #
 # Bump when a change to detection, rescue or band correction would give a
 # different profile, so cached profiles from older code are not reused.
-LADDER_ENGINE_VERSION = 8
+LADDER_ENGINE_VERSION = 9
 
 
 @dataclass
@@ -2139,7 +2139,7 @@ def size_files(paths, ladder="auto", *, ladder_channel: Optional[int] = None,
                matrix_cache: Optional[dict] = None,
                profiles: Optional[dict] = None) -> List[SizingResult]:
     """Size many files, run folder by run folder, each run with its own
-    dye-overlap matrix (*matrix*: "auto" / "run" / "plate" / "none", or a
+    dye-overlap matrix (*matrix*: "auto" / "run" / "plate" / "peaks" / "none", or a
     :class:`spectral.SpectralMatrix`).  *sample_channels* None sizes every
     channel but the ladder's.  *load* (path -> document) defaults to
     :func:`analyzer_core.load_trace`.

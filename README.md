@@ -829,9 +829,30 @@ ladder at 8–14 % in FAM and NED. Uncorrected, every strong peak leaves
 "pull-up" copies that get sized as fragments. Sizing therefore first removes
 the overlap with a spectral matrix (`spectral.py`): the run's own Genetic
 Profiler calibration (`<run>/xtm/xtalk.tdb`), else one measured from the
-plate's single-dye matrix-standard wells, which are found automatically
-(`--matrix auto|run|plate|none`). Measured from GP20's own matrix wells it
-reproduces GP's "Demo" calibration to within 0.012 in every entry. Each
+plate's single-dye matrix-standard wells, which are found automatically,
+else one measured from the run's own sample peaks
+(`--matrix auto|run|plate|peaks|none`). Measured from GP20's own matrix wells it
+reproduces GP's "Demo" calibration to within 0.012 in every entry.
+
+Most runs have neither a calibration nor matrix-standard wells (none of the
+258 OY runs, none of the cell ID runs). For them the matrix comes from the
+run itself (`spectral.matrix_from_peaks`):
+- Around a peak a single dye shows in every channel with the same shape, so
+  that window is rank one, and its leading vector is the dye's signature.
+- Windows where two dyes overlap are skipped.
+- The signatures are grouped and assigned to channels. Mixtures of two dyes
+  (the same fragment in two dyes) lose to the pure dye.
+
+Results:
+- **GP20 demo:** within 0.055 of GP's own calibration (mean 0.017), and it
+  cleans the plate as well (median leftover crosstalk 0.054 against GP's 0.068).
+- **ScoreCard demo plate:** it cleans much better than GP's borrowed matrix
+  (0.043 against 0.104).
+- **15 cell ID runs:** 10% more clean ladder wells (657 → 724), the same
+  sizing error.
+- **24 runs of other kinds:** no false ladders.
+
+Check a run with `tools/fragment_sizing_qc/matrix_check.py RUN_FOLDER`. Each
 channel is then baseline-corrected (running minimum), and sample peaks are
 found 50 units above the baseline (`--min-height`), like GP's peak list.
 

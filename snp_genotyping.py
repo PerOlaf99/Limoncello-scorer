@@ -387,39 +387,27 @@ def find_plate_standard(arrs: Dict[str, np.ndarray], base_order="ACTG",
     for w, a in arrs.items():
         s = flatten(a[:, sample_col])
         ss[w] = (s, noise_sigma(s), float(s[CUT:].max()))
-    # A channel the sample bleeds into carries the sample's own pattern (four
-    # bands in a het), so the standard is looked for first in the channel
-    # least like the sample: the plate's median correlation with it.
-    def likeness(col):
-        cs = []
-        for w, a in list(arrs.items())[::4]:
-            y = flatten(a[:, col])[CUT:]
-            s = ss[w][0][CUT:]
-            if y.std() > 0 and s.std() > 0:
-                cs.append(np.corrcoef(y, s)[0, 1])
-        return float(np.median(cs)) if cs else 1.0
-    order = sorted(is_cols, key=likeness)
-    ys_by = {}
-    for col in order:
-        ys_by[col] = {w: (lambda y: (y, noise_sigma(y)))(flatten(a[:, col]))
-                      for w, a in arrs.items()}
+    ys_by = {col: {w: (lambda y: (y, noise_sigma(y)))(flatten(a[:, col]))
+                   for w, a in arrs.items()} for col in is_cols}
+    # Every channel but the sample's is a candidate.  A candidate counts only
+    # if enough wells agree on its spacing and, with a product to check
+    # against, the sample sits *beside* it: the two dyes run at different
+    # speeds, so a product leads or trails its standard by several scans,
+    # while a bleed copy of the sample, a dye front or leftover crosstalk
+    # sits at the same scan (offset ~0).  Of those, the strongest vote wins.
+    # A plate whose PCR failed has no product to anchor on, so the standard
+    # is then looked for on its own (every well will be a no-call with the
+    # standard still placed).
     best, unanchored = None, False
-    # First with the sample as anchor; a plate whose PCR failed has no
-    # product to anchor on, so the standard is then looked for on its own
-    # (and every well will be a no-call with the standard still placed).
-    # A candidate is kept only if the sample really sits *beside* it: the two
-    # dyes run at different speeds, so a product leads or trails its standard
-    # by several scans, while a dye front or bleed-through shows up in both
-    # channels at the same scan (offset ~0).
     for anchored in (True, False):
-        for col in order:
+        for col in is_cols:
             got = _pattern(ys_by[col], ss, anchored)
             if not got or got[2] < MIN_WELLS_AGREE * len(arrs):
                 continue
             if anchored and abs(_check_offset(ys_by[col], ss, got[1])) < MIN_OFFSET:
                 continue
-            best = (got[0], col, got[1], got[2])
-            break
+            if best is None or got[0] > best[0]:
+                best = (got[0], col, got[1], got[2])
         if best is not None:
             unanchored = not anchored
             break
@@ -438,16 +426,48 @@ def find_plate_standard(arrs: Dict[str, np.ndarray], base_order="ACTG",
     return ps
 
 
+def corrected_plate(docs, base_order="ACTG", matrix="peaks"):
+    """``{well: acgt}`` with the dye overlap removed.
+
+    *matrix* is a :class:`spectral.SpectralMatrix`, or "peaks" to measure the
+    plate's own (:func:`spectral.matrix_from_peaks`).  Needs the documents'
+    physical ``channels``.  Returns ``(arrays, matrix)``."""
+    import spectral
+    chans = {w: np.asarray(d.channels, float) for w, d in docs.items()}
+    m = matrix
+    if isinstance(matrix, str):
+        m = spectral.matrix_from_peaks(chans, cut=spectral.PEAKS_CUT) or spectral.identity(
+            next(iter(chans.values())).shape[1])
+    arrs = {}
+    for w, x in chans.items():
+        y = m.correct(spectral._flat(x))
+        a = np.zeros((len(y), 4))
+        for ch in range(1, 5):
+            a[:, acgt_index_for_channel(base_order, ch)] = y[:, ch - 1]
+        arrs[w] = a
+    return arrs, m
+
+
 def genotype_plate(docs, base_order="ACTG", is_channel=None, sample_channel=None,
-                   run_name="") -> Dict[str, dict]:
+                   run_name="", matrix=None) -> Dict[str, dict]:
     """Genotype every well of one plate with no marks -> {well: row}.
 
     *docs* maps well -> a trace document with an ``acgt`` array (or the array
     itself).  *is_channel* / *sample_channel* (physical 1..4) fix the roles
-    when known; otherwise they are found.  Rows carry ``plate_note``.
+    when known; otherwise they are found.  *matrix* (None: raw traces) is a
+    dye-overlap matrix or "peaks" for the plate's own, applied first (see
+    :func:`corrected_plate`; raw traces still score slightly better, see
+    docs/GENOTYPING_ENGINE.md).  Rows carry ``plate_note``.
     """
-    arrs = {w: np.asarray(getattr(d, "acgt", d), float) for w, d in docs.items()}
+    mnote = ""
+    if matrix is not None:
+        arrs, m = corrected_plate(docs, base_order, matrix)
+        mnote = f"; dye overlap removed ({m.name})"
+    else:
+        arrs = {w: np.asarray(getattr(d, "acgt", d), float) for w, d in docs.items()}
     ps = find_plate_standard(arrs, base_order, is_channel, sample_channel)
+    if ps is not None:
+        ps.note += mnote
     out = {}
     if ps is None:
         for w in arrs:

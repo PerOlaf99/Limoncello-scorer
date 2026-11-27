@@ -151,6 +151,25 @@ Most of the disagreements left are of four kinds:
   wells "no STD".
 - **Areas next to heights.** Per's rule is that a correctly drawn area is
   the better measure.
+- **Dye-overlap matrix.** `genotype_plate(..., matrix="peaks")` removes the
+  plate's own dye overlap first (`spectral.matrix_from_peaks`).
+  - **Channel choice (2026-11-27).** Every channel but the sample's is voted
+    on, and the strongest vote that passes the checks wins. The checks are
+    that enough wells agree and that the sample sits beside the standard
+    (offset ≥ 3 scans, so not a bleed copy or a front). The old rule, "the
+    channel least like the sample first", picked an empty channel on the
+    CYBA plates once the bleed was removed.
+  - **On raw traces** (the default) this gives 93.8% (was 94.3%). On CYBA it
+    now reads the standard's copy in Channel 1, where the standard's dye
+    reads at about 43%.
+  - **On corrected traces** it gives 92.7% (was 79–81%), and it finds the
+    standard on its own channel, Ch3, on every plate.
+  - **Still worse with the matrix:** rs1695 T1 (71/96 against 83/96), and
+    standard placement on several ABCC2 plates (72% overall against 86%).
+    So raw traces stay the default.
+- **Alignment on the standard** (Per's elution-time normalisation from a
+  Beckman report, not found yet): warp each well's time axis onto a plate
+  reference through its standard peaks.
 - **GUI:** an "Automatic" mode in Auto genotyping that uses this engine.
 - **More keys:** the old GUI's `genotypes_OY_*.csv` cover about 10 genes but
   are not usable as a key (same positions in every well). More of Per's hand

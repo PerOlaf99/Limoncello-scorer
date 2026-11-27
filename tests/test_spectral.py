@@ -160,3 +160,55 @@ def test_matches_genetic_profiler_on_gp20(well):
                 tot += 1
                 hit += any(abs(x - s) <= 2 for x in mine)
     assert hit >= 0.85 * tot
+
+
+# --------------------------------------------------------------------------- #
+# the matrix measured from a run's own sample peaks
+# --------------------------------------------------------------------------- #
+def _sample_plate(n_wells=24, seed=3, co_migrate=False):
+    """Wells whose four dyes each carry their own peaks at unrelated scans
+    (and, with *co_migrate*, some peaks shared by two dyes)."""
+    rng = np.random.default_rng(seed)
+    wells = {}
+    for i in range(n_wells):
+        dyes = []
+        for d in range(4):
+            c = rng.uniform(1200, N - 200, 6)
+            dyes.append(gauss(c, h=rng.uniform(800, 4000)))
+        if co_migrate:
+            c = rng.uniform(1200, N - 200, 4)
+            dyes[1] = dyes[1] + gauss(c, h=2000.0)
+            dyes[2] = dyes[2] + gauss(c, h=2000.0)
+        wells[f"W{i:02d}"] = measured(dyes, seed=seed + i)
+    return wells
+
+
+def test_matrix_from_peaks_recovers_the_overlap_even_hex_over_ned():
+    m = sp.matrix_from_peaks(_sample_plate(), cut=1000)
+    assert m is not None
+    assert np.abs(m.m - M_TRUE).max() < 0.05, m.m.round(3)
+    assert "own peaks" in m.source
+
+
+def test_co_migrating_dyes_do_not_make_a_column():
+    """The same fragment in two dyes reads as one muddled signature; the pure
+    dye must still win its channel."""
+    m = sp.matrix_from_peaks(_sample_plate(co_migrate=True), cut=1000)
+    assert np.abs(m.m - M_TRUE).max() < 0.06, m.m.round(3)
+
+
+def test_dye_never_seen_keeps_the_identity_column():
+    rng = np.random.default_rng(5)
+    wells = {}
+    for i in range(24):
+        dyes = [gauss(rng.uniform(1200, N - 200, 6), h=2000.0) for _ in range(3)] + [np.zeros(N)]
+        wells[f"W{i}"] = measured(dyes, seed=i)
+    m = sp.matrix_from_peaks(wells, cut=1000)
+    assert np.allclose(m.m[:, 3], [0, 0, 0, 1])
+    assert np.abs(m.m[:, :3] - M_TRUE[:, :3]).max() < 0.05
+
+
+def test_plate_matrix_falls_back_to_the_runs_own_peaks(tmp_path):
+    m = sp.plate_matrix(tmp_path, _sample_plate(), prefer="auto")
+    assert "own peaks" in m.name
+    assert sp.plate_matrix(tmp_path, _sample_plate(), prefer="none").is_identity()

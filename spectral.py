@@ -140,6 +140,120 @@ def matrix_from_wells(traces_by_dye: Dict[int, Sequence[np.ndarray]],
     return SpectralMatrix(name, m, source=src, dyes=list(dyes))
 
 
+# --------------------------------------------------------------------------- #
+# a matrix from the run's own sample peaks (no calibration, no standard wells)
+# --------------------------------------------------------------------------- #
+PEAK_WINDOW = 4              # scans either side of a peak
+PEAK_RANK1 = 0.985           # share of the window's energy in one dye signature
+PEAK_MIN_SIGMA = 30.0        # peak height in noise units to be used
+PEAK_CLIP = 60000.0          # raw counts; a clipped peak distorts the ratios
+PROFILE_GROUP = 0.20         # L1 distance between signatures of one dye
+MIN_PEAKS_PER_DYE = 15
+PEAKS_CUT = 1000             # scans; skip the injection front
+MIXTURE_PENALTY = 0.5        # off-channel signal: mixtures of two dyes carry more
+OWN_MIN = 0.85               # a dye reads near its strongest in its own channel (HEX: 0.92)
+SIZE_BONUS = 0.1             # per factor ten in peaks: a dye is seen many times
+
+
+def _flat(x: np.ndarray, win: int = 151) -> np.ndarray:
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    return x - uniform_filter1d(minimum_filter1d(x, win, axis=0), win, axis=0)
+
+
+def peak_signatures(channels: np.ndarray, cut: int = 0):
+    """Single-dye signatures of one well's peaks: ``[(profile, weight)]``.
+
+    Around a peak, one dye shows in every channel with the same shape, so
+    the (window x channels) block is rank one and its leading vector is the
+    dye's signature (how strongly each channel sees it).  Where two dyes
+    overlap the block is not rank one and the peak is skipped -- so the
+    sample and the standard, which run a few scans apart, are never mixed."""
+    from scipy.signal import find_peaks
+    raw = np.asarray(channels, float)
+    x = _flat(raw)
+    n = x.shape[1]
+    d = np.diff(x, axis=0)
+    sig = 1.4826 * np.median(np.abs(d - np.median(d, axis=0)), axis=0) / np.sqrt(2) + 1e-9
+    out, seen = [], set()
+    for c in range(n):
+        p, _ = find_peaks(x[:, c], prominence=PEAK_MIN_SIGMA * sig[c], distance=PEAK_WINDOW)
+        for i in p:
+            if i < max(cut, PEAK_WINDOW) or i + PEAK_WINDOW >= len(x) or i in seen:
+                continue
+            if raw[i - 2:i + 3].max() >= PEAK_CLIP:
+                continue
+            blk = x[i - PEAK_WINDOW:i + PEAK_WINDOW + 1]
+            u, s, vt = np.linalg.svd(blk, full_matrices=False)
+            if s[0] ** 2 < PEAK_RANK1 * float((s ** 2).sum()):
+                continue
+            v = vt[0] * np.sign(vt[0][np.argmax(np.abs(vt[0]))])
+            if v.min() < -0.05:
+                continue
+            seen.update(range(i - PEAK_WINDOW, i + PEAK_WINDOW + 1))
+            out.append((np.clip(v, 0, None) / v.max(), float(s[0])))
+    return out
+
+
+def matrix_from_peaks(channels_by_well: Dict[str, np.ndarray], name: str = "from peaks",
+                      cut: int = 0) -> Optional[SpectralMatrix]:
+    """The run's matrix measured from its ordinary wells.
+
+    Every clean single-dye peak on the plate gives a signature; signatures
+    are grouped (one group per dye) and the groups assigned to channels one
+    to one, as for matrix-standard wells (a dye can read stronger in a
+    neighbour's channel than in its own -- HEX in the NED channel).  Each
+    column is the weighted median signature of its group, scaled so its own
+    channel reads 1.  Dyes the run never shows cleanly keep the identity
+    column.  Returns None when no dye has enough clean peaks."""
+    from scipy.optimize import linear_sum_assignment
+    sigs = []
+    for ch in channels_by_well.values():
+        sigs += peak_signatures(ch, cut)
+    if not sigs:
+        return None
+    n = len(sigs[0][0])
+    sigs.sort(key=lambda t: -t[1])
+    groups: List[List[int]] = []
+    centres: List[np.ndarray] = []
+    for k, (v, _w) in enumerate(sigs):
+        for g, cen in zip(groups, centres):
+            if np.abs(cen - v).sum() < PROFILE_GROUP:
+                g.append(k)
+                break
+        else:
+            groups.append([k]); centres.append(v)
+    groups = [g for g in groups if len(g) >= MIN_PEAKS_PER_DYE]
+    if not groups:
+        return None
+    prof = []
+    for g in groups:
+        V = np.array([sigs[k][0] for k in g])
+        prof.append(np.median(V, axis=0))
+    # A group may be two dyes that co-migrate (the same fragment in two
+    # dyes): its signature is the sum of theirs, so it always carries more
+    # off-channel signal than the pure dye.  Score a group for a channel by
+    # its reading there minus half its off-channel total: the purest wins.
+    P = np.array(prof)
+    size = np.log10([len(g) for g in groups])[:, None]
+    score = (P - MIXTURE_PENALTY * (P.sum(axis=1, keepdims=True) - P)
+             + SIZE_BONUS * size)
+    score[P < OWN_MIN] = -9.0
+    rows, cols = linear_sum_assignment(-score)
+    m = np.eye(n)
+    used = []
+    for r, c in zip(rows, cols):
+        if P[r, c] < OWN_MIN:
+            continue
+        col = prof[r] / max(prof[r][c], 1e-9)
+        m[:, c] = col
+        m[c, c] = 1.0
+        used.append(f"Ch{c + 1}: {len(groups[r])} peaks")
+    if not used:
+        return None
+    return SpectralMatrix(name, m, source="measured from the run's own peaks ("
+                          + "; ".join(used) + ")")
+
+
 def identity(n: int = 4) -> SpectralMatrix:
     return SpectralMatrix("none", np.eye(n), source="no correction")
 
@@ -208,8 +322,10 @@ def plate_matrix(run_folder, channels_by_well: Optional[Dict[str, np.ndarray]] =
 
     *prefer*: "run" -- the run's own Genetic Profiler calibration
     (``xtm/xtalk.tdb``, any matrix but the identity); "plate" -- measured
-    from the plate's single-dye wells; "none"; "auto" (default) -- the run's
-    calibration if it has one, else the plate's wells, else none."""
+    from the plate's single-dye wells; "peaks" -- measured from the run's own
+    sample peaks (:func:`matrix_from_peaks`); "none"; "auto" (default) -- the
+    run's calibration if it has one, else the plate's single-dye wells, else
+    the run's own peaks, else none."""
     if prefer in ("auto", "run"):
         for name, m in run_matrices(run_folder).items():
             if not m.is_identity():
@@ -224,5 +340,10 @@ def plate_matrix(run_folder, channels_by_well: Optional[Dict[str, np.ndarray]] =
                                   name=f"{Path(run_folder).name} (plate wells)")
             m.source = "matrix-standard wells " + "; ".join(
                 f"Ch{d + 1}: {', '.join(ws)}" for d, ws in sorted(wells.items()))
+            return m
+    if prefer in ("auto", "peaks") and channels_by_well:
+        m = matrix_from_peaks(channels_by_well, name=f"{Path(run_folder).name} (own peaks)",
+                              cut=PEAKS_CUT)
+        if m is not None:
             return m
     return identity()

@@ -56,7 +56,14 @@ def engine_plate(docs, run):
     return sg.genotype_plate(docs, base_order=BASE_ORDER, run_name=run)
 
 
-ENGINES = {"unseeded": engine_unseeded, "plate": engine_plate}
+def engine_plate_matrix(docs, run):
+    """The plate engine on traces corrected by the run's own matrix."""
+    import snp_genotyping as sg
+    return sg.genotype_plate(docs, base_order=BASE_ORDER, run_name=run, matrix="peaks")
+
+
+ENGINES = {"unseeded": engine_unseeded, "plate": engine_plate,
+           "plate_matrix": engine_plate_matrix}
 
 
 def score_placement(engine, sel):
