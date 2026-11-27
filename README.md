@@ -14,6 +14,7 @@ The full user manual, with quick starts for each job, is in the app:
 | Wells list (.rsd / .scf / .ab1 / .fsa / text) | Yes — multi-select |
 | Number of graphs (1–12) | Yes — Graphs box in the view bar, with a page indicator |
 | Overlay runs of the same well | Yes — view bar / View menu (Run01 solid, Run02 dashed, …) |
+| Plate overlay: every well of a run in one graph, aligned on its internal standard, coloured by call | Yes — View → Plate overlay (aligned on standard)… |
 | Views: raw / processed / base-called / sequencing trace (ESD peaks) / wrap | Yes — View menu |
 | Basecaller versions | `mb1000_accuracy`, `mb1000_length`, `mb4000_accuracy`, `mb4000_length`, `pos_bonus07`, `pos_profile`, `hz_soften`, `raw_peaks` |
 | Advanced params (knobs) | Base calling → ⚙ Basecall settings… (dialog) |
@@ -131,6 +132,19 @@ To try it immediately: **File → Add data folder** →
 - **Overlay runs** draws one graph per well with every run of that plate on top
   (Run01 solid, Run02 dashed, Run03 dotted); run folders of one plate are those
   whose names differ only by a trailing `RunNN`.
+- With more graphs than files selected, the next files in the list fill the
+  graphs. The list then highlights every file on screen, from the first
+  selected down, so the list, the graphs and "selected files" actions agree.
+- **View → Plate overlay (aligned on standard)…** draws every well of a run in
+  one graph:
+  - Each well is put on the plate's own time axis through its four-peak
+    internal standard (`snp_genotyping.align_plate`).
+  - Traces are coloured by the SNP engine's call (hom1, hom2, het, no-call),
+    with the plate's standard bands dotted.
+  - Settings: the alignment (piecewise, affine, Per's 2005 sum-of-band-times
+    scale, or none) and the sample or standard channel.
+  - A well that sits apart from its group stands out; click its trace to
+    show it in the main viewer.
 - The bars still work: bottom = X (scan), right = Y (signal); slide the thumb to
   pan, wheel over a bar to zoom that axis, double-click a bar to reset it. Every
   visible plot moves together.

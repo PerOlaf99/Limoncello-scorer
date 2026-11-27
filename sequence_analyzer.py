@@ -712,6 +712,8 @@ class LimoncelloAnalyzerApp(tk.Tk):
                                command=self._baseline_changed)
         view_m.add_command(label="Baseline window…", command=self._ask_baseline_window)
         view_m.add_command(label="Plate map…", command=self.show_plate_map)
+        view_m.add_command(label="Plate overlay (aligned on standard)…",
+                           command=self.show_plate_overlay)
         view_m.add_cascade(label="Alignment", menu=self._alignment_menu(view_m))
         view_m.add_checkbutton(label="Always show table under graphs",
                                variable=self.always_table,
@@ -1431,6 +1433,38 @@ class LimoncelloAnalyzerApp(tk.Tk):
         self._plate_canvas.bind("<Control-Button-1>", lambda e: self._plate_click(e, add=True))
         win.geometry("640x420")
         self._plate_map_refresh(force=True)
+
+    def show_plate_overlay(self):
+        """Every well of a run in one graph, aligned on its internal standard
+        and coloured by the SNP engine's call (plate_overlay.py)."""
+        import plate_overlay
+        win = getattr(self, "_overlay_win", None)
+        if win is not None and win.exists():
+            win.lift()
+            return
+        if not self._plate_runs():
+            messagebox.showinfo("Plate overlay", "Add a data folder first.")
+            return
+        self._overlay_win = plate_overlay.PlateOverlay(
+            self, runs=self._plate_runs,
+            files_for=lambda run: {p.stem: p for p in self._plate_files(run).values()},
+            load=self._ensure_doc, order_for=self._doc_order,
+            show=self._show_wells, status=self.status_var.set)
+
+    def _show_wells(self, paths):
+        """Show *paths* in the main viewer, selected in the file list."""
+        self.selected = list(paths)
+        try:
+            idx = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}
+            self.file_list.selection_clear(0, tk.END)
+            for p in self.selected:
+                i = idx.get(str(Path(p).resolve()))
+                if i is not None:
+                    self.file_list.selection_set(i)
+                    self.file_list.see(i)
+        except tk.TclError:
+            pass
+        self.redraw()
 
     def _plate_geometry(self, files):
         rows = "ABCDEFGH"
@@ -6775,6 +6809,7 @@ class LimoncelloAnalyzerApp(tk.Tk):
         what makes the two read as one view instead of two lists.
         """
         self._redraw_plots()
+        self._sync_list_to_view()
         self._plate_map_refresh()
         order = self._display_order()
         if order != getattr(self, "_labelled_order", None):
@@ -6980,6 +7015,34 @@ class LimoncelloAnalyzerApp(tk.Tk):
         if re.fullmatch(r"[A-Za-z0-9]+", well or ""):
             return f"$\\bf{{{well}}}$   {str(rest).replace('$', '')}"
         return f"{well}   {str(rest).replace('$', '')}"
+
+    def _sync_list_to_view(self):
+        """The file list highlights exactly the files on screen.
+
+        With more graphs than files selected, the graphs are filled with the
+        next files in line (see :meth:`_shown_files`); those become the
+        selection too, counted from the first selected file down, so the
+        list, the graphs and every "selected files" action agree."""
+        if self.overlay_runs.get() or getattr(self, "genotyping_active", False):
+            return
+        shown = self._shown_files(self._graph_count())
+        if not shown:
+            return
+        keys = [str(Path(p).resolve()) for p in shown]
+        if keys == [str(Path(p).resolve()) for p in (self.selected or [])]:
+            return
+        self.selected = list(shown)
+        try:
+            idx = {str(Path(p).resolve()): i for i, p in enumerate(self.files)}
+            self.file_list.selection_clear(0, tk.END)
+            rows = [idx[k] for k in keys if k in idx]
+            for i in rows:
+                self.file_list.selection_set(i)
+            if rows:
+                self.file_list.see(rows[-1])
+                self.file_list.see(rows[0])
+        except tk.TclError:
+            pass
 
     def _shown_files(self, n):
         """The n files on screen: the selected ones, and -- when fewer are

@@ -121,6 +121,36 @@ def test_more_selected_than_graphs_is_said_not_hidden(app):
     assert "showing 2 of 4" in app._page_lbl.cget("text")
 
 
+def test_the_file_list_highlights_every_file_on_screen(app):
+    """More graphs than files selected: the next files fill the graphs, and
+    the list highlights them all, counted from the first selected down."""
+    _select(app, [1], 3)
+    assert list(app.file_list.curselection()) == [1, 2, 3]
+    assert [str(p) for p in app.selected] == [str(app.files[i]) for i in (1, 2, 3)]
+    assert len(app._plot_axes) == 3
+
+
+def test_graphs_raised_after_selecting_extends_the_highlight(app):
+    _select(app, [0], 1)
+    assert list(app.file_list.curselection()) == [0]
+    app.n_graphs.set(4)
+    app._graphs_changed()
+    app.update()
+    assert list(app.file_list.curselection()) == [0, 1, 2, 3]
+
+
+def test_last_files_fill_only_as_far_as_the_list_goes(app):
+    n = len(app.files)
+    _select(app, [n - 1], 3)
+    assert list(app.file_list.curselection()) == [n - 1]
+
+
+def test_overlay_runs_keeps_its_own_selection(app):
+    app.overlay_runs.set(True)
+    _select(app, [0, 1], 2)
+    assert sorted(app.file_list.curselection()) == [0, 1]
+
+
 def test_wheel_on_the_graph_zooms_x_about_the_cursor(app):
     _select(app, [0], 1)
     ax = app._plot_axes[0]
